@@ -102,7 +102,7 @@ impl SettingsForm {
             &[
                 ("none", "Ask every time"),
                 ("automatic", "Automatic"),
-                ("semi-automatic", "Automatic, then confirm"),
+                ("semi-automatic", "Automatic (confirmation planned)"),
                 ("custom", "Custom folder"),
             ],
             &settings.output.destination_mode,
@@ -680,6 +680,44 @@ impl SettingsForm {
                 toggle.is_active(),
             );
         });
+
+        macro_rules! mark_planned {
+            ($($widget:expr),+ $(,)?) => {
+                $(
+                    $widget.set_sensitive(false);
+                    $widget.set_tooltip_text(Some("Planned — not available in this release"));
+                )+
+            };
+        }
+        mark_planned!(
+            data_directory,
+            debug_logging,
+            expert_controls,
+            av_sync_messages,
+            allow_online_access,
+            minimum_free_space_gib,
+            read_retry_count,
+            read_buffer_mib,
+            single_drive_mode,
+            dvd_structure_protection_method,
+            dvd_processing_mode,
+            create_protection_dumps,
+            java_executable,
+            audio_cd_output_format,
+            audio_cd_secure_extraction,
+            audio_cd_use_disc_metadata,
+            optical_access_provider,
+            expose_to_media_players,
+            streaming_enabled,
+            streaming_address,
+            streaming_port,
+            default_profile,
+            default_selection_rule,
+            output_file_name_template,
+            ffmpeg_executable,
+            ccextractor_executable,
+            temporary_directory,
+        );
 
         let form = Rc::new(Self {
             data_directory,

@@ -49,7 +49,9 @@ pub fn launch(application: &gtk::Application, initial_source: Option<PathBuf>) {
         events,
     };
 
-    controller.bind_controls(application);
+    controller.bind_controls();
+    controller.install_shortcuts(application);
+    controller.bind_window_lifecycle();
     controller.start_event_pump(receiver);
     controller.log_startup();
     if let Some(warning) = settings_warning {
@@ -68,7 +70,7 @@ pub fn launch(application: &gtk::Application, initial_source: Option<PathBuf>) {
 }
 
 impl Controller {
-    fn bind_controls(&self, application: &gtk::Application) {
+    fn bind_controls(&self) {
         {
             let this = self.clone();
             self.ui
@@ -181,21 +183,59 @@ impl Controller {
             let this = self.clone();
             move || this.show_preferences()
         });
+        self.install_action("cancel", {
+            let this = self.clone();
+            move || this.cancel_active()
+        });
         self.install_action("about", {
             let this = self.clone();
             move || this.show_about()
         });
 
         let quit = gio::SimpleAction::new("quit", None);
-        let application = application.clone();
-        quit.connect_activate(move |_, _| application.quit());
+        let window = self.ui.window.clone();
+        quit.connect_activate(move |_, _| window.close());
         self.ui.window.add_action(&quit);
+    }
+
+    fn bind_window_lifecycle(&self) {
+        let this = self.clone();
+        self.ui.window.connect_close_request(move |_| {
+            let mut state = this.state.borrow_mut();
+            if !state.is_busy() {
+                return glib::Propagation::Proceed;
+            }
+            state.close_requested = true;
+            if let Some(cancellation) = &state.cancellation {
+                cancellation.cancel();
+            }
+            drop(state);
+            this.ui.cancel.set_sensitive(false);
+            this.ui.set_status("Cancelling before closing…", None);
+            this.ui
+                .messages
+                .append("Close requested; cancelling the active operation.");
+            glib::Propagation::Stop
+        });
     }
 
     fn install_action(&self, name: &str, handler: impl Fn() + 'static) {
         let action = gio::SimpleAction::new(name, None);
         action.connect_activate(move |_, _| handler());
         self.ui.window.add_action(&action);
+    }
+
+    fn install_shortcuts(&self, application: &gtk::Application) {
+        for (action, accelerators) in [
+            ("win.open-file", &["<Primary>o"][..]),
+            ("win.open-folder", &["<Primary><Shift>o"][..]),
+            ("win.refresh", &["F5"][..]),
+            ("win.preferences", &["<Primary>comma"][..]),
+            ("win.cancel", &["Escape"][..]),
+            ("win.quit", &["<Primary>q"][..]),
+        ] {
+            application.set_accels_for_action(action, accelerators);
+        }
     }
 
     fn log_startup(&self) {
@@ -395,9 +435,6 @@ impl Controller {
             while let Ok(event) = receiver.try_recv() {
                 this.handle_event(event);
             }
-            if this.state.borrow().busy == BusyState::Scanning {
-                this.ui.progress.pulse();
-            }
             glib::ControlFlow::Continue
         });
     }
@@ -414,13 +451,29 @@ impl Controller {
                     .messages
                     .append(&format!("Opening {}.", source.display()));
             }
+            EngineEvent::ScanProgress {
+                current_title,
+                title_count,
+                source_title_id,
+            } => {
+                self.ui.progress.set_fraction(
+                    current_title.saturating_sub(1) as f64 / title_count.max(1) as f64,
+                );
+                self.ui
+                    .progress
+                    .set_text(Some(&format!("Title {current_title} of {title_count}")));
+                self.ui
+                    .progress_title
+                    .set_text(&format!("Reading title {source_title_id}"));
+            }
             EngineEvent::ScanFinished(catalog) => {
                 let mut catalog = *catalog;
                 self.state
                     .borrow()
                     .settings
                     .apply_catalog_defaults(&mut catalog);
-                let output = default_output_directory(&catalog.source.name);
+                let output =
+                    default_output_directory(&catalog.source.name, &self.state.borrow().settings);
                 {
                     let mut state = self.state.borrow_mut();
                     state.expanded_titles.clear();
@@ -432,7 +485,9 @@ impl Controller {
                     state.output_directory = output.clone();
                     state.catalog = Some(catalog);
                 }
-                self.finish_busy();
+                if self.finish_busy() {
+                    return;
+                }
                 let state = self.state.borrow();
                 if let Some(catalog) = &state.catalog {
                     self.ui
@@ -449,8 +504,18 @@ impl Controller {
                 self.render();
             }
             EngineEvent::ScanFailed(error) => {
-                self.finish_busy();
+                if self.finish_busy() {
+                    return;
+                }
                 self.show_error("Could not open source", &error);
+                self.render();
+            }
+            EngineEvent::ScanCancelled => {
+                if self.finish_busy() {
+                    return;
+                }
+                self.ui.messages.append("Source scan cancelled.");
+                self.ui.set_status("Cancelled.", None);
                 self.render();
             }
             EngineEvent::RipStarted { title_count } => {
@@ -500,7 +565,9 @@ impl Controller {
                 saved_titles,
                 destination,
             } => {
-                self.finish_busy();
+                if self.finish_busy() {
+                    return;
+                }
                 let message = format!(
                     "{saved_titles} title(s) saved to {}.",
                     destination.display()
@@ -510,14 +577,21 @@ impl Controller {
                     .set_status("All selected titles were saved.", Some("status-success"));
                 self.show_message("Copy complete", &message, gtk::MessageType::Info);
                 self.render();
+                if self.state.borrow().settings.io.eject_when_finished {
+                    self.eject_selected_disc();
+                }
             }
             EngineEvent::RipFailed(error) => {
-                self.finish_busy();
+                if self.finish_busy() {
+                    return;
+                }
                 self.show_error("Could not save selected titles", &error);
                 self.render();
             }
             EngineEvent::RipCancelled => {
-                self.finish_busy();
+                if self.finish_busy() {
+                    return;
+                }
                 self.ui.messages.append("Save operation cancelled.");
                 self.ui.set_status("Cancelled.", None);
                 self.render();
@@ -525,14 +599,19 @@ impl Controller {
         }
     }
 
-    fn finish_busy(&self) {
-        {
+    fn finish_busy(&self) -> bool {
+        let close_requested = {
             let mut state = self.state.borrow_mut();
             state.busy = BusyState::Idle;
             state.cancellation = None;
-        }
+            state.close_requested
+        };
         self.ui.set_busy(false);
         self.ui.progress_area.set_visible(false);
+        if close_requested {
+            self.ui.window.close();
+        }
+        close_requested
     }
 
     fn handle_content_action(&self, action: ContentAction) {
@@ -596,6 +675,17 @@ impl Controller {
                         stream_index,
                     };
                 }
+                ContentAction::SetOutputFile {
+                    title_id,
+                    output_file,
+                } => {
+                    if let Some(title) = state.catalog.as_mut().and_then(|catalog| {
+                        catalog.titles.iter_mut().find(|item| item.id == title_id)
+                    }) {
+                        title.output_file = output_file;
+                    }
+                    state.selection = Selection::Title(title_id);
+                }
             }
         }
         if let Some((title_id, expanded)) = expanded_change {
@@ -651,12 +741,51 @@ impl Controller {
 
     fn update_rip_sensitivity(&self) {
         let state = self.state.borrow();
-        let selected = state.catalog.as_ref().is_some_and(|catalog| {
-            catalog
-                .titles
+        let selected_titles = state
+            .catalog
+            .as_ref()
+            .map(|catalog| {
+                catalog
+                    .titles
+                    .iter()
+                    .filter(|title| {
+                        title.selected && title.tracks.iter().any(|track| track.selected)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let selected = !selected_titles.is_empty();
+        if selected {
+            let track_count = selected_titles
                 .iter()
-                .any(|title| title.selected && title.tracks.iter().any(|track| track.selected))
-        });
+                .map(|title| title.selected_track_count())
+                .sum::<usize>();
+            let known_bytes = selected_titles
+                .iter()
+                .filter_map(|title| title.size_bytes)
+                .fold(0_u64, u64::saturating_add);
+            let unknown_sizes = selected_titles
+                .iter()
+                .filter(|title| title.size_bytes.is_none())
+                .count();
+            let estimated = selected_titles.iter().any(|title| title.size_is_estimate);
+            let size = if unknown_sizes > 0 {
+                "size partly unknown".to_owned()
+            } else if estimated {
+                format!("about {}", format_bytes(known_bytes))
+            } else {
+                format!("up to {}", format_bytes(known_bytes))
+            };
+            self.ui.sidebar.selection_summary.set_text(&format!(
+                "{} title(s) · {track_count} track(s) · {size}",
+                selected_titles.len()
+            ));
+        } else {
+            self.ui
+                .sidebar
+                .selection_summary
+                .set_text("No titles selected");
+        }
         let has_output = !self.ui.sidebar.output_entry.text().trim().is_empty();
         self.ui
             .sidebar
@@ -809,7 +938,15 @@ fn log_label(level: LogLevel) -> &'static str {
     }
 }
 
-fn default_output_directory(source_name: &str) -> PathBuf {
+fn default_output_directory(source_name: &str, settings: &AppSettings) -> PathBuf {
+    if settings.output.destination_mode == "none" {
+        return PathBuf::new();
+    }
+    if settings.output.destination_mode == "custom"
+        && !settings.output.custom_directory.trim().is_empty()
+    {
+        return PathBuf::from(settings.output.custom_directory.trim());
+    }
     let base = std::env::var_os("XDG_VIDEOS_DIR")
         .map(PathBuf::from)
         .filter(|path| path.is_dir())
@@ -822,4 +959,33 @@ fn default_output_directory(source_name: &str) -> PathBuf {
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| Path::new(".").to_owned());
     base.join(sanitize_file_name(source_name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ask_every_time_starts_without_an_output_directory() {
+        let mut settings = AppSettings::default();
+        settings.output.destination_mode = "none".to_owned();
+
+        assert!(
+            default_output_directory("Movie", &settings)
+                .as_os_str()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn custom_output_directory_is_honoured() {
+        let mut settings = AppSettings::default();
+        settings.output.destination_mode = "custom".to_owned();
+        settings.output.custom_directory = "/media/archive".to_owned();
+
+        assert_eq!(
+            default_output_directory("Movie", &settings),
+            PathBuf::from("/media/archive")
+        );
+    }
 }

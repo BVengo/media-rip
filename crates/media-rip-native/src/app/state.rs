@@ -32,6 +32,7 @@ pub(crate) struct AppState {
     pub settings: AppSettings,
     pub busy: BusyState,
     pub cancellation: Option<CancellationToken>,
+    pub close_requested: bool,
 }
 
 impl AppState {

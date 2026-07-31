@@ -1,10 +1,14 @@
 use std::{
     collections::{HashMap, HashSet},
-    process::Command,
+    io::Read,
+    process::{Command, Output, Stdio},
+    thread,
+    time::Duration,
 };
 
 use media_rip_core::{
-    Chapter, MediaEngineError, StreamKind, Title, Track, util::sanitize_file_name,
+    Chapter, MediaEngineError, StreamKind, Title, Track, ports::CancellationToken,
+    util::sanitize_file_name,
 };
 use serde::Deserialize;
 
@@ -94,7 +98,10 @@ struct ProbePacket {
     dts_time: Option<String>,
 }
 
-pub(crate) fn probe_title(candidate: &ProbeCandidate) -> Result<Title, MediaEngineError> {
+pub(crate) fn probe_title(
+    candidate: &ProbeCandidate,
+    cancellation: &CancellationToken,
+) -> Result<Title, MediaEngineError> {
     let mut command = Command::new("ffprobe");
     command.args([
         "-v",
@@ -107,9 +114,7 @@ pub(crate) fn probe_title(candidate: &ProbeCandidate) -> Result<Title, MediaEngi
     ]);
     command.args(candidate.input.ffmpeg_input_args());
 
-    let output = command
-        .output()
-        .map_err(|error| MediaEngineError::Process(format!("could not run ffprobe: {error}")))?;
+    let output = run_cancellable(command, cancellation)?;
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         return Err(MediaEngineError::Process(if error.is_empty() {
@@ -123,7 +128,8 @@ pub(crate) fn probe_title(candidate: &ProbeCandidate) -> Result<Title, MediaEngi
         .map_err(|error| MediaEngineError::Process(format!("invalid ffprobe metadata: {error}")))?;
     let mut title = title_from_probe(candidate, probe)?;
     if title.size_bytes.is_none()
-        && let Some(size) = estimate_size_from_packet_sample(candidate, title.duration_ms)
+        && let Some(size) =
+            estimate_size_from_packet_sample(candidate, title.duration_ms, cancellation)?
     {
         title.size_bytes = Some(size);
         title.size_is_estimate = true;
@@ -131,9 +137,13 @@ pub(crate) fn probe_title(candidate: &ProbeCandidate) -> Result<Title, MediaEngi
     Ok(title)
 }
 
-fn estimate_size_from_packet_sample(candidate: &ProbeCandidate, duration_ms: u64) -> Option<u64> {
+fn estimate_size_from_packet_sample(
+    candidate: &ProbeCandidate,
+    duration_ms: u64,
+    cancellation: &CancellationToken,
+) -> Result<Option<u64>, MediaEngineError> {
     if duration_ms == 0 {
-        return None;
+        return Ok(None);
     }
     let mut command = Command::new("ffprobe");
     command.args([
@@ -148,12 +158,63 @@ fn estimate_size_from_packet_sample(candidate: &ProbeCandidate, duration_ms: u64
         "json",
     ]);
     command.args(candidate.input.ffmpeg_input_args());
-    let output = command.output().ok()?;
+    let output = run_cancellable(command, cancellation)?;
     if !output.status.success() {
-        return None;
+        return Ok(None);
     }
-    let sample: PacketProbeOutput = serde_json::from_slice(&output.stdout).ok()?;
-    size_from_packet_sample(&sample, duration_ms)
+    let Some(sample) = serde_json::from_slice(&output.stdout).ok() else {
+        return Ok(None);
+    };
+    Ok(size_from_packet_sample(&sample, duration_ms))
+}
+
+fn run_cancellable(
+    mut command: Command,
+    cancellation: &CancellationToken,
+) -> Result<Output, MediaEngineError> {
+    if cancellation.is_cancelled() {
+        return Err(MediaEngineError::Cancelled);
+    }
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| MediaEngineError::Process(format!("could not run ffprobe: {error}")))?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        MediaEngineError::Process("ffprobe output pipe is unavailable".to_owned())
+    })?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| MediaEngineError::Process("ffprobe error pipe is unavailable".to_owned()))?;
+    let stdout_reader = thread::spawn(move || read_bytes(stdout));
+    let stderr_reader = thread::spawn(move || read_bytes(stderr));
+
+    loop {
+        if cancellation.is_cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(MediaEngineError::Cancelled);
+        }
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| MediaEngineError::Process(format!("ffprobe wait failed: {error}")))?
+        {
+            return Ok(Output {
+                status,
+                stdout: stdout_reader.join().unwrap_or_default(),
+                stderr: stderr_reader.join().unwrap_or_default(),
+            });
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn read_bytes(mut reader: impl Read) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let _ = reader.read_to_end(&mut bytes);
+    bytes
 }
 
 fn size_from_packet_sample(sample: &PacketProbeOutput, duration_ms: u64) -> Option<u64> {
@@ -445,6 +506,15 @@ mod tests {
     use crate::source::ProbeInput;
 
     use super::*;
+
+    #[test]
+    fn cancelled_probe_does_not_start_a_process() {
+        let cancellation = CancellationToken::default();
+        cancellation.cancel();
+        let error = run_cancellable(Command::new("program-that-must-not-start"), &cancellation)
+            .unwrap_err();
+        assert!(matches!(error, MediaEngineError::Cancelled));
+    }
 
     #[test]
     fn parses_ffprobe_title_and_track_metadata() {

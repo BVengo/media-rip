@@ -8,13 +8,14 @@ pub(crate) struct Sidebar {
     pub info: InfoPanel,
     pub output_entry: gtk::Entry,
     pub browse_output: gtk::Button,
+    pub selection_summary: gtk::Label,
     pub rip: gtk::Button,
 }
 
 impl Sidebar {
     pub fn new() -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        root.set_size_request(350, -1);
+        root.set_size_request(300, -1);
 
         let info = InfoPanel::new();
         info.root.set_vexpand(true);
@@ -39,6 +40,12 @@ impl Sidebar {
         output_panel.add_css_class("output-panel");
         root.append(&output_panel);
 
+        let selection_summary = gtk::Label::new(Some("No titles selected"));
+        selection_summary.set_xalign(0.5);
+        selection_summary.add_css_class("row-detail");
+        selection_summary.set_wrap(true);
+        root.append(&selection_summary);
+
         let rip = gtk::Button::new();
         rip.add_css_class("make-mkv-button");
         rip.add_css_class("suggested-action");
@@ -57,6 +64,7 @@ impl Sidebar {
             info,
             output_entry,
             browse_output,
+            selection_summary,
             rip,
         }
     }

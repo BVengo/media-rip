@@ -34,6 +34,7 @@ impl MediaEngine for OpenMediaEngine {
                     level: media_rip_core::LogLevel::Warning,
                     message: "Source scan cancelled.".to_owned(),
                 });
+                let _ = events.send(EngineEvent::ScanCancelled);
             }
             Err(error) => {
                 let _ = events.send(EngineEvent::ScanFailed(error.to_string()));

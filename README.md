@@ -20,6 +20,7 @@ It is not a wrapper around MakeMKV. The project never invokes, links to, or requ
 - Lossless stream-copy remuxing into MKV through the open-source FFmpeg toolchain.
 - Live title progress, byte count, estimated rate/time remaining, cancellation, and safe partial
   output handling.
+- Editable per-title output names and whole-job destination preflight before writing begins.
 - Media-file inputs, useful both directly and for developing without an optical drive.
 
 The current release is deliberately a remuxer: selected streams are copied without re-encoding.

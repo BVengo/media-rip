@@ -34,8 +34,14 @@ pub enum EngineEvent {
     ScanStarted {
         source: PathBuf,
     },
+    ScanProgress {
+        current_title: usize,
+        title_count: usize,
+        source_title_id: String,
+    },
     ScanFinished(Box<MediaCatalog>),
     ScanFailed(String),
+    ScanCancelled,
     RipStarted {
         title_count: usize,
     },

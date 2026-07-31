@@ -10,7 +10,7 @@ use media_rip_core::{
     util::{format_bytes, format_duration},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ContentAction {
     SelectTitle(u32),
     SelectTrack {
@@ -26,6 +26,10 @@ pub(crate) enum ContentAction {
         title_id: u32,
         stream_index: u32,
         selected: bool,
+    },
+    SetOutputFile {
+        title_id: u32,
+        output_file: String,
     },
 }
 
@@ -279,6 +283,21 @@ fn title_row(
     labels.append(&name_line);
     labels.append(&detail);
     row.append(&labels);
+
+    let output_file = gtk::Entry::builder()
+        .text(&title.output_file)
+        .width_chars(18)
+        .max_width_chars(28)
+        .tooltip_text("Output file name")
+        .build();
+    let callback = on_action.clone();
+    output_file.connect_changed(move |entry| {
+        callback(ContentAction::SetOutputFile {
+            title_id,
+            output_file: entry.text().to_string(),
+        });
+    });
+    row.append(&output_file);
 
     let click = gtk::GestureClick::new();
     let callback = on_action.clone();

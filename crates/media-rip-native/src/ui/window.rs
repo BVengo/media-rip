@@ -40,11 +40,11 @@ impl MainWindow {
         let working_area = gtk::Paned::new(gtk::Orientation::Horizontal);
         working_area.set_wide_handle(true);
         working_area.set_resize_start_child(true);
-        working_area.set_shrink_start_child(false);
+        working_area.set_shrink_start_child(true);
         working_area.set_resize_end_child(false);
-        working_area.set_shrink_end_child(false);
+        working_area.set_shrink_end_child(true);
         let content_panel = super::components::panel("Content", &content.stack);
-        content_panel.set_size_request(600, -1);
+        content_panel.set_size_request(420, -1);
         working_area.set_start_child(Some(&content_panel));
         working_area.set_end_child(Some(&sidebar.root));
         working_area.set_position(730);

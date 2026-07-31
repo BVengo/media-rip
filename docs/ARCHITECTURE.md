@@ -49,6 +49,10 @@ throughout the UI. An encoding feature belongs beside `rip/`, selected via a fut
 GTK callbacks do not perform media I/O. The controller starts engine work on background threads and
 polls a typed event channel on the GTK main loop.
 
+Every scan or rip must emit exactly one terminal event: finished, failed, or cancelled. Frontends
+use that invariant to leave their busy state safely. External media processes must be polled with a
+`CancellationToken`; blocking `Command::output` calls are not suitable for long-running probes.
+
 ## Scan flow
 
 ```text
@@ -76,7 +80,9 @@ read the same metadata through `libdvdread`. Blu-ray folders enumerate `.mpls` p
 Each selected title becomes one FFmpeg process with explicit stream maps and `-c copy`. FFmpeg
 writes a uniquely named hidden `.part` file beside the destination. A successful process is renamed
 to the requested MKV; cancellation or failure removes only the partial file created by the current
-job. Existing destination files are rejected unless a future caller explicitly opts into overwrite.
+job. Before the first process starts, the complete request is checked for stale title/stream IDs,
+duplicate output names, existing destinations, and output-directory writability. Existing files are
+rejected unless a future caller explicitly opts into overwrite.
 
 ## Extension rules
 

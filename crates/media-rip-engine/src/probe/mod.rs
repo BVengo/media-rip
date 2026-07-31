@@ -94,9 +94,15 @@ pub(crate) fn scan_source(
                 candidate.source_title_id
             ),
         );
+        let _ = events.send(EngineEvent::ScanProgress {
+            current_title: index + 1,
+            title_count: candidates.len(),
+            source_title_id: candidate.source_title_id.clone(),
+        });
 
-        match ffprobe::probe_title(candidate) {
+        match ffprobe::probe_title(candidate, cancellation) {
             Ok(title) => titles.push(title),
+            Err(MediaEngineError::Cancelled) => return Err(MediaEngineError::Cancelled),
             Err(error) => {
                 errors.push(error.to_string());
                 log(
@@ -114,6 +120,16 @@ pub(crate) fn scan_source(
             .cloned()
             .unwrap_or_else(|| "no readable titles were found".to_owned());
         return Err(MediaEngineError::Process(details));
+    }
+    if !errors.is_empty() {
+        log(
+            events,
+            LogLevel::Warning,
+            format!(
+                "{} candidate title(s) were skipped because they could not be read.",
+                errors.len()
+            ),
+        );
     }
 
     for (index, title) in titles.iter_mut().enumerate() {
