@@ -1,0 +1,14 @@
+[package]
+name = "media-rip-engine"
+description = "Open media discovery and Matroska remux engine for MediaRip"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+media-rip-core = { path = "../media-rip-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+

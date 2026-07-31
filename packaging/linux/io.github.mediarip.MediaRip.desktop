@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=MediaRip
+GenericName=Optical Media Ripper
+Comment=Preserve DVD and Blu-ray titles as Matroska files
+Exec=media-rip
+Icon=io.github.mediarip.MediaRip
+Terminal=false
+Categories=AudioVideo;Video;
+Keywords=DVD;Blu-ray;MKV;Matroska;Rip;Backup;
+StartupNotify=true

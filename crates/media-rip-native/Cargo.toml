@@ -1,0 +1,18 @@
+[package]
+name = "media-rip"
+description = "A native open-source DVD and Blu-ray to MKV desktop application"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+gtk.workspace = true
+media-rip-core = { path = "../media-rip-core" }
+media-rip-engine = { path = "../media-rip-engine" }
+serde.workspace = true
+serde_json.workspace = true
+
+[[bin]]
+name = "media-rip"
+path = "src/main.rs"
