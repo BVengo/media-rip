@@ -33,11 +33,12 @@ Only domain types belong here. A format-specific FFmpeg flag or GTK widget is a 
 - `source/`: lightweight source classification plus DVD and Blu-ray title discovery.
 - `probe/`: FFprobe JSON conversion into core domain models.
 - `process.rs`: supervised child-process lifetime, graceful cancellation, and forced termination.
-- `rip/`: FFmpeg stream-copy execution, progress parsing, cancellation, and output finalization.
+- `rip/`: profile-aware FFmpeg execution, compatibility checks, progress parsing, cancellation, and
+  output finalization.
 - `engine.rs`: the small adapter implementing the core `MediaEngine` port.
 
 Format additions should normally add a source module and an input specification, not branch
-throughout the UI. An encoding feature belongs beside `rip/`, selected via a future output profile.
+throughout the UI. Encoding belongs beside `rip/` and is selected through a core output profile.
 
 ### `media-rip-native`
 
@@ -82,12 +83,14 @@ read the same metadata through `libdvdread`. Blu-ray folders enumerate `.mpls` p
 
 ## Rip flow and output safety
 
-Each selected title becomes one FFmpeg process with explicit stream maps and `-c copy`. FFmpeg
-writes a uniquely named hidden `.part` file beside the destination. A successful process is renamed
-to the requested MKV; cancellation or failure removes only the partial file created by the current
-job. Before the first process starts, the complete request is checked for stale title/stream IDs,
-duplicate output names, existing destinations, and output-directory writability. Existing files are
-rejected unless a future caller explicitly opts into overwrite.
+Each selected item becomes one FFmpeg process with explicit stream maps and a typed output profile.
+The default profile uses `-c copy`; encoding profiles name their codecs and container explicitly.
+FFmpeg writes a uniquely named hidden `.part` file beside the destination. A successful process is
+renamed to the requested output; cancellation or failure removes only the partial file created by
+the current job. Before the first process starts, the complete request is checked for profile/track
+compatibility, encoder availability, stale title/stream IDs, duplicate output names, existing
+destinations, and output-directory writability. Existing files are rejected unless a future caller
+explicitly opts into overwrite.
 
 ## Extension rules
 

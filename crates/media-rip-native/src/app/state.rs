@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, path::PathBuf};
 
-use media_rip_core::{MediaCatalog, ports::CancellationToken};
+use media_rip_core::{MediaCatalog, OutputProfile, ports::CancellationToken};
 
 use super::AppSettings;
 
@@ -29,6 +29,7 @@ pub(crate) struct AppState {
     pub expanded_titles: BTreeSet<u32>,
     pub selection: Selection,
     pub output_directory: PathBuf,
+    pub output_profile: OutputProfile,
     pub settings: AppSettings,
     pub busy: BusyState,
     pub cancellation: Option<CancellationToken>,

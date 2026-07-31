@@ -9,13 +9,58 @@ use std::{
 };
 
 use media_rip_core::{
-    DiscKind, EngineEvent, LogLevel, MediaEngineError, RipProgress, RipRequest, RipSelection,
-    Title, ports::CancellationToken, util::ensure_mkv_extension,
+    DiscKind, EngineEvent, LogLevel, MediaEngineError, OutputProfile, RipProgress, RipRequest,
+    RipSelection, Title, ports::CancellationToken, util::ensure_extension,
 };
 
 use crate::process::ProcessSupervisor;
 
-pub(super) fn remux_title(
+pub(super) fn validate_profile_available(profile: OutputProfile) -> Result<(), MediaEngineError> {
+    let encoders = required_encoders(profile);
+    if encoders.is_empty() {
+        return Ok(());
+    }
+    let output = Command::new("ffmpeg")
+        .args(["-hide_banner", "-encoders"])
+        .output()
+        .map_err(|error| {
+            MediaEngineError::Process(format!("could not inspect FFmpeg encoders: {error}"))
+        })?;
+    if !output.status.success() {
+        return Err(MediaEngineError::Process(
+            "FFmpeg could not report its available encoders".to_owned(),
+        ));
+    }
+    let listing = String::from_utf8_lossy(&output.stdout);
+    for encoder in encoders {
+        let available = listing.lines().any(|line| {
+            line.split_whitespace()
+                .nth(1)
+                .is_some_and(|name| name == *encoder)
+        });
+        if !available {
+            return Err(MediaEngineError::MissingTool(format!(
+                "FFmpeg encoder {encoder}, required by {}",
+                profile.display_name()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn required_encoders(profile: OutputProfile) -> &'static [&'static str] {
+    match profile {
+        OutputProfile::PreserveMkv => &[],
+        OutputProfile::H264Mp4 => &["libx264", "aac"],
+        OutputProfile::H265Mkv => &["libx265"],
+        OutputProfile::Av1Webm => &["libaom-av1", "libopus"],
+        OutputProfile::AudioFlac => &["flac"],
+        OutputProfile::AudioOpus => &["libopus"],
+        OutputProfile::AudioAac => &["aac"],
+    }
+}
+
+pub(super) fn process_title(
     request: &RipRequest,
     title: &Title,
     selection: &RipSelection,
@@ -23,7 +68,7 @@ pub(super) fn remux_title(
     events: &Sender<EngineEvent>,
     cancellation: &CancellationToken,
 ) -> Result<(), MediaEngineError> {
-    let output_name = ensure_mkv_extension(&selection.output_file);
+    let output_name = ensure_extension(&selection.output_file, request.output_profile.extension());
     let destination = request.output_directory.join(output_name);
     if destination.exists() && !request.overwrite {
         return Err(MediaEngineError::Other(format!(
@@ -39,17 +84,9 @@ pub(super) fn remux_title(
     for stream in &selection.stream_indices {
         command.args(["-map", &format!("0:{stream}")]);
     }
-    command.args([
-        "-map_chapters",
-        "0",
-        "-c",
-        "copy",
-        "-progress",
-        "pipe:1",
-        "-nostats",
-        "-f",
-        "matroska",
-    ]);
+    command.args(["-map_chapters", "0"]);
+    add_output_profile(&mut command, request.output_profile);
+    command.args(["-progress", "pipe:1", "-nostats"]);
     if request.overwrite {
         command.arg("-y");
     } else {
@@ -61,8 +98,9 @@ pub(super) fn remux_title(
     let _ = events.send(EngineEvent::Log {
         level: LogLevel::Info,
         message: format!(
-            "Saving title {} as {}.",
+            "Processing title {} with {} as {}.",
             title.source_title_id,
+            request.output_profile.display_name(),
             destination.display()
         ),
     });
@@ -156,6 +194,89 @@ pub(super) fn remux_title(
     }
 }
 
+fn add_output_profile(command: &mut Command, profile: OutputProfile) {
+    match profile {
+        OutputProfile::PreserveMkv => {
+            command.args(["-c", "copy", "-f", "matroska"]);
+        }
+        OutputProfile::H264Mp4 => {
+            command.args([
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-crf",
+                "20",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-c:s",
+                "mov_text",
+                "-movflags",
+                "+faststart",
+                "-f",
+                "mp4",
+            ]);
+        }
+        OutputProfile::H265Mkv => {
+            command.args([
+                "-c:v", "libx265", "-preset", "medium", "-crf", "22", "-c:a", "copy", "-c:s",
+                "copy", "-c:t", "copy", "-f", "matroska",
+            ]);
+        }
+        OutputProfile::Av1Webm => {
+            command.args([
+                "-c:v",
+                "libaom-av1",
+                "-crf",
+                "30",
+                "-b:v",
+                "0",
+                "-cpu-used",
+                "4",
+                "-c:a",
+                "libopus",
+                "-b:a",
+                "128k",
+                "-c:s",
+                "webvtt",
+                "-f",
+                "webm",
+            ]);
+        }
+        OutputProfile::AudioFlac => {
+            command.args([
+                "-vn",
+                "-c:a",
+                "flac",
+                "-compression_level",
+                "8",
+                "-f",
+                "flac",
+            ]);
+        }
+        OutputProfile::AudioOpus => {
+            command.args([
+                "-vn", "-c:a", "libopus", "-b:a", "128k", "-vbr", "on", "-f", "opus",
+            ]);
+        }
+        OutputProfile::AudioAac => {
+            command.args([
+                "-vn",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-movflags",
+                "+faststart",
+                "-f",
+                "mp4",
+            ]);
+        }
+    }
+}
+
 fn add_input(command: &mut Command, request: &RipRequest, title: &Title) {
     let source = &request.catalog.source;
     match source.kind {
@@ -176,7 +297,7 @@ fn add_input(command: &mut Command, request: &RipRequest, title: &Title) {
             command.arg("-i");
             command.arg(format!("bluray:{}", source.path.display()));
         }
-        DiscKind::Directory | DiscKind::File | DiscKind::Unknown => {
+        DiscKind::AudioCd | DiscKind::Directory | DiscKind::File | DiscKind::Unknown => {
             command.arg("-i").arg(&source.path);
         }
     }
@@ -265,5 +386,28 @@ mod tests {
                 .to_string_lossy()
                 .starts_with(".Movie.mkv.")
         );
+    }
+
+    #[test]
+    fn profile_arguments_select_the_requested_container_and_codecs() {
+        let mut command = Command::new("ffmpeg");
+        add_output_profile(&mut command, OutputProfile::H264Mp4);
+        let arguments = command
+            .get_args()
+            .map(|value| value.to_string_lossy())
+            .collect::<Vec<_>>();
+        assert!(arguments.windows(2).any(|pair| pair == ["-c:v", "libx264"]));
+        assert!(arguments.windows(2).any(|pair| pair == ["-f", "mp4"]));
+    }
+
+    #[test]
+    fn every_encoding_profile_declares_required_encoders() {
+        assert!(required_encoders(OutputProfile::PreserveMkv).is_empty());
+        for profile in OutputProfile::ALL
+            .into_iter()
+            .filter(|profile| *profile != OutputProfile::PreserveMkv)
+        {
+            assert!(!required_encoders(profile).is_empty());
+        }
     }
 }

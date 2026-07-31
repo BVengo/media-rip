@@ -7,8 +7,8 @@ use std::{
 };
 
 use media_rip_core::{
-    EngineEvent, LogLevel, MediaEngineError, RipRequest, ports::CancellationToken,
-    util::ensure_mkv_extension,
+    EngineEvent, LogLevel, MediaEngineError, OutputProfile, RipRequest, StreamKind, Track,
+    ports::CancellationToken, util::ensure_extension,
 };
 
 pub(crate) fn run(
@@ -26,6 +26,7 @@ pub(crate) fn run(
             "ffmpeg (from the open-source FFmpeg project)".to_owned(),
         ));
     }
+    ffmpeg::validate_profile_available(request.output_profile)?;
 
     fs::create_dir_all(&request.output_directory).map_err(|error| {
         MediaEngineError::Other(format!(
@@ -64,7 +65,7 @@ pub(crate) fn run(
                 ))
             })?;
 
-        ffmpeg::remux_title(
+        ffmpeg::process_title(
             &request,
             title,
             selection,
@@ -112,9 +113,10 @@ fn preflight(request: &RipRequest) -> Result<(), MediaEngineError> {
             )));
         }
 
-        let destination = request
-            .output_directory
-            .join(ensure_mkv_extension(&selection.output_file));
+        let destination = request.output_directory.join(ensure_extension(
+            &selection.output_file,
+            request.output_profile.extension(),
+        ));
         if !destinations.insert(destination.clone()) {
             return Err(MediaEngineError::Other(format!(
                 "more than one selected title would be saved as {}",
@@ -127,8 +129,66 @@ fn preflight(request: &RipRequest) -> Result<(), MediaEngineError> {
                 destination.display()
             )));
         }
+        validate_profile_tracks(
+            request.output_profile,
+            &selection
+                .stream_indices
+                .iter()
+                .filter_map(|index| title.tracks.iter().find(|track| track.index == *index))
+                .collect::<Vec<_>>(),
+            &title.name,
+        )?;
     }
     Ok(())
+}
+
+fn validate_profile_tracks(
+    profile: OutputProfile,
+    tracks: &[&Track],
+    title_name: &str,
+) -> Result<(), MediaEngineError> {
+    if profile.is_audio_only() {
+        if tracks.len() != 1 || tracks[0].kind != StreamKind::Audio {
+            return Err(MediaEngineError::Other(format!(
+                "{} requires exactly one selected audio track for the {} profile",
+                title_name,
+                profile.display_name()
+            )));
+        }
+        return Ok(());
+    }
+
+    if matches!(profile, OutputProfile::H264Mp4 | OutputProfile::Av1Webm) {
+        if let Some(track) = tracks
+            .iter()
+            .find(|track| matches!(track.kind, StreamKind::Attachment | StreamKind::Data))
+        {
+            return Err(MediaEngineError::Other(format!(
+                "{} cannot contain the selected {} track in the {} profile",
+                title_name,
+                track.kind.display_name().to_lowercase(),
+                profile.display_name()
+            )));
+        }
+        if let Some(track) = tracks.iter().find(|track| {
+            track.kind == StreamKind::Subtitle && !is_text_subtitle_codec(&track.codec)
+        }) {
+            return Err(MediaEngineError::Other(format!(
+                "{} subtitle tracks cannot be converted to {}; unselect the {} subtitle or choose MKV",
+                track.codec,
+                profile.display_name(),
+                title_name
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn is_text_subtitle_codec(codec: &str) -> bool {
+    matches!(
+        codec.to_ascii_lowercase().as_str(),
+        "ass" | "ssa" | "subrip" | "srt" | "text" | "mov_text" | "webvtt"
+    )
 }
 
 fn validate_output_directory(directory: &std::path::Path) -> Result<(), MediaEngineError> {
@@ -248,6 +308,40 @@ mod tests {
             ],
             output_directory: PathBuf::from("unused"),
             overwrite: false,
+            output_profile: OutputProfile::PreserveMkv,
         }
+    }
+
+    #[test]
+    fn audio_profiles_require_one_audio_track() {
+        let video = Track {
+            index: 0,
+            kind: StreamKind::Video,
+            codec: "h264".into(),
+            codec_long_name: None,
+            language: None,
+            name: None,
+            properties: Vec::new(),
+            selected: true,
+        };
+        let error = validate_profile_tracks(OutputProfile::AudioFlac, &[&video], "Movie")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("exactly one selected audio track"));
+    }
+
+    #[test]
+    fn portable_video_profiles_reject_bitmap_subtitles() {
+        let subtitle = Track {
+            index: 2,
+            kind: StreamKind::Subtitle,
+            codec: "hdmv_pgs_subtitle".into(),
+            codec_long_name: None,
+            language: None,
+            name: None,
+            properties: Vec::new(),
+            selected: true,
+        };
+        assert!(validate_profile_tracks(OutputProfile::H264Mp4, &[&subtitle], "Movie").is_err());
     }
 }

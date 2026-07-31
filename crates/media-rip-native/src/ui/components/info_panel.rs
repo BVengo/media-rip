@@ -55,9 +55,9 @@ impl InfoPanel {
                     return;
                 };
                 let mut fields = vec![
-                    InfoField::new("Type", "Title"),
+                    InfoField::new("Type", "Media item"),
                     InfoField::new("Name", &title.name),
-                    InfoField::new("Source title ID", &title.source_title_id),
+                    InfoField::new("Source item ID", &title.source_title_id),
                     InfoField::new("Duration", format_duration(title.duration_ms)),
                     InfoField::new("Chapters", title.chapters.len().to_string()),
                 ];

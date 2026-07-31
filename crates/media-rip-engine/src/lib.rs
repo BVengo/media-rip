@@ -1,4 +1,4 @@
-//! Media probing and stream-copy engine.
+//! Media probing, remuxing, and encoding engine.
 //!
 //! This crate intentionally has no dependency on MakeMKV or `makemkvcon`.
 

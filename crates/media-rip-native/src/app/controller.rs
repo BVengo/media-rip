@@ -10,9 +10,9 @@ use std::{
 
 use gtk::{gio, glib, prelude::*};
 use media_rip_core::{
-    EngineEvent, LogLevel, MediaEngine, RipRequest,
+    EngineEvent, LogLevel, MediaEngine, OutputProfile, RipRequest,
     ports::CancellationToken,
-    util::{format_bytes, format_duration, format_rate, sanitize_file_name},
+    util::{ensure_extension, format_bytes, format_duration, format_rate, sanitize_file_name},
 };
 use media_rip_engine::{OpenMediaEngine, tool_availability};
 
@@ -155,6 +155,13 @@ impl Controller {
                 .sidebar
                 .output_entry
                 .connect_changed(move |_| this.update_rip_sensitivity());
+        }
+        {
+            let this = self.clone();
+            self.ui
+                .sidebar
+                .output_profile
+                .connect_selected_notify(move |_| this.change_output_profile());
         }
 
         self.install_action("open-file", {
@@ -305,7 +312,7 @@ impl Controller {
         };
         let dialog = gtk::FileChooserNative::builder()
             .title(if directory {
-                "Open DVD or Blu-ray folder"
+                "Open media or disc folder"
             } else {
                 "Open media file or disc image"
             })
@@ -318,9 +325,10 @@ impl Controller {
 
         if !directory {
             let filter = gtk::FileFilter::new();
-            filter.set_name(Some("Video media and disc images"));
+            filter.set_name(Some("Media files and disc images"));
             for pattern in [
                 "*.iso", "*.ISO", "*.mkv", "*.mp4", "*.m2ts", "*.mts", "*.vob", "*.avi", "*.mov",
+                "*.flac", "*.mp3", "*.m4a", "*.opus", "*.ogg", "*.wav",
             ] {
                 filter.add_pattern(pattern);
             }
@@ -376,7 +384,7 @@ impl Controller {
         if output_text.is_empty() {
             self.show_error(
                 "Output folder required",
-                "Choose where the selected MKV files should be saved.",
+                "Choose where the selected output files should be saved.",
             );
             return;
         }
@@ -384,7 +392,9 @@ impl Controller {
         let Some(catalog) = self.state.borrow().catalog.clone() else {
             return;
         };
-        let request = RipRequest::from_catalog(catalog, output_directory, false);
+        let output_profile = self.state.borrow().output_profile;
+        let request =
+            RipRequest::from_catalog_with_profile(catalog, output_directory, false, output_profile);
         if request.selections.is_empty() {
             self.show_error(
                 "Nothing selected",
@@ -399,7 +409,7 @@ impl Controller {
         {
             self.show_error(
                 "Title has no selected tracks",
-                "Expand each selected title and select at least one video or audio track.",
+                "Expand each selected item and select at least one track.",
             );
             return;
         }
@@ -414,9 +424,9 @@ impl Controller {
         self.ui.set_busy(true);
         self.ui.progress.set_fraction(0.0);
         self.ui.progress.set_text(Some("0%"));
-        self.ui.progress_title.set_text("Preparing selected titles");
+        self.ui.progress_title.set_text("Preparing selected items");
         self.ui.progress_detail.set_text("");
-        self.ui.set_status("Saving selected titles…", None);
+        self.ui.set_status("Saving selected items…", None);
 
         let engine = self.engine.clone();
         let (events, receiver) = mpsc::channel();
@@ -512,12 +522,28 @@ impl Controller {
             }
             EngineEvent::ScanFinished(catalog) => {
                 let mut catalog = *catalog;
+                let output_profile =
+                    OutputProfile::from_id(&self.state.borrow().settings.advanced.default_profile)
+                        .unwrap_or_default();
                 self.state
                     .borrow()
                     .settings
                     .apply_catalog_defaults(&mut catalog);
-                let output =
-                    default_output_directory(&catalog.source.name, &self.state.borrow().settings);
+                for title in &mut catalog.titles {
+                    title.output_file =
+                        ensure_extension(&title.output_file, output_profile.extension());
+                }
+                let audio_only = catalog.titles.iter().all(|title| {
+                    title
+                        .tracks
+                        .iter()
+                        .all(|track| track.kind != media_rip_core::StreamKind::Video)
+                });
+                let output = default_output_directory(
+                    &catalog.source.name,
+                    audio_only,
+                    &self.state.borrow().settings,
+                );
                 {
                     let mut state = self.state.borrow_mut();
                     state.expanded_titles.clear();
@@ -527,6 +553,7 @@ impl Controller {
                         state.selection = Selection::Source;
                     }
                     state.output_directory = output.clone();
+                    state.output_profile = output_profile;
                     state.catalog = Some(catalog);
                 }
                 if self.finish_busy() {
@@ -543,6 +570,12 @@ impl Controller {
                     .sidebar
                     .output_entry
                     .set_text(&output.to_string_lossy());
+                self.ui.sidebar.output_profile.set_selected(
+                    OutputProfile::ALL
+                        .iter()
+                        .position(|profile| *profile == output_profile)
+                        .unwrap_or_default() as u32,
+                );
                 self.ui
                     .set_status("Source opened successfully.", Some("status-success"));
                 self.render();
@@ -565,7 +598,7 @@ impl Controller {
             EngineEvent::RipStarted { title_count } => {
                 self.ui
                     .messages
-                    .append(&format!("Saving {title_count} selected title(s)."));
+                    .append(&format!("Saving {title_count} selected item(s)."));
             }
             EngineEvent::RipProgress(progress) => {
                 self.ui.progress.set_fraction(progress.fraction);
@@ -573,7 +606,7 @@ impl Controller {
                     .progress
                     .set_text(Some(&format!("{:.0}%", progress.fraction * 100.0)));
                 self.ui.progress_title.set_text(&format!(
-                    "Saving title {} of {} — {}",
+                    "Saving item {} of {} — {}",
                     progress.current_title, progress.title_count, progress.title_name
                 ));
                 let mut details = vec![
@@ -612,13 +645,10 @@ impl Controller {
                 if self.finish_busy() {
                     return;
                 }
-                let message = format!(
-                    "{saved_titles} title(s) saved to {}.",
-                    destination.display()
-                );
+                let message = format!("{saved_titles} item(s) saved to {}.", destination.display());
                 self.ui.messages.append(&message);
                 self.ui
-                    .set_status("All selected titles were saved.", Some("status-success"));
+                    .set_status("All selected items were saved.", Some("status-success"));
                 self.show_message("Copy complete", &message, gtk::MessageType::Info);
                 self.render();
                 if self.state.borrow().settings.io.eject_when_finished {
@@ -629,7 +659,7 @@ impl Controller {
                 if self.finish_busy() {
                     return;
                 }
-                self.show_error("Could not save selected titles", &error);
+                self.show_error("Could not save selected items", &error);
                 self.render();
             }
             EngineEvent::RipCancelled => {
@@ -813,7 +843,14 @@ impl Controller {
                 .filter(|title| title.size_bytes.is_none())
                 .count();
             let estimated = selected_titles.iter().any(|title| title.size_is_estimate);
-            let size = if unknown_sizes > 0 {
+            let profile = state.output_profile;
+            let size = if profile != OutputProfile::PreserveMkv {
+                if unknown_sizes > 0 {
+                    "output size unknown".to_owned()
+                } else {
+                    format!("{} source · output size unknown", format_bytes(known_bytes))
+                }
+            } else if unknown_sizes > 0 {
                 "size partly unknown".to_owned()
             } else if estimated {
                 format!("about {}", format_bytes(known_bytes))
@@ -821,20 +858,50 @@ impl Controller {
                 format!("up to {}", format_bytes(known_bytes))
             };
             self.ui.sidebar.selection_summary.set_text(&format!(
-                "{} title(s) · {track_count} track(s) · {size}",
+                "{} item(s) · {track_count} track(s) · {size}",
                 selected_titles.len()
             ));
         } else {
             self.ui
                 .sidebar
                 .selection_summary
-                .set_text("No titles selected");
+                .set_text("No items selected");
         }
         let has_output = !self.ui.sidebar.output_entry.text().trim().is_empty();
         self.ui
             .sidebar
             .rip
             .set_sensitive(!state.is_busy() && selected && has_output);
+    }
+
+    fn change_output_profile(&self) {
+        if self.state.borrow().is_busy() {
+            return;
+        }
+        let index = self.ui.sidebar.output_profile.selected() as usize;
+        let profile = OutputProfile::ALL.get(index).copied().unwrap_or_default();
+        {
+            let mut state = self.state.borrow_mut();
+            state.output_profile = profile;
+            if let Some(catalog) = &mut state.catalog {
+                for title in &mut catalog.titles {
+                    title.output_file = ensure_extension(&title.output_file, profile.extension());
+                }
+            }
+        }
+        self.ui
+            .sidebar
+            .profile_description
+            .set_text(profile.description());
+        self.ui
+            .sidebar
+            .rip_label
+            .set_text(if profile.is_audio_only() {
+                "Rip audio"
+            } else {
+                "Start rip"
+            });
+        self.render();
     }
 
     fn choose_output_directory(&self) {
@@ -940,7 +1007,7 @@ impl Controller {
             .modal(true)
             .program_name("MediaRip")
             .version(env!("CARGO_PKG_VERSION"))
-            .comments("A native, open-source DVD and Blu-ray to Matroska ripper.")
+            .comments("A native, open-source optical media ripper and transcoder.")
             .license_type(gtk::License::Gpl30)
             .build();
         dialog.set_authors(&["MediaRip contributors"]);
@@ -994,7 +1061,11 @@ fn log_label(level: LogLevel) -> &'static str {
     }
 }
 
-fn default_output_directory(source_name: &str, settings: &AppSettings) -> PathBuf {
+fn default_output_directory(
+    source_name: &str,
+    audio_only: bool,
+    settings: &AppSettings,
+) -> PathBuf {
     if settings.output.destination_mode == "none" {
         return PathBuf::new();
     }
@@ -1003,13 +1074,19 @@ fn default_output_directory(source_name: &str, settings: &AppSettings) -> PathBu
     {
         return PathBuf::from(settings.output.custom_directory.trim());
     }
-    let base = std::env::var_os("XDG_VIDEOS_DIR")
+    let xdg_variable = if audio_only {
+        "XDG_MUSIC_DIR"
+    } else {
+        "XDG_VIDEOS_DIR"
+    };
+    let home_folder = if audio_only { "Music" } else { "Videos" };
+    let base = std::env::var_os(xdg_variable)
         .map(PathBuf::from)
         .filter(|path| path.is_dir())
         .or_else(|| {
             std::env::var_os("HOME")
                 .map(PathBuf::from)
-                .map(|home| home.join("Videos"))
+                .map(|home| home.join(home_folder))
                 .filter(|path| path.is_dir())
         })
         .or_else(|| std::env::current_dir().ok())
@@ -1027,7 +1104,7 @@ mod tests {
         settings.output.destination_mode = "none".to_owned();
 
         assert!(
-            default_output_directory("Movie", &settings)
+            default_output_directory("Movie", false, &settings)
                 .as_os_str()
                 .is_empty()
         );
@@ -1040,7 +1117,7 @@ mod tests {
         settings.output.custom_directory = "/media/archive".to_owned();
 
         assert_eq!(
-            default_output_directory("Movie", &settings),
+            default_output_directory("Movie", false, &settings),
             PathBuf::from("/media/archive")
         );
     }

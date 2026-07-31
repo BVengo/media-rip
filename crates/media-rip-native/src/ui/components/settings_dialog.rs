@@ -219,7 +219,15 @@ impl SettingsForm {
         );
 
         let default_profile = combo(
-            &[("copy-mkv", "Source quality · MKV")],
+            &[
+                ("copy-mkv", "MKV — preserve original tracks"),
+                ("h264-mp4", "MP4 — H.264 + AAC"),
+                ("h265-mkv", "MKV — H.265 video"),
+                ("av1-webm", "WebM — AV1 + Opus"),
+                ("flac-audio", "FLAC — lossless audio"),
+                ("opus-audio", "Opus — compact audio"),
+                ("aac-audio", "M4A — AAC audio"),
+            ],
             &settings.advanced.default_profile,
         );
         let default_selection_rule = entry(
@@ -552,7 +560,7 @@ impl SettingsForm {
         );
         tools.append(&path_setting_row(
             "FFmpeg executable",
-            "Used for stream-copy remuxing and future encoding profiles.",
+            "Used for stream-copy remuxing and encoding profiles.",
             &ffmpeg_executable,
             dialog,
             "Choose FFmpeg executable",
@@ -711,7 +719,6 @@ impl SettingsForm {
             streaming_enabled,
             streaming_address,
             streaming_port,
-            default_profile,
             default_selection_rule,
             output_file_name_template,
             ffmpeg_executable,

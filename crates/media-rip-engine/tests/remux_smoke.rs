@@ -6,7 +6,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use media_rip_core::{EngineEvent, MediaEngine, RipRequest, ports::CancellationToken};
+use media_rip_core::{
+    EngineEvent, MediaEngine, OutputProfile, RipRequest, ports::CancellationToken,
+};
 use media_rip_engine::{OpenMediaEngine, tool_availability};
 
 #[test]
@@ -59,7 +61,7 @@ fn scans_and_remuxes_a_small_media_source() {
     assert_eq!(catalog.titles.len(), 1);
     assert_eq!(catalog.titles[0].tracks.len(), 2);
 
-    let request = RipRequest::from_catalog(catalog, output.clone(), false);
+    let request = RipRequest::from_catalog(catalog.clone(), output.clone(), false);
     let (rip_tx, rip_rx) = mpsc::channel();
     engine.rip(request, rip_tx, CancellationToken::default());
     assert!(
@@ -85,6 +87,39 @@ fn scans_and_remuxes_a_small_media_source() {
         .expect("ffprobe should inspect the result");
     assert!(probe.status.success());
     assert!(String::from_utf8_lossy(&probe.stdout).contains("matroska"));
+
+    if encoder_available("libx264") && encoder_available("aac") {
+        let request = RipRequest::from_catalog_with_profile(
+            catalog,
+            output.clone(),
+            false,
+            OutputProfile::H264Mp4,
+        );
+        let (encode_tx, encode_rx) = mpsc::channel();
+        engine.rip(request, encode_tx, CancellationToken::default());
+        assert!(
+            encode_rx
+                .try_iter()
+                .any(|event| matches!(event, EngineEvent::RipFinished { .. }))
+        );
+        assert!(
+            output.join("source_t00.mp4").is_file(),
+            "the encoded MP4 should be finalized"
+        );
+    }
+}
+
+fn encoder_available(name: &str) -> bool {
+    Command::new("ffmpeg")
+        .args(["-hide_banner", "-encoders"])
+        .output()
+        .is_ok_and(|output| {
+            String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+                line.split_whitespace()
+                    .nth(1)
+                    .is_some_and(|encoder| encoder == name)
+            })
+        })
 }
 
 struct TestDirectory(PathBuf);

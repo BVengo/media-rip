@@ -260,14 +260,6 @@ impl AppSettings {
         let had_multiple_titles = catalog.titles.len() > 1;
         let source_kind = catalog.source.kind;
         let duplicate_representatives = duplicate_representatives(catalog);
-        if self.bluray.playlist_policy == "unique" {
-            catalog.titles.retain(|title| {
-                title.duplicate_key.as_ref().is_none_or(|key| {
-                    duplicate_representatives.get(key) == Some(&title.source_title_id)
-                })
-            });
-        }
-
         let minimum_duration_ms = u64::from(self.output.minimum_title_seconds) * 1_000;
         for title in &mut catalog.titles {
             let is_duplicate_representative = title.duplicate_key.as_ref().is_none_or(|key| {
@@ -275,6 +267,7 @@ impl AppSettings {
             });
             let policy_includes_title = match self.bluray.playlist_policy.as_str() {
                 "main" if source_kind == media_rip_core::DiscKind::BluRay => title.is_main_title,
+                "all" => true,
                 _ => is_duplicate_representative,
             };
             let include_title = policy_includes_title
@@ -541,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    fn all_playlist_policy_selects_only_one_exact_duplicate() {
+    fn all_playlist_policy_selects_every_exact_duplicate() {
         let mut settings = AppSettings::default();
         settings.bluray.playlist_policy = "all".into();
         let mut catalog = catalog_with_duplicate_playlists();
@@ -550,28 +543,23 @@ mod tests {
 
         assert_eq!(catalog.titles.len(), 3);
         assert!(catalog.titles[0].selected);
-        assert!(!catalog.titles[1].selected);
-        assert!(catalog.titles[1].tracks.iter().all(|track| !track.selected));
+        assert!(catalog.titles[1].selected);
+        assert!(catalog.titles[1].tracks.iter().all(|track| track.selected));
         assert!(catalog.titles[2].selected);
     }
 
     #[test]
-    fn unique_playlist_policy_keeps_one_exact_duplicate_representative() {
+    fn unique_playlist_policy_shows_duplicates_but_selects_one_representative() {
         let mut settings = AppSettings::default();
         settings.bluray.playlist_policy = "unique".into();
         let mut catalog = catalog_with_duplicate_playlists();
 
         settings.apply_catalog_defaults(&mut catalog);
 
-        assert_eq!(
-            catalog
-                .titles
-                .iter()
-                .map(|title| title.source_title_id.as_str())
-                .collect::<Vec<_>>(),
-            ["00014", "00111"]
-        );
-        assert!(catalog.titles.iter().all(|title| title.selected));
+        assert_eq!(catalog.titles.len(), 3);
+        assert!(catalog.titles[0].selected);
+        assert!(!catalog.titles[1].selected);
+        assert!(catalog.titles[2].selected);
     }
 
     #[test]
@@ -582,16 +570,10 @@ mod tests {
 
         settings.apply_catalog_defaults(&mut catalog);
 
-        assert_eq!(
-            catalog
-                .titles
-                .iter()
-                .map(|title| title.source_title_id.as_str())
-                .collect::<Vec<_>>(),
-            ["00026", "00111"]
-        );
-        assert!(catalog.titles[0].is_main_title);
-        assert!(catalog.titles[0].selected);
+        assert_eq!(catalog.titles.len(), 3);
+        assert!(!catalog.titles[0].selected);
+        assert!(catalog.titles[1].is_main_title);
+        assert!(catalog.titles[1].selected);
     }
 
     #[test]

@@ -1,10 +1,10 @@
 # MediaRip
 
-MediaRip is a native Rust desktop application for inspecting DVDs, Blu-rays, disc folders, and
-ordinary media files, then preserving selected streams in Matroska (`.mkv`) files. Its desktop
-workflow intentionally follows the familiar MakeMKV layout: source selection, a hierarchical
-title/track panel, context-sensitive information, output-folder controls, a large **Make MKV**
-action, progress, messages, and status.
+MediaRip is a native Rust desktop application for inspecting optical media, disc folders, and
+ordinary media files, then preserving or encoding selected tracks. Its desktop workflow uses
+source selection, a hierarchical item/track panel, context-sensitive information, output format
+and processing controls, progress, messages, and status. DVD and Blu-ray reading is available now;
+secure Audio CD extraction is the next input family planned for the same workflow.
 
 It is not a wrapper around MakeMKV. The project never invokes, links to, or requires `makemkv` or
 `makemkvcon`.
@@ -18,14 +18,14 @@ It is not a wrapper around MakeMKV. The project never invokes, links to, or requ
 - Video, audio, subtitle, attachment, chapter, duration, size, language, and codec inspection.
 - Per-title and per-track selection with multilingual audio and subtitle defaults.
 - Lossless stream-copy remuxing into MKV through the open-source FFmpeg toolchain.
+- Optional H.264/MP4, H.265/MKV, AV1/WebM, FLAC, Opus, and AAC/M4A output profiles.
 - Live title progress, byte count, estimated rate/time remaining, cancellation, and safe partial
   output handling.
 - Editable per-title output names and whole-job destination preflight before writing begins.
 - Media-file inputs, useful both directly and for developing without an optical drive.
 
-The current release is deliberately a remuxer: selected streams are copied without re-encoding.
-Encoding presets and additional output containers fit behind the existing engine contracts and are
-planned rather than mixed into the initial ripping path.
+Lossless MKV remains the default. Encoding is always an explicit profile, and incompatible selected
+tracks are rejected before output begins rather than silently dropped.
 
 ## Build and run
 

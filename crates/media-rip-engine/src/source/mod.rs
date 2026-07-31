@@ -102,6 +102,10 @@ pub(crate) fn candidates_for(
     match kind {
         DiscKind::Dvd => dvd_candidates(path),
         DiscKind::BluRay => bluray_candidates(path),
+        DiscKind::AudioCd => Err(MediaEngineError::UnsupportedInput(
+            "Audio CD extraction is not enabled yet; secure track extraction and verification must be implemented before discs can be ripped"
+                .to_owned(),
+        )),
         DiscKind::File | DiscKind::Directory | DiscKind::Unknown => {
             let size_hint = fs::metadata(path).ok().map(|metadata| metadata.len());
             Ok(vec![ProbeCandidate {

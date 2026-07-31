@@ -1,6 +1,6 @@
 [package]
 name = "media-rip"
-description = "A native open-source DVD and Blu-ray to MKV desktop application"
+description = "A native open-source optical media ripping and encoding application"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

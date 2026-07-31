@@ -111,6 +111,12 @@ fn media_kind_from_udev(path: &std::path::Path) -> DiscKind {
         )
     }) {
         DiscKind::BluRay
+    } else if properties.lines().any(|line| {
+        line.strip_prefix("ID_CDROM_MEDIA_TRACK_COUNT_AUDIO=")
+            .and_then(|count| count.parse::<u32>().ok())
+            .is_some_and(|count| count > 0)
+    }) {
+        DiscKind::AudioCd
     } else if properties
         .lines()
         .any(|line| line.starts_with("ID_CDROM_MEDIA_DVD") && line.ends_with("=1"))

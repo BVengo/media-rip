@@ -117,6 +117,7 @@ impl MainWindow {
         self.content.idle_open.set_sensitive(!busy);
         self.sidebar.rip.set_sensitive(!busy);
         self.sidebar.browse_output.set_sensitive(!busy);
+        self.sidebar.output_profile.set_sensitive(!busy);
         self.progress_area.set_visible(busy);
         self.cancel.set_sensitive(busy);
     }

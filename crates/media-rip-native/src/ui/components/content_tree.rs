@@ -71,7 +71,9 @@ impl ContentTree {
         button_content.append(&image);
         button_content.append(&button_label);
         idle_open.set_child(Some(&button_content));
-        let hint = gtk::Label::new(Some("Insert a DVD or Blu-ray, then choose a source above."));
+        let hint = gtk::Label::new(Some(
+            "Insert an optical disc, or open a media file or folder above.",
+        ));
         hint.add_css_class("idle-caption");
         idle.append(&idle_open);
         idle.append(&hint);
@@ -259,6 +261,16 @@ fn title_row(
         badge.set_valign(gtk::Align::Center);
         badge.set_tooltip_text(Some("Main title identified by the Blu-ray disc metadata"));
         badge.append(&gtk::Label::new(Some("MAIN TITLE")));
+        name_line.append(&badge);
+    }
+    if title.duplicate_key.is_some() && !title.is_main_title {
+        let badge = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        badge.add_css_class("main-title-badge");
+        badge.set_valign(gtk::Align::Center);
+        badge.set_tooltip_text(Some(
+            "This playlist uses the same authored media ranges as another item",
+        ));
+        badge.append(&gtk::Label::new(Some("DUPLICATE")));
         name_line.append(&badge);
     }
     let details = [

@@ -72,16 +72,18 @@ duplicate work.
 
 ## Ripping depth
 
-- [ ] Parse Blu-ray MPLS play items and segment maps directly.
-- [ ] Detect duplicate and suspicious playlists without hiding them.
+- [x] Parse Blu-ray MPLS play items and segment maps directly.
+- [x] Detect exact duplicate playlists without hiding them.
+- [ ] Flag suspicious playlists and explain the reason without hiding them.
 - [ ] Improve angle handling, seamless branching, and forced-subtitle detection.
 - [ ] Add whole-disc backup as a separate job type.
 
 ## Formats and encoding
 
-- [ ] Introduce output profiles while retaining stream-copy MKV as the safe default.
-- [ ] Add optional AV1, H.265, H.264, Opus, AAC, and FLAC encoding through a codec provider.
-- [ ] Add MP4 and WebM muxers where selected streams are compatible.
+- [x] Introduce output profiles while retaining stream-copy MKV as the safe default.
+- [x] Add optional AV1, H.265, H.264, Opus, AAC, and FLAC encoding through the FFmpeg codec
+  provider, with encoder availability checks.
+- [x] Add MP4 and WebM muxers where selected streams are compatible.
 - [ ] Add Audio CD discovery, secure extraction, verification, and tagging before enabling its
   settings page.
 

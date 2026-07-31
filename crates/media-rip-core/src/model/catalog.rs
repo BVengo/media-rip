@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 pub enum DiscKind {
     Dvd,
     BluRay,
+    AudioCd,
     Directory,
     File,
     Unknown,
@@ -17,6 +18,7 @@ impl DiscKind {
         match self {
             Self::Dvd => "DVD",
             Self::BluRay => "Blu-ray",
+            Self::AudioCd => "Audio CD",
             Self::Directory => "Video folder",
             Self::File => "Media file",
             Self::Unknown => "Unknown media",
@@ -27,6 +29,7 @@ impl DiscKind {
         match self {
             Self::Dvd => "media-optical-dvd-symbolic",
             Self::BluRay => "media-optical-bd-symbolic",
+            Self::AudioCd => "media-optical-cd-audio-symbolic",
             Self::Directory => "folder-videos-symbolic",
             Self::File => "video-x-generic-symbolic",
             Self::Unknown => "media-optical-symbolic",

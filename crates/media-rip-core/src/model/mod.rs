@@ -6,4 +6,4 @@ pub use catalog::{
     Chapter, DiscKind, Drive, InfoField, MediaCatalog, MediaSource, StreamKind, Title, Track,
 };
 pub use events::{EngineEvent, LogLevel, RipProgress};
-pub use rip::{RipRequest, RipSelection};
+pub use rip::{OutputProfile, RipRequest, RipSelection};
