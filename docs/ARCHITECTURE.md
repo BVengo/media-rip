@@ -32,6 +32,7 @@ Only domain types belong here. A format-specific FFmpeg flag or GTK widget is a 
 - `platform/`: operating-system drive discovery. Linux currently uses `lsblk` and udev properties.
 - `source/`: lightweight source classification plus DVD and Blu-ray title discovery.
 - `probe/`: FFprobe JSON conversion into core domain models.
+- `process.rs`: supervised child-process lifetime, graceful cancellation, and forced termination.
 - `rip/`: FFmpeg stream-copy execution, progress parsing, cancellation, and output finalization.
 - `engine.rs`: the small adapter implementing the core `MediaEngine` port.
 
@@ -52,6 +53,10 @@ polls a typed event channel on the GTK main loop.
 Every scan or rip must emit exactly one terminal event: finished, failed, or cancelled. Frontends
 use that invariant to leave their busy state safely. External media processes must be polled with a
 `CancellationToken`; blocking `Command::output` calls are not suitable for long-running probes.
+Supervised processes receive a graceful termination request first and are forcibly terminated if
+they remain alive beyond the bounded grace period.
+Each scan and rip worker owns a dedicated event sender. If it exits without a terminal event, the
+receiver disconnects and the controller restores the idle UI with a retryable error.
 
 ## Scan flow
 

@@ -13,6 +13,8 @@ use media_rip_core::{
     Title, ports::CancellationToken, util::ensure_mkv_extension,
 };
 
+use crate::process::ProcessSupervisor;
+
 pub(super) fn remux_title(
     request: &RipRequest,
     title: &Title,
@@ -65,15 +67,13 @@ pub(super) fn remux_title(
         ),
     });
 
-    let mut child = command
-        .spawn()
+    let mut process = ProcessSupervisor::spawn(&mut command)
         .map_err(|error| MediaEngineError::Process(format!("could not start ffmpeg: {error}")))?;
-    let stdout = child.stdout.take().ok_or_else(|| {
+    let stdout = process.take_stdout().ok_or_else(|| {
         MediaEngineError::Process("ffmpeg progress pipe is unavailable".to_owned())
     })?;
-    let stderr = child
-        .stderr
-        .take()
+    let stderr = process
+        .take_stderr()
         .ok_or_else(|| MediaEngineError::Process("ffmpeg error pipe is unavailable".to_owned()))?;
     let (progress_tx, progress_rx) = mpsc::channel();
     let stderr_reader = thread::spawn(move || read_all(stderr));
@@ -83,8 +83,7 @@ pub(super) fn remux_title(
 
     loop {
         if cancellation.is_cancelled() {
-            let _ = child.kill();
-            let _ = child.wait();
+            let _ = process.terminate();
             cleanup_partial(&temporary);
             return Err(MediaEngineError::Cancelled);
         }
@@ -116,7 +115,7 @@ pub(super) fn remux_title(
             }
         }
 
-        if let Some(status) = child
+        if let Some(status) = process
             .try_wait()
             .map_err(|error| MediaEngineError::Process(format!("ffmpeg wait failed: {error}")))?
         {

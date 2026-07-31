@@ -12,7 +12,10 @@ use media_rip_core::{
 };
 use serde::Deserialize;
 
-use crate::source::{ProbeCandidate, ProbeInput};
+use crate::{
+    process::ProcessSupervisor,
+    source::{ProbeCandidate, ProbeInput},
+};
 
 #[derive(Debug, Default, Deserialize)]
 struct ProbeOutput {
@@ -176,28 +179,25 @@ fn run_cancellable(
         return Err(MediaEngineError::Cancelled);
     }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = command
-        .spawn()
+    let mut process = ProcessSupervisor::spawn(&mut command)
         .map_err(|error| MediaEngineError::Process(format!("could not run ffprobe: {error}")))?;
-    let stdout = child.stdout.take().ok_or_else(|| {
+    let stdout = process.take_stdout().ok_or_else(|| {
         MediaEngineError::Process("ffprobe output pipe is unavailable".to_owned())
     })?;
-    let stderr = child
-        .stderr
-        .take()
+    let stderr = process
+        .take_stderr()
         .ok_or_else(|| MediaEngineError::Process("ffprobe error pipe is unavailable".to_owned()))?;
     let stdout_reader = thread::spawn(move || read_bytes(stdout));
     let stderr_reader = thread::spawn(move || read_bytes(stderr));
 
     loop {
         if cancellation.is_cancelled() {
-            let _ = child.kill();
-            let _ = child.wait();
+            let _ = process.terminate();
             let _ = stdout_reader.join();
             let _ = stderr_reader.join();
             return Err(MediaEngineError::Cancelled);
         }
-        if let Some(status) = child
+        if let Some(status) = process
             .try_wait()
             .map_err(|error| MediaEngineError::Process(format!("ffprobe wait failed: {error}")))?
         {

@@ -27,6 +27,7 @@ struct Controller {
     state: Rc<RefCell<AppState>>,
     engine: Arc<dyn MediaEngine>,
     events: mpsc::Sender<EngineEvent>,
+    worker_events: Rc<RefCell<Option<mpsc::Receiver<EngineEvent>>>>,
 }
 
 pub fn launch(application: &gtk::Application, initial_source: Option<PathBuf>) {
@@ -47,6 +48,7 @@ pub fn launch(application: &gtk::Application, initial_source: Option<PathBuf>) {
         state,
         engine,
         events,
+        worker_events: Rc::new(RefCell::new(None)),
     };
 
     controller.bind_controls();
@@ -361,7 +363,8 @@ impl Controller {
         self.ui.set_status("Opening source…", None);
 
         let engine = self.engine.clone();
-        let events = self.events.clone();
+        let (events, receiver) = mpsc::channel();
+        *self.worker_events.borrow_mut() = Some(receiver);
         thread::spawn(move || engine.scan(path, events, token));
     }
 
@@ -416,7 +419,8 @@ impl Controller {
         self.ui.set_status("Saving selected titles…", None);
 
         let engine = self.engine.clone();
-        let events = self.events.clone();
+        let (events, receiver) = mpsc::channel();
+        *self.worker_events.borrow_mut() = Some(receiver);
         thread::spawn(move || engine.rip(request, events, token));
     }
 
@@ -435,8 +439,48 @@ impl Controller {
             while let Ok(event) = receiver.try_recv() {
                 this.handle_event(event);
             }
+            this.pump_worker_events();
             glib::ControlFlow::Continue
         });
+    }
+
+    fn pump_worker_events(&self) {
+        let (events, disconnected) = {
+            let worker_events = self.worker_events.borrow();
+            let Some(receiver) = worker_events.as_ref() else {
+                return;
+            };
+            drain_available_events(receiver)
+        };
+
+        for event in events {
+            self.handle_event(event);
+        }
+
+        if disconnected {
+            *self.worker_events.borrow_mut() = None;
+            self.handle_worker_disconnect();
+        }
+    }
+
+    fn handle_worker_disconnect(&self) {
+        let busy = self.state.borrow().busy;
+        if busy == BusyState::Idle || self.finish_busy() {
+            return;
+        }
+        let (title, detail) = match busy {
+            BusyState::Scanning => (
+                "Source scan stopped unexpectedly",
+                "The scan worker exited without reporting a result. You can retry opening the source.",
+            ),
+            BusyState::Ripping => (
+                "Save operation stopped unexpectedly",
+                "The save worker exited without reporting a result. Existing completed files were left in place.",
+            ),
+            BusyState::Idle => unreachable!(),
+        };
+        self.show_error(title, detail);
+        self.render();
     }
 
     fn handle_event(&self, event: EngineEvent) {
@@ -925,6 +969,18 @@ impl Controller {
     }
 }
 
+fn drain_available_events(receiver: &mpsc::Receiver<EngineEvent>) -> (Vec<EngineEvent>, bool) {
+    let mut events = Vec::new();
+    let disconnected = loop {
+        match receiver.try_recv() {
+            Ok(event) => events.push(event),
+            Err(mpsc::TryRecvError::Empty) => break false,
+            Err(mpsc::TryRecvError::Disconnected) => break true,
+        }
+    };
+    (events, disconnected)
+}
+
 fn availability(available: bool) -> &'static str {
     if available { "available" } else { "missing" }
 }
@@ -987,5 +1043,27 @@ mod tests {
             default_output_directory("Movie", &settings),
             PathBuf::from("/media/archive")
         );
+    }
+
+    #[test]
+    fn worker_events_are_drained_before_disconnection_is_reported() {
+        let (sender, receiver) = mpsc::channel();
+        sender.send(EngineEvent::ScanCancelled).unwrap();
+        drop(sender);
+
+        let (events, disconnected) = drain_available_events(&receiver);
+
+        assert_eq!(events, vec![EngineEvent::ScanCancelled]);
+        assert!(disconnected);
+    }
+
+    #[test]
+    fn live_empty_worker_channel_is_not_reported_as_disconnected() {
+        let (_sender, receiver) = mpsc::channel();
+
+        let (events, disconnected) = drain_available_events(&receiver);
+
+        assert!(events.is_empty());
+        assert!(!disconnected);
     }
 }

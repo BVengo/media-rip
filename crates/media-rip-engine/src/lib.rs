@@ -5,6 +5,7 @@
 mod engine;
 mod platform;
 mod probe;
+mod process;
 mod rip;
 mod source;
 

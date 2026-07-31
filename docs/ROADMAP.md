@@ -11,9 +11,9 @@ can be audited against the intended behavior.
 - [x] Preflight every selected title, stream, destination, and filename collision before FFmpeg
   writes the first title.
 - [x] Verify that the output directory can be created and written before starting a job.
-- [ ] Track child processes in a reusable process supervisor and add escalation from graceful
+- [x] Track child processes in a reusable process supervisor and add escalation from graceful
   termination to forced termination.
-- [ ] Detect unexpected worker/channel termination and return the UI to an actionable state.
+- [x] Detect unexpected worker/channel termination and return the UI to an actionable state.
 - [ ] Add structured per-title job results so a partially completed multi-title job can be resumed.
 - [ ] Check available space against selected-size estimates, with an explicit override for unknown
   or estimated sizes.

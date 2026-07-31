@@ -430,6 +430,7 @@ dependencies = [
 name = "media-rip-engine"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "media-rip-core",
  "serde",
  "serde_json",
