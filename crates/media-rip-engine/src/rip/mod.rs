@@ -83,6 +83,13 @@ pub(crate) fn run(
 }
 
 fn preflight(request: &RipRequest) -> Result<(), MediaEngineError> {
+    if request.catalog.source.kind == media_rip_core::DiscKind::AudioCd
+        && !request.output_profile.is_audio_only()
+    {
+        return Err(MediaEngineError::Other(
+            "Audio CDs must be saved with the FLAC, Opus, or M4A audio profile".to_owned(),
+        ));
+    }
     let mut destinations = HashSet::new();
     for selection in &request.selections {
         let title = request
@@ -250,6 +257,15 @@ mod tests {
 
         let error = preflight(&request).unwrap_err().to_string();
         assert!(error.contains("track 99 is no longer available"));
+    }
+
+    #[test]
+    fn audio_cds_reject_video_output_profiles() {
+        let mut request = request();
+        request.catalog.source.kind = DiscKind::AudioCd;
+
+        let error = preflight(&request).unwrap_err().to_string();
+        assert!(error.contains("Audio CDs must be saved"));
     }
 
     fn request() -> RipRequest {

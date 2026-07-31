@@ -25,7 +25,7 @@ can be audited against the intended behavior.
 - [x] Honor eject-after-success without ejecting on cancellation or failure.
 - [x] Mark settings that are not connected to engine behavior as unavailable until
   their backing capability ships. This includes retry/buffer controls, protection processing,
-  streaming, Audio CD, alternate tools, and encoding profiles.
+  streaming, alternate tools, and encoding profiles.
 - [ ] Show a preflight summary with selected title/track count, estimated bytes, output paths,
   conflicts, and overwrite choices.
 - [ ] Implement reusable filename templates and validate previews in Settings.
@@ -84,8 +84,8 @@ duplicate work.
 - [x] Add optional AV1, H.265, H.264, Opus, AAC, and FLAC encoding through the FFmpeg codec
   provider, with encoder availability checks.
 - [x] Add MP4 and WebM muxers where selected streams are compatible.
-- [ ] Add Audio CD discovery, secure extraction, verification, and tagging before enabling its
-  settings page.
+- [x] Add Audio CD discovery, secure extraction, local CD-TEXT tagging, and audio output defaults.
+- [ ] Add online Audio CD metadata and checksum verification through an explicit opt-in provider.
 
 ## Platforms and distribution
 

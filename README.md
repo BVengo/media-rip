@@ -3,8 +3,8 @@
 MediaRip is a native Rust desktop application for inspecting optical media, disc folders, and
 ordinary media files, then preserving or encoding selected tracks. Its desktop workflow uses
 source selection, a hierarchical item/track panel, context-sensitive information, output format
-and processing controls, progress, messages, and status. DVD and Blu-ray reading is available now;
-secure Audio CD extraction is the next input family planned for the same workflow.
+and processing controls, progress, messages, and status. DVD, Blu-ray, and secure Audio CD reading
+use the same workflow.
 
 It is not a wrapper around MakeMKV. The project never invokes, links to, or requires `makemkv` or
 `makemkvcon`.
@@ -15,6 +15,7 @@ It is not a wrapper around MakeMKV. The project never invokes, links to, or requ
 - Linux optical-drive discovery with mounted-disc labels and device information.
 - DVD title discovery from `VIDEO_TS.IFO`.
 - Blu-ray playlist discovery with disc-defined main-title marking and authored-stream filtering.
+- Audio CD track discovery, CD-TEXT naming/tagging, and secure extraction for music and audiobooks.
 - Video, audio, subtitle, attachment, chapter, duration, size, language, and codec inspection.
 - Per-title and per-track selection with multilingual audio and subtitle defaults.
 - Lossless stream-copy remuxing into MKV through the open-source FFmpeg toolchain.
@@ -35,13 +36,14 @@ Linux packages are named differently by distribution, but a development machine 
 - GTK 4 development files
 - libdvdread and libbluray development files
 - FFmpeg and FFprobe
+- cdparanoia for Audio CDs; cd-info (from libcdio-utils) is optional for CD-TEXT
 - an FFmpeg build with the `dvdvideo` demuxer and `bluray` protocol for optical media
 - `lsblk`, `udevadm`, and optionally `eject`
 
 On Debian-family systems, the starting point is typically:
 
 ```sh
-sudo apt install build-essential libgtk-4-dev libdvdread-dev libbluray-dev ffmpeg util-linux udev eject
+sudo apt install build-essential libgtk-4-dev libdvdread-dev libbluray-dev ffmpeg cdparanoia libcdio-utils util-linux udev eject
 ```
 
 Then:

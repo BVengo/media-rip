@@ -194,11 +194,19 @@ impl SettingsForm {
         );
 
         let audio_cd_output_format = combo(
-            &[("flac", "FLAC"), ("alac", "Apple Lossless"), ("wav", "WAV")],
+            &[
+                ("flac", "FLAC — lossless"),
+                ("opus", "Opus — compact"),
+                ("aac", "M4A — compatible"),
+            ],
             &settings.audio_cd.output_format,
         );
         let audio_cd_secure_extraction = switch(settings.audio_cd.secure_extraction);
         let audio_cd_use_disc_metadata = switch(settings.audio_cd.use_disc_metadata);
+        audio_cd_secure_extraction.set_active(true);
+        audio_cd_secure_extraction.set_sensitive(false);
+        audio_cd_use_disc_metadata.set_active(true);
+        audio_cd_use_disc_metadata.set_sensitive(false);
 
         let optical_access_provider = combo(
             &[
@@ -460,29 +468,26 @@ impl SettingsForm {
 
         let audio_cd = media_page(
             "Audio CD",
-            "Audio CD · planned",
-            "Defaults are ready for the secure audio-extraction backend.",
+            "Audio CD · available",
+            "Secure extraction and output defaults for music and audiobooks.",
         );
-        audio_cd.append(&planned_note(
-            "Audio CD discovery and extraction are not enabled in this release. These settings are stored independently so the category can grow without crowding video-disc options.",
-        ));
         let cd_output = section(
             "Extraction",
             "Lossless output and verification-friendly reading are the defaults.",
         );
         cd_output.append(&setting_row(
             "Output format",
-            "All available formats preserve the source audio without loss.",
+            "Choose lossless FLAC, compact Opus, or broadly compatible M4A/AAC.",
             &audio_cd_output_format,
         ));
         cd_output.append(&setting_row(
-            "Secure extraction",
-            "Re-read uncertain sectors and compare results.",
+            "Secure extraction (always on)",
+            "Use cdparanoia to re-read uncertain sectors and compare results.",
             &audio_cd_secure_extraction,
         ));
         cd_output.append(&setting_row(
-            "Look up disc metadata",
-            "Use permitted online providers for album, artist, and track names.",
+            "Read disc metadata (always on)",
+            "Use embedded CD-TEXT for album, artist, and track names when available.",
             &audio_cd_use_disc_metadata,
         ));
         audio_cd.append(&cd_output);
@@ -1028,10 +1033,6 @@ fn navigation_button(title: &str, subtitle: &str) -> gtk::ToggleButton {
 
 fn inherited_note(message: &str) -> gtk::Box {
     note(message, "settings-note")
-}
-
-fn planned_note(message: &str) -> gtk::Box {
-    note(message, "settings-planned-note")
 }
 
 fn warning_note(message: &str) -> gtk::Box {

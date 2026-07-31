@@ -8,7 +8,7 @@
 | Mounted Blu-ray / `BDMV` folder | Yes | Yes | Main titles are marked; exact duplicate playlists can be grouped |
 | Raw Blu-ray device | Yes | Yes | Main-title, playlist, chapter, and authored-stream metadata comes from `libbluray` |
 | ISO image | Limited | Limited | Ordinary FFmpeg probing only in this release |
-| Audio CD | Drive type only | No | Secure extraction, verification, and tagging remain planned |
+| Audio CD | Yes | Yes | One file per track; secure re-reading with cdparanoia and local CD-TEXT tagging |
 
 ## Output profiles
 
@@ -37,8 +37,15 @@ samples 30 seconds of packets to estimate the title size. Output files are writt
 explicit stream maps, profile-selected codecs, and muxers. This is an open-source media stack and
 contains no MakeMKV dependency.
 
-At startup, the Messages panel reports whether `ffprobe` and `ffmpeg` are available. An absent tool
-also produces a direct error before an operation starts.
+Audio CD tables of contents are read with `cdparanoia`; optional embedded CD-TEXT is read locally
+with `cd-info` and no CDDB network request. Each selected track is securely extracted to temporary
+16-bit, 44.1 kHz stereo PCM and then encoded by FFmpeg as FLAC, Opus, or AAC/M4A. FLAC is the
+default for both music and audiobooks. Album, artist, title, and track/total tags are written when
+the source metadata is available. Temporary PCM files are removed after encoding, failure, or
+cancellation. Online checksum verification such as AccurateRip is not implemented yet.
+
+At startup, the Messages panel reports whether `ffprobe`, `ffmpeg`, and `cdparanoia` are available.
+An absent required tool also produces a direct error before an operation starts.
 
 ## Protected media
 

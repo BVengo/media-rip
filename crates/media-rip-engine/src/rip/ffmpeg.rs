@@ -78,13 +78,30 @@ pub(super) fn process_title(
     }
 
     let temporary = temporary_output_path(&destination, title.id);
+    let extracted_cd = if request.catalog.source.kind == DiscKind::AudioCd {
+        Some(TemporaryCdAudio(extract_audio_cd_track(
+            request,
+            title,
+            &destination,
+            events,
+            cancellation,
+        )?))
+    } else {
+        None
+    };
     let mut command = Command::new("ffmpeg");
     command.args(["-hide_banner", "-nostdin", "-loglevel", "warning"]);
-    add_input(&mut command, request, title);
+    add_input(
+        &mut command,
+        request,
+        title,
+        extracted_cd.as_ref().map(|audio| audio.0.as_path()),
+    );
     for stream in &selection.stream_indices {
         command.args(["-map", &format!("0:{stream}")]);
     }
     command.args(["-map_chapters", "0"]);
+    add_audio_cd_metadata(&mut command, request, title);
     add_output_profile(&mut command, request.output_profile);
     command.args(["-progress", "pipe:1", "-nostats"]);
     if request.overwrite {
@@ -277,7 +294,12 @@ fn add_output_profile(command: &mut Command, profile: OutputProfile) {
     }
 }
 
-fn add_input(command: &mut Command, request: &RipRequest, title: &Title) {
+fn add_input(
+    command: &mut Command,
+    request: &RipRequest,
+    title: &Title,
+    extracted_cd: Option<&Path>,
+) {
     let source = &request.catalog.source;
     match source.kind {
         DiscKind::Dvd => {
@@ -297,9 +319,147 @@ fn add_input(command: &mut Command, request: &RipRequest, title: &Title) {
             command.arg("-i");
             command.arg(format!("bluray:{}", source.path.display()));
         }
-        DiscKind::AudioCd | DiscKind::Directory | DiscKind::File | DiscKind::Unknown => {
+        DiscKind::AudioCd => {
+            command
+                .arg("-i")
+                .arg(extracted_cd.expect("Audio CD track must be extracted before encoding"));
+        }
+        DiscKind::Directory | DiscKind::File | DiscKind::Unknown => {
             command.arg("-i").arg(&source.path);
         }
+    }
+}
+
+fn extract_audio_cd_track(
+    request: &RipRequest,
+    title: &Title,
+    destination: &Path,
+    events: &Sender<EngineEvent>,
+    cancellation: &CancellationToken,
+) -> Result<PathBuf, MediaEngineError> {
+    let wave = cd_wave_path(destination, title.id);
+    cleanup_partial(&wave);
+    let _ = events.send(EngineEvent::Log {
+        level: LogLevel::Info,
+        message: format!(
+            "Securely extracting Audio CD track {} with cdparanoia.",
+            title.source_title_id
+        ),
+    });
+    let mut command = Command::new("cdparanoia");
+    command
+        .args(["-q", "-d"])
+        .arg(&request.catalog.source.path)
+        .arg(&title.source_title_id)
+        .arg(&wave)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let mut process = ProcessSupervisor::spawn(&mut command).map_err(|error| {
+        MediaEngineError::MissingTool(format!(
+            "cdparanoia (could not start secure Audio CD extraction: {error})"
+        ))
+    })?;
+    let stderr = process.take_stderr().ok_or_else(|| {
+        MediaEngineError::Process("cdparanoia error pipe is unavailable".to_owned())
+    })?;
+    let stderr_reader = thread::spawn(move || read_all(stderr));
+    loop {
+        if cancellation.is_cancelled() {
+            let _ = process.terminate();
+            let _ = stderr_reader.join();
+            cleanup_partial(&wave);
+            return Err(MediaEngineError::Cancelled);
+        }
+        if let Some(status) = process.try_wait().map_err(|error| {
+            MediaEngineError::Process(format!("cdparanoia wait failed: {error}"))
+        })? {
+            let detail = stderr_reader.join().unwrap_or_default();
+            if !status.success() {
+                cleanup_partial(&wave);
+                return Err(MediaEngineError::Process(if detail.trim().is_empty() {
+                    format!("cdparanoia exited with {status}")
+                } else {
+                    detail.trim().to_owned()
+                }));
+            }
+            if !wave.is_file() {
+                return Err(MediaEngineError::Process(
+                    "cdparanoia completed without producing track audio".to_owned(),
+                ));
+            }
+            return Ok(wave);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn add_audio_cd_metadata(command: &mut Command, request: &RipRequest, title: &Title) {
+    if request.catalog.source.kind != DiscKind::AudioCd {
+        return;
+    }
+    for (key, value) in audio_cd_metadata(request, title) {
+        command.args(["-metadata", &format!("{key}={value}")]);
+    }
+}
+
+fn audio_cd_metadata(request: &RipRequest, title: &Title) -> Vec<(&'static str, String)> {
+    let album_artist = request
+        .catalog
+        .source_info
+        .iter()
+        .find(|field| field.label == "Album artist")
+        .map(|field| field.value.as_str());
+    let artist = title
+        .tracks
+        .first()
+        .and_then(|track| track.name.as_deref())
+        .or(album_artist);
+    let track_total = request
+        .catalog
+        .titles
+        .iter()
+        .filter_map(|title| title.source_title_id.parse::<u32>().ok())
+        .max()
+        .unwrap_or(request.catalog.titles.len() as u32);
+    let track_number = if track_total > 0 {
+        format!("{}/{track_total}", title.source_title_id)
+    } else {
+        title.source_title_id.clone()
+    };
+
+    [
+        ("title", Some(title.name.as_str())),
+        ("album", Some(request.catalog.source.name.as_str())),
+        ("artist", artist),
+        ("album_artist", album_artist),
+        ("track", Some(track_number.as_str())),
+    ]
+    .into_iter()
+    .filter_map(|(key, value)| {
+        value
+            .filter(|value| !value.is_empty())
+            .map(|value| (key, value.to_owned()))
+    })
+    .collect()
+}
+
+fn cd_wave_path(destination: &Path, title_id: u32) -> PathBuf {
+    let file_name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("track");
+    destination.with_file_name(format!(
+        ".{file_name}.{}.{}.cd.wav",
+        std::process::id(),
+        title_id
+    ))
+}
+
+struct TemporaryCdAudio(PathBuf);
+
+impl Drop for TemporaryCdAudio {
+    fn drop(&mut self) {
+        cleanup_partial(&self.0);
     }
 }
 
@@ -368,6 +528,10 @@ fn estimate_remaining(elapsed_seconds: u64, fraction: f64) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use media_rip_core::{InfoField, MediaCatalog, MediaSource, StreamKind, Track};
+
     use super::*;
 
     #[test]
@@ -398,6 +562,93 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(arguments.windows(2).any(|pair| pair == ["-c:v", "libx264"]));
         assert!(arguments.windows(2).any(|pair| pair == ["-f", "mp4"]));
+    }
+
+    #[test]
+    fn audio_profiles_disable_video_and_select_the_requested_encoder() {
+        for (profile, encoder, container) in [
+            (OutputProfile::AudioFlac, "flac", "flac"),
+            (OutputProfile::AudioOpus, "libopus", "opus"),
+            (OutputProfile::AudioAac, "aac", "mp4"),
+        ] {
+            let mut command = Command::new("ffmpeg");
+            add_output_profile(&mut command, profile);
+            let arguments = command
+                .get_args()
+                .map(|value| value.to_string_lossy())
+                .collect::<Vec<_>>();
+            assert!(arguments.iter().any(|argument| argument == "-vn"));
+            assert!(arguments.windows(2).any(|pair| pair == ["-c:a", encoder]));
+            assert!(arguments.windows(2).any(|pair| pair == ["-f", container]));
+        }
+    }
+
+    #[test]
+    fn audio_cd_wave_is_hidden_beside_the_destination() {
+        let destination = Path::new("/music/01 - Track.flac");
+        let wave = cd_wave_path(destination, 7);
+        assert_eq!(wave.parent(), destination.parent());
+        let name = wave.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with(".01 - Track.flac."));
+        assert!(name.ends_with(".7.cd.wav"));
+    }
+
+    #[test]
+    fn audio_cd_metadata_includes_album_artist_and_track_total() {
+        let titles = (1..=12)
+            .map(|number| Title {
+                id: number - 1,
+                source_title_id: number.to_string(),
+                name: format!("Chapter {number}"),
+                is_main_title: false,
+                duration_ms: 60_000,
+                size_bytes: None,
+                size_is_estimate: false,
+                chapters: Vec::new(),
+                tracks: vec![Track {
+                    index: 0,
+                    kind: StreamKind::Audio,
+                    codec: "PCM".to_owned(),
+                    codec_long_name: None,
+                    language: None,
+                    name: None,
+                    properties: Vec::new(),
+                    selected: true,
+                }],
+                segment_count: None,
+                segment_map: None,
+                duplicate_key: None,
+                output_file: format!("{number:02}.flac"),
+                selected: true,
+            })
+            .collect::<Vec<_>>();
+        let request = RipRequest {
+            catalog: MediaCatalog {
+                source: MediaSource {
+                    id: "cd".to_owned(),
+                    name: "The Book".to_owned(),
+                    path: PathBuf::from("/dev/cdrom"),
+                    kind: DiscKind::AudioCd,
+                    drive: None,
+                    capacity_bytes: None,
+                    encrypted: None,
+                },
+                source_info: vec![InfoField::new("Album artist", "The Narrator")],
+                titles,
+            },
+            selections: Vec::new(),
+            output_directory: PathBuf::new(),
+            overwrite: false,
+            output_profile: OutputProfile::AudioFlac,
+        };
+
+        let metadata = audio_cd_metadata(&request, &request.catalog.titles[8]);
+
+        assert!(metadata.contains(&("title", "Chapter 9".to_owned())));
+        assert!(metadata.contains(&("album", "The Book".to_owned())));
+        assert!(metadata.contains(&("artist", "The Narrator".to_owned())));
+        assert!(metadata.contains(&("album_artist", "The Narrator".to_owned())));
+        assert!(metadata.contains(&("track", "9/12".to_owned())));
     }
 
     #[test]

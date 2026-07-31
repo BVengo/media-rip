@@ -65,13 +65,13 @@ receiver disconnects and the controller restores the idle UI with a retryable er
 Open source
    │
    ▼
-classify DVD / Blu-ray / file
+classify DVD / Blu-ray / Audio CD / file
    │
    ▼
-enumerate DVD titles or Blu-ray playlists
+enumerate DVD titles, Blu-ray playlists, or CD tracks
    │
    ▼
-FFprobe each candidate
+FFprobe video/file candidates or read the CD TOC/CD-TEXT
    │
    ▼
 MediaCatalog ──► title tree + Info panel
@@ -91,6 +91,10 @@ the current job. Before the first process starts, the complete request is checke
 compatibility, encoder availability, stale title/stream IDs, duplicate output names, existing
 destinations, and output-directory writability. Existing files are rejected unless a future caller
 explicitly opts into overwrite.
+
+For Audio CDs, `cdparanoia` first performs overlap checking and re-reads uncertain sectors into a
+uniquely named temporary WAV beside the destination. FFmpeg then applies the chosen audio profile
+and CD-TEXT tags. The temporary PCM file has scoped cleanup on every completion path.
 
 ## Extension rules
 

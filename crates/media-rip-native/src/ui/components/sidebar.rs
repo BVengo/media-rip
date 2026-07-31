@@ -1,5 +1,5 @@
 use gtk::prelude::*;
-use media_rip_core::OutputProfile;
+use media_rip_core::{DiscKind, OutputProfile};
 
 use super::InfoPanel;
 
@@ -10,6 +10,7 @@ pub(crate) struct Sidebar {
     pub output_entry: gtk::Entry,
     pub browse_output: gtk::Button,
     pub output_profile: gtk::DropDown,
+    pub profile_panel: gtk::Box,
     pub profile_description: gtk::Label,
     pub selection_summary: gtk::Label,
     pub rip: gtk::Button,
@@ -41,6 +42,7 @@ impl Sidebar {
         profile_content.append(&output_profile);
         profile_content.append(&profile_description);
         let profile_panel = super::panel("Format and processing", &profile_content);
+        profile_panel.set_visible(false);
         root.append(&profile_panel);
 
         let output_content = gtk::Box::new(gtk::Orientation::Horizontal, 5);
@@ -87,10 +89,74 @@ impl Sidebar {
             output_entry,
             browse_output,
             output_profile,
+            profile_panel,
             profile_description,
             selection_summary,
             rip,
             rip_label,
         }
+    }
+
+    pub fn configure_output_profiles(&self, kind: DiscKind, selected: OutputProfile) {
+        let profiles = output_profiles_for(kind);
+        let names = profiles
+            .iter()
+            .map(|profile| profile.display_name())
+            .collect::<Vec<_>>();
+        self.output_profile
+            .set_model(Some(&gtk::StringList::new(&names)));
+        let selected_index = profiles
+            .iter()
+            .position(|profile| *profile == selected)
+            .unwrap_or_default();
+        self.output_profile.set_selected(selected_index as u32);
+        let selected = profiles[selected_index];
+        self.profile_description.set_text(selected.description());
+        self.rip_label.set_text(if selected.is_audio_only() {
+            "Rip audio"
+        } else {
+            "Start rip"
+        });
+        self.profile_panel.set_visible(true);
+    }
+
+    pub fn selected_output_profile(&self, kind: DiscKind) -> OutputProfile {
+        let profiles = output_profiles_for(kind);
+        profiles
+            .get(self.output_profile.selected() as usize)
+            .copied()
+            .or_else(|| profiles.first().copied())
+            .unwrap_or_default()
+    }
+}
+
+fn output_profiles_for(kind: DiscKind) -> &'static [OutputProfile] {
+    const AUDIO_CD_PROFILES: &[OutputProfile] = &[
+        OutputProfile::AudioFlac,
+        OutputProfile::AudioOpus,
+        OutputProfile::AudioAac,
+    ];
+
+    if kind == DiscKind::AudioCd {
+        AUDIO_CD_PROFILES
+    } else {
+        &OutputProfile::ALL
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audio_cds_only_offer_audio_profiles() {
+        let profiles = output_profiles_for(DiscKind::AudioCd);
+        assert_eq!(profiles.len(), 3);
+        assert!(profiles.iter().all(|profile| profile.is_audio_only()));
+    }
+
+    #[test]
+    fn video_sources_keep_audio_extraction_profiles_available() {
+        assert_eq!(output_profiles_for(DiscKind::Dvd), &OutputProfile::ALL);
     }
 }

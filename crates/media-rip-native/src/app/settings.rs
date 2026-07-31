@@ -271,7 +271,9 @@ impl AppSettings {
                 _ => is_duplicate_representative,
             };
             let include_title = policy_includes_title
-                && (!had_multiple_titles || title.duration_ms >= minimum_duration_ms);
+                && (source_kind == media_rip_core::DiscKind::AudioCd
+                    || !had_multiple_titles
+                    || title.duration_ms >= minimum_duration_ms);
             for track in &mut title.tracks {
                 track.selected = include_title && self.selection.selects_track(track);
             }

@@ -254,9 +254,10 @@ impl Controller {
         ));
         let tools = tool_availability();
         self.ui.messages.append(&format!(
-            "Open-source media backend: ffprobe {}, ffmpeg {}.",
+            "Open-source media backend: ffprobe {}, ffmpeg {}, cdparanoia {}.",
             availability(tools.ffprobe),
-            availability(tools.ffmpeg)
+            availability(tools.ffmpeg),
+            availability(tools.cdparanoia)
         ));
         self.ui
             .messages
@@ -362,6 +363,7 @@ impl Controller {
             state.cancellation = Some(token.clone());
         }
         self.ui.set_busy(true);
+        self.ui.sidebar.profile_panel.set_visible(false);
         self.ui.progress.set_fraction(0.0);
         self.ui.progress.set_text(Some("Scanning…"));
         self.ui.progress_title.set_text("Opening source");
@@ -522,9 +524,16 @@ impl Controller {
             }
             EngineEvent::ScanFinished(catalog) => {
                 let mut catalog = *catalog;
-                let output_profile =
+                let output_profile = if catalog.source.kind == media_rip_core::DiscKind::AudioCd {
+                    match self.state.borrow().settings.audio_cd.output_format.as_str() {
+                        "opus" => OutputProfile::AudioOpus,
+                        "aac" => OutputProfile::AudioAac,
+                        _ => OutputProfile::AudioFlac,
+                    }
+                } else {
                     OutputProfile::from_id(&self.state.borrow().settings.advanced.default_profile)
-                        .unwrap_or_default();
+                        .unwrap_or_default()
+                };
                 self.state
                     .borrow()
                     .settings
@@ -570,12 +579,17 @@ impl Controller {
                     .sidebar
                     .output_entry
                     .set_text(&output.to_string_lossy());
-                self.ui.sidebar.output_profile.set_selected(
-                    OutputProfile::ALL
-                        .iter()
-                        .position(|profile| *profile == output_profile)
-                        .unwrap_or_default() as u32,
-                );
+                let kind = self
+                    .state
+                    .borrow()
+                    .catalog
+                    .as_ref()
+                    .expect("scan result was just stored")
+                    .source
+                    .kind;
+                self.ui
+                    .sidebar
+                    .configure_output_profiles(kind, output_profile);
                 self.ui
                     .set_status("Source opened successfully.", Some("status-success"));
                 self.render();
@@ -800,6 +814,10 @@ impl Controller {
             Rc::new(move |action| this.handle_content_action(action)) as Rc<dyn Fn(ContentAction)>
         };
         let state = self.state.borrow();
+        self.ui
+            .sidebar
+            .profile_panel
+            .set_visible(state.catalog.is_some() && state.busy != BusyState::Scanning);
         if let Some(catalog) = &state.catalog {
             self.ui
                 .content
@@ -878,8 +896,16 @@ impl Controller {
         if self.state.borrow().is_busy() {
             return;
         }
-        let index = self.ui.sidebar.output_profile.selected() as usize;
-        let profile = OutputProfile::ALL.get(index).copied().unwrap_or_default();
+        let Some(kind) = self
+            .state
+            .borrow()
+            .catalog
+            .as_ref()
+            .map(|catalog| catalog.source.kind)
+        else {
+            return;
+        };
+        let profile = self.ui.sidebar.selected_output_profile(kind);
         {
             let mut state = self.state.borrow_mut();
             state.output_profile = profile;

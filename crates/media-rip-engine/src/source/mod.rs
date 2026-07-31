@@ -1,3 +1,4 @@
+mod audio_cd;
 mod bluray;
 mod dvd;
 
@@ -9,6 +10,7 @@ use std::{
 
 use media_rip_core::{Chapter, DiscKind, MediaEngineError};
 
+pub(crate) use audio_cd::audio_cd_catalog;
 pub(crate) use bluray::bluray_candidates;
 pub(crate) use dvd::dvd_candidates;
 
@@ -102,10 +104,7 @@ pub(crate) fn candidates_for(
     match kind {
         DiscKind::Dvd => dvd_candidates(path),
         DiscKind::BluRay => bluray_candidates(path),
-        DiscKind::AudioCd => Err(MediaEngineError::UnsupportedInput(
-            "Audio CD extraction is not enabled yet; secure track extraction and verification must be implemented before discs can be ripped"
-                .to_owned(),
-        )),
+        DiscKind::AudioCd => unreachable!("Audio CDs are catalogued directly from their TOC"),
         DiscKind::File | DiscKind::Directory | DiscKind::Unknown => {
             let size_hint = fs::metadata(path).ok().map(|metadata| metadata.len());
             Ok(vec![ProbeCandidate {
