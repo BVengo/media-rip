@@ -526,6 +526,7 @@ impl Controller {
                 let mut catalog = *catalog;
                 let output_profile = if catalog.source.kind == media_rip_core::DiscKind::AudioCd {
                     match self.state.borrow().settings.audio_cd.output_format.as_str() {
+                        "wav" => OutputProfile::AudioWav,
                         "opus" => OutputProfile::AudioOpus,
                         "aac" => OutputProfile::AudioAac,
                         _ => OutputProfile::AudioFlac,

@@ -40,7 +40,7 @@ pub fn ensure_extension(value: &str, extension: &str) -> String {
     } else {
         let path = Path::new(&clean);
         if path.extension().is_some_and(|current| {
-            ["mkv", "mp4", "webm", "flac", "opus", "m4a"]
+            ["mkv", "mp4", "webm", "flac", "wav", "opus", "m4a"]
                 .iter()
                 .any(|known| current.eq_ignore_ascii_case(known))
         }) {
@@ -76,6 +76,7 @@ mod tests {
     #[test]
     fn changes_known_output_extensions_for_a_profile() {
         assert_eq!(ensure_extension("Movie.mkv", "mp4"), "Movie.mp4");
+        assert_eq!(ensure_extension("Track.wav", "flac"), "Track.flac");
         assert_eq!(ensure_extension("Album.final", "flac"), "Album.final.flac");
     }
 }

@@ -133,6 +133,7 @@ impl Sidebar {
 fn output_profiles_for(kind: DiscKind) -> &'static [OutputProfile] {
     const AUDIO_CD_PROFILES: &[OutputProfile] = &[
         OutputProfile::AudioFlac,
+        OutputProfile::AudioWav,
         OutputProfile::AudioOpus,
         OutputProfile::AudioAac,
     ];
@@ -151,7 +152,7 @@ mod tests {
     #[test]
     fn audio_cds_only_offer_audio_profiles() {
         let profiles = output_profiles_for(DiscKind::AudioCd);
-        assert_eq!(profiles.len(), 3);
+        assert_eq!(profiles.len(), 4);
         assert!(profiles.iter().all(|profile| profile.is_audio_only()));
     }
 

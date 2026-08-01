@@ -17,17 +17,19 @@ pub enum OutputProfile {
     H265Mkv,
     Av1Webm,
     AudioFlac,
+    AudioWav,
     AudioOpus,
     AudioAac,
 }
 
 impl OutputProfile {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::PreserveMkv,
         Self::H264Mp4,
         Self::H265Mkv,
         Self::Av1Webm,
         Self::AudioFlac,
+        Self::AudioWav,
         Self::AudioOpus,
         Self::AudioAac,
     ];
@@ -39,6 +41,7 @@ impl OutputProfile {
             Self::H265Mkv => "h265-mkv",
             Self::Av1Webm => "av1-webm",
             Self::AudioFlac => "flac-audio",
+            Self::AudioWav => "wav-audio",
             Self::AudioOpus => "opus-audio",
             Self::AudioAac => "aac-audio",
         }
@@ -55,6 +58,7 @@ impl OutputProfile {
             Self::H265Mkv => "MKV — H.265 video",
             Self::Av1Webm => "WebM — AV1 video + Opus audio",
             Self::AudioFlac => "FLAC — lossless audio",
+            Self::AudioWav => "WAV — uncompressed audio",
             Self::AudioOpus => "Opus — compact audio",
             Self::AudioAac => "M4A — AAC audio",
         }
@@ -69,6 +73,7 @@ impl OutputProfile {
                 "Efficient open video format; re-encodes video, audio and text subtitles."
             }
             Self::AudioFlac => "Lossless audio for music, audiobooks and Audio CD tracks.",
+            Self::AudioWav => "Uncompressed PCM audio for editing and maximum compatibility.",
             Self::AudioOpus => "Efficient lossy audio for spoken word and portable listening.",
             Self::AudioAac => "Broadly compatible lossy audio in an M4A container.",
         }
@@ -80,13 +85,17 @@ impl OutputProfile {
             Self::H264Mp4 => "mp4",
             Self::Av1Webm => "webm",
             Self::AudioFlac => "flac",
+            Self::AudioWav => "wav",
             Self::AudioOpus => "opus",
             Self::AudioAac => "m4a",
         }
     }
 
     pub fn is_audio_only(self) -> bool {
-        matches!(self, Self::AudioFlac | Self::AudioOpus | Self::AudioAac)
+        matches!(
+            self,
+            Self::AudioFlac | Self::AudioWav | Self::AudioOpus | Self::AudioAac
+        )
     }
 }
 

@@ -55,6 +55,7 @@ fn required_encoders(profile: OutputProfile) -> &'static [&'static str] {
         OutputProfile::H265Mkv => &["libx265"],
         OutputProfile::Av1Webm => &["libaom-av1", "libopus"],
         OutputProfile::AudioFlac => &["flac"],
+        OutputProfile::AudioWav => &["pcm_s16le"],
         OutputProfile::AudioOpus => &["libopus"],
         OutputProfile::AudioAac => &["aac"],
     }
@@ -272,6 +273,9 @@ fn add_output_profile(command: &mut Command, profile: OutputProfile) {
                 "-f",
                 "flac",
             ]);
+        }
+        OutputProfile::AudioWav => {
+            command.args(["-vn", "-c:a", "pcm_s16le", "-f", "wav"]);
         }
         OutputProfile::AudioOpus => {
             command.args([
@@ -568,6 +572,7 @@ mod tests {
     fn audio_profiles_disable_video_and_select_the_requested_encoder() {
         for (profile, encoder, container) in [
             (OutputProfile::AudioFlac, "flac", "flac"),
+            (OutputProfile::AudioWav, "pcm_s16le", "wav"),
             (OutputProfile::AudioOpus, "libopus", "opus"),
             (OutputProfile::AudioAac, "aac", "mp4"),
         ] {

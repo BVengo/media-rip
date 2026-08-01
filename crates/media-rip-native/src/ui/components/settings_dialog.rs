@@ -196,6 +196,7 @@ impl SettingsForm {
         let audio_cd_output_format = combo(
             &[
                 ("flac", "FLAC — lossless"),
+                ("wav", "WAV — uncompressed"),
                 ("opus", "Opus — compact"),
                 ("aac", "M4A — compatible"),
             ],
@@ -205,8 +206,6 @@ impl SettingsForm {
         let audio_cd_use_disc_metadata = switch(settings.audio_cd.use_disc_metadata);
         audio_cd_secure_extraction.set_active(true);
         audio_cd_secure_extraction.set_sensitive(false);
-        audio_cd_use_disc_metadata.set_active(true);
-        audio_cd_use_disc_metadata.set_sensitive(false);
 
         let optical_access_provider = combo(
             &[
@@ -233,6 +232,7 @@ impl SettingsForm {
                 ("h265-mkv", "MKV — H.265 video"),
                 ("av1-webm", "WebM — AV1 + Opus"),
                 ("flac-audio", "FLAC — lossless audio"),
+                ("wav-audio", "WAV — uncompressed audio"),
                 ("opus-audio", "Opus — compact audio"),
                 ("aac-audio", "M4A — AAC audio"),
             ],
@@ -477,7 +477,7 @@ impl SettingsForm {
         );
         cd_output.append(&setting_row(
             "Output format",
-            "Choose lossless FLAC, compact Opus, or broadly compatible M4A/AAC.",
+            "Choose FLAC, uncompressed WAV, compact Opus, or broadly compatible M4A/AAC.",
             &audio_cd_output_format,
         ));
         cd_output.append(&setting_row(
@@ -486,7 +486,7 @@ impl SettingsForm {
             &audio_cd_secure_extraction,
         ));
         cd_output.append(&setting_row(
-            "Read disc metadata (always on)",
+            "Read disc metadata",
             "Use embedded CD-TEXT for album, artist, and track names when available.",
             &audio_cd_use_disc_metadata,
         ));
@@ -716,9 +716,7 @@ impl SettingsForm {
             dvd_processing_mode,
             create_protection_dumps,
             java_executable,
-            audio_cd_output_format,
             audio_cd_secure_extraction,
-            audio_cd_use_disc_metadata,
             optical_access_provider,
             expose_to_media_players,
             streaming_enabled,

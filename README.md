@@ -19,7 +19,7 @@ It is not a wrapper around MakeMKV. The project never invokes, links to, or requ
 - Video, audio, subtitle, attachment, chapter, duration, size, language, and codec inspection.
 - Per-title and per-track selection with multilingual audio and subtitle defaults.
 - Lossless stream-copy remuxing into MKV through the open-source FFmpeg toolchain.
-- Optional H.264/MP4, H.265/MKV, AV1/WebM, FLAC, Opus, and AAC/M4A output profiles.
+- Optional H.264/MP4, H.265/MKV, AV1/WebM, FLAC, WAV, Opus, and AAC/M4A output profiles.
 - Live title progress, byte count, estimated rate/time remaining, cancellation, and safe partial
   output handling.
 - Editable per-title output names and whole-job destination preflight before writing begins.

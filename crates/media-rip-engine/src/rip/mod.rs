@@ -87,7 +87,7 @@ fn preflight(request: &RipRequest) -> Result<(), MediaEngineError> {
         && !request.output_profile.is_audio_only()
     {
         return Err(MediaEngineError::Other(
-            "Audio CDs must be saved with the FLAC, Opus, or M4A audio profile".to_owned(),
+            "Audio CDs must be saved with the FLAC, WAV, Opus, or M4A audio profile".to_owned(),
         ));
     }
     let mut destinations = HashSet::new();

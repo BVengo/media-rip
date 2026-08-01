@@ -257,6 +257,7 @@ impl AppSettings {
     }
 
     pub fn apply_catalog_defaults(&self, catalog: &mut MediaCatalog) {
+        self.apply_audio_cd_metadata_preference(catalog);
         let had_multiple_titles = catalog.titles.len() > 1;
         let source_kind = catalog.source.kind;
         let duplicate_representatives = duplicate_representatives(catalog);
@@ -279,6 +280,50 @@ impl AppSettings {
             }
             title.selected = include_title
                 && (title.tracks.is_empty() || title.tracks.iter().any(|track| track.selected));
+        }
+    }
+
+    fn apply_audio_cd_metadata_preference(&self, catalog: &mut MediaCatalog) {
+        if catalog.source.kind != media_rip_core::DiscKind::AudioCd
+            || self.audio_cd.use_disc_metadata
+        {
+            return;
+        }
+
+        catalog.source.name = "Audio CD".to_owned();
+        catalog
+            .source_info
+            .retain(|field| field.label != "Album artist");
+        if let Some(name) = catalog
+            .source_info
+            .iter_mut()
+            .find(|field| field.label == "Name")
+        {
+            name.value.clone_from(&catalog.source.name);
+        }
+
+        let width = catalog
+            .titles
+            .iter()
+            .filter_map(|title| title.source_title_id.parse::<u32>().ok())
+            .max()
+            .unwrap_or_default()
+            .to_string()
+            .len()
+            .max(2);
+        for title in &mut catalog.titles {
+            let number = title
+                .source_title_id
+                .parse::<u32>()
+                .unwrap_or(title.id.saturating_add(1));
+            let generic_name = format!("Track {number:0width$}");
+            title.name.clone_from(&generic_name);
+            title.output_file = format!("{number:0width$} - {generic_name}.flac");
+            for track in &mut title.tracks {
+                if let Some(artist) = track.name.take() {
+                    track.properties.retain(|property| property != &artist);
+                }
+            }
         }
     }
 }
@@ -416,7 +461,9 @@ fn settings_path() -> Result<PathBuf, String> {
 mod tests {
     use std::path::PathBuf;
 
-    use media_rip_core::{DiscKind, MediaCatalog, MediaSource, StreamKind, Title, Track};
+    use media_rip_core::{
+        DiscKind, InfoField, MediaCatalog, MediaSource, StreamKind, Title, Track,
+    };
 
     use super::AppSettings;
 
@@ -587,6 +634,100 @@ mod tests {
         settings.apply_catalog_defaults(&mut catalog);
 
         assert!(catalog.titles.iter().all(|title| !title.selected));
+    }
+
+    #[test]
+    fn disabling_cd_text_replaces_disc_and_track_names() {
+        let mut settings = AppSettings::default();
+        settings.audio_cd.use_disc_metadata = false;
+        let mut catalog = audio_cd_catalog();
+
+        settings.apply_catalog_defaults(&mut catalog);
+
+        assert_eq!(catalog.source.name, "Audio CD");
+        assert_eq!(catalog.source_info[1].value, "Audio CD");
+        assert!(
+            catalog
+                .source_info
+                .iter()
+                .all(|field| field.label != "Album artist")
+        );
+        assert_eq!(catalog.titles[0].name, "Track 01");
+        assert_eq!(catalog.titles[0].output_file, "01 - Track 01.flac");
+        assert_eq!(catalog.titles[0].tracks[0].name, None);
+        assert!(
+            !catalog.titles[0].tracks[0]
+                .properties
+                .contains(&"Artist".into())
+        );
+    }
+
+    #[test]
+    fn enabled_cd_text_preserves_disc_and_track_names() {
+        let settings = AppSettings::default();
+        let expected = audio_cd_catalog();
+        let mut catalog = expected.clone();
+
+        settings.apply_catalog_defaults(&mut catalog);
+
+        assert_eq!(catalog, expected);
+    }
+
+    #[test]
+    fn disabling_cd_text_does_not_change_other_media() {
+        let mut settings = AppSettings::default();
+        settings.audio_cd.use_disc_metadata = false;
+        let mut expected = audio_cd_catalog();
+        expected.source.kind = DiscKind::File;
+        let mut catalog = expected.clone();
+
+        settings.apply_catalog_defaults(&mut catalog);
+
+        assert_eq!(catalog, expected);
+    }
+
+    fn audio_cd_catalog() -> MediaCatalog {
+        MediaCatalog {
+            source: MediaSource {
+                id: "cd".into(),
+                name: "Album".into(),
+                path: PathBuf::from("/dev/cdrom"),
+                kind: DiscKind::AudioCd,
+                drive: None,
+                capacity_bytes: None,
+                encrypted: None,
+            },
+            titles: vec![Title {
+                id: 0,
+                source_title_id: "1".into(),
+                name: "Song".into(),
+                is_main_title: false,
+                duration_ms: 180_000,
+                size_bytes: Some(31_752_000),
+                size_is_estimate: false,
+                chapters: Vec::new(),
+                tracks: vec![Track {
+                    index: 0,
+                    kind: StreamKind::Audio,
+                    codec: "PCM".into(),
+                    codec_long_name: None,
+                    language: None,
+                    name: Some("Artist".into()),
+                    properties: vec!["stereo".into(), "Artist".into()],
+                    selected: true,
+                }],
+                segment_count: None,
+                segment_map: None,
+                duplicate_key: None,
+                output_file: "01 - Song.flac".into(),
+                selected: true,
+            }],
+            source_info: vec![
+                InfoField::new("Type", "Audio CD"),
+                InfoField::new("Name", "Album"),
+                InfoField::new("Album artist", "Artist"),
+            ],
+        }
     }
 
     fn catalog_with_duplicate_playlists() -> MediaCatalog {
