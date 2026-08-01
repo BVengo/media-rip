@@ -1,57 +1,162 @@
+use std::io::Cursor;
+use std::rc::Rc;
+
 use gtk::prelude::*;
 use media_rip_core::{
-    InfoField, MediaCatalog,
+    CoverArt, DiscKind, InfoField, MediaCatalog,
     util::{format_bytes, format_duration},
 };
 
 use crate::app::Selection;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum InfoAction {
+    SetTag {
+        title_id: u32,
+        key: String,
+        value: String,
+        all_tracks: bool,
+    },
+    AddTag {
+        title_id: u32,
+        key: String,
+        value: String,
+        all_tracks: bool,
+    },
+    SetOutputFile {
+        title_id: u32,
+        output_file: String,
+    },
+    ChooseCoverArt {
+        title_id: Option<u32>,
+    },
+    RemoveCoverArt {
+        title_id: Option<u32>,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct InfoPanel {
     pub root: gtk::Box,
-    grid: gtk::Grid,
+    stack: gtk::Stack,
+    tags_page: gtk::StackPage,
+    info_grid: gtk::Grid,
+    info_artwork: gtk::Box,
+    tags_content: gtk::Box,
 }
 
 impl InfoPanel {
     pub fn new() -> Self {
-        let grid = gtk::Grid::builder()
+        let info_grid = gtk::Grid::builder()
             .column_spacing(14)
             .row_spacing(6)
+            .valign(gtk::Align::Start)
             .hexpand(true)
             .vexpand(false)
             .build();
-        grid.add_css_class("info-grid");
-        let scroll = gtk::ScrolledWindow::builder()
+        info_grid.add_css_class("info-grid");
+        let info_row = gtk::Grid::builder().column_spacing(12).build();
+        let info_artwork = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        info_artwork.set_valign(gtk::Align::Start);
+        info_row.attach(&info_grid, 0, 0, 1, 1);
+        info_row.attach(&info_artwork, 1, 0, 1, 1);
+        let info_scroll = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vscrollbar_policy(gtk::PolicyType::Automatic)
             .min_content_height(72)
             .hexpand(true)
             .vexpand(true)
-            .child(&grid)
+            .child(&info_row)
             .build();
-        let root = super::panel("Info", &scroll);
-        let panel = Self { root, grid };
+
+        let tags_content = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        tags_content.add_css_class("tags-content");
+        let tags_scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .min_content_height(72)
+            .hexpand(true)
+            .vexpand(true)
+            .child(&tags_content)
+            .build();
+
+        let stack = gtk::Stack::builder()
+            .transition_type(gtk::StackTransitionType::Crossfade)
+            .transition_duration(120)
+            .hexpand(true)
+            .vexpand(true)
+            .build();
+        stack.add_titled(&info_scroll, Some("info"), "Info");
+        let tags_page = stack.add_titled(&tags_scroll, Some("tags"), "Tags");
+        tags_page.set_visible(false);
+        let switcher = gtk::StackSwitcher::builder()
+            .stack(&stack)
+            .halign(gtk::Align::Fill)
+            .hexpand(true)
+            .build();
+        if let Some(layout) = switcher
+            .layout_manager()
+            .and_then(|layout| layout.downcast::<gtk::BoxLayout>().ok())
+        {
+            layout.set_homogeneous(true);
+        }
+        switcher.add_css_class("panel-tabs");
+
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        root.add_css_class("panel");
+        root.append(&switcher);
+        root.append(&stack);
+
+        let panel = Self {
+            root,
+            stack,
+            tags_page,
+            info_grid,
+            info_artwork,
+            tags_content,
+        };
         panel.render_fields(&[
             InfoField::new("Type", "No source"),
             InfoField::new("Name", "Insert or open a disc to begin"),
         ]);
+        panel.render_tags_unavailable("Tags are available for Audio CD tracks.");
         panel
     }
 
-    pub fn render(&self, catalog: Option<&MediaCatalog>, selection: &Selection) {
+    pub fn add_tab(&self, name: &str, title: &str, child: &impl IsA<gtk::Widget>) {
+        self.stack.add_titled(child, Some(name), title);
+    }
+
+    pub fn render(
+        &self,
+        catalog: Option<&MediaCatalog>,
+        selection: &Selection,
+        on_action: Rc<dyn Fn(InfoAction)>,
+    ) {
+        let tags_available =
+            catalog.is_some_and(|catalog| catalog.source.kind == DiscKind::AudioCd);
+        self.tags_page.set_visible(tags_available);
+        if !tags_available && self.stack.visible_child_name().as_deref() == Some("tags") {
+            self.stack.set_visible_child_name("info");
+        }
         let Some(catalog) = catalog else {
             self.render_fields(&[
                 InfoField::new("Type", "No source"),
                 InfoField::new("Name", "Insert or open a disc to begin"),
             ]);
+            self.render_tags_unavailable("Open an Audio CD and select a track to edit its tags.");
             return;
         };
 
         match selection {
-            Selection::Source => self.render_fields(&catalog.source_info),
+            Selection::Source => {
+                self.render_fields(&catalog.source_info);
+                self.render_tags_unavailable("Select an Audio CD track to edit its tags.");
+            }
             Selection::Title(id) => {
                 let Some(title) = catalog.titles.iter().find(|title| title.id == *id) else {
                     self.render_fields(&catalog.source_info);
+                    self.render_tags_unavailable("Select an Audio CD track to edit its tags.");
                     return;
                 };
                 let mut fields = vec![
@@ -68,14 +173,13 @@ impl InfoPanel {
                     ));
                 }
                 if let Some(size) = title.size_bytes {
-                    let size = format_bytes(size);
                     fields.push(InfoField::new(
                         if title.size_is_estimate {
                             "Estimated size"
                         } else {
                             "Size"
                         },
-                        size,
+                        format_bytes(size),
                     ));
                 }
                 if let Some(count) = title.segment_count {
@@ -91,12 +195,38 @@ impl InfoPanel {
                 {
                     fields.push(InfoField::new("Exact clip ranges", ranges));
                 }
-                fields.push(InfoField::new("File name", &title.output_file));
                 fields.push(InfoField::new(
                     "Selected tracks",
                     title.selected_track_count().to_string(),
                 ));
                 self.render_fields(&fields);
+                if catalog.source.kind == media_rip_core::DiscKind::AudioCd {
+                    self.append_track_artwork(
+                        catalog.cover_art_for_title(title.id),
+                        title.id,
+                        on_action.clone(),
+                    );
+                    self.append_output_file_editor(
+                        fields.len(),
+                        title.id,
+                        &title.output_file,
+                        on_action.clone(),
+                    );
+                    self.render_editable_tags(
+                        title.id,
+                        &title.tags,
+                        catalog.cover_art.as_ref(),
+                        on_action,
+                    );
+                } else {
+                    self.append_output_file_editor(
+                        fields.len(),
+                        title.id,
+                        &title.output_file,
+                        on_action,
+                    );
+                    self.render_tags_unavailable("Tags are available for Audio CD tracks.");
+                }
             }
             Selection::Track {
                 title_id,
@@ -114,6 +244,7 @@ impl InfoPanel {
                     });
                 let Some(track) = track else {
                     self.render_fields(&catalog.source_info);
+                    self.render_tags_unavailable("Select an Audio CD track to edit its tags.");
                     return;
                 };
                 let mut fields = vec![
@@ -134,14 +265,14 @@ impl InfoPanel {
                     fields.push(InfoField::new("Properties", track.properties.join(", ")));
                 }
                 self.render_fields(&fields);
+                self.render_tags_unavailable("Select the Audio CD track row to edit its tags.");
             }
         }
     }
 
     fn render_fields(&self, fields: &[InfoField]) {
-        while let Some(child) = self.grid.first_child() {
-            self.grid.remove(&child);
-        }
+        self.remove_info_artwork();
+        clear(&self.info_grid);
         for (row, field) in fields.iter().enumerate() {
             let label = gtk::Label::new(Some(&field.label));
             label.set_xalign(0.0);
@@ -154,8 +285,325 @@ impl InfoPanel {
             value.set_selectable(true);
             value.set_hexpand(true);
             value.add_css_class("info-value");
-            self.grid.attach(&label, 0, row as i32, 1, 1);
-            self.grid.attach(&value, 1, row as i32, 1, 1);
+            self.info_grid.attach(&label, 0, row as i32, 1, 1);
+            self.info_grid.attach(&value, 1, row as i32, 1, 1);
+        }
+    }
+
+    fn render_editable_tags(
+        &self,
+        title_id: u32,
+        tags: &[media_rip_core::MediaTag],
+        cover_art: Option<&CoverArt>,
+        on_action: Rc<dyn Fn(InfoAction)>,
+    ) {
+        clear(&self.tags_content);
+
+        self.tags_content
+            .append(&cover_art_editor(cover_art, on_action.clone()));
+
+        let scope_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let scope_label = gtk::Label::new(Some("Apply edits to"));
+        scope_label.set_xalign(0.0);
+        scope_label.set_hexpand(true);
+        let scope = gtk::DropDown::from_strings(&["This track", "Every track"]);
+        scope.set_tooltip_text(Some(
+            "Choose whether Save changes one track or the whole album",
+        ));
+        scope_row.append(&scope_label);
+        scope_row.append(&scope);
+        self.tags_content.append(&scope_row);
+
+        let warning = gtk::Label::new(Some(
+            "Album-wide mode is active. Saved values will replace the same tag on every track.",
+        ));
+        warning.set_xalign(0.0);
+        warning.set_wrap(true);
+        warning.add_css_class("tags-warning");
+        warning.set_visible(false);
+        scope.connect_selected_notify({
+            let warning = warning.clone();
+            move |scope| warning.set_visible(scope.selected() == 1)
+        });
+        self.tags_content.append(&warning);
+
+        let grid = gtk::Grid::builder()
+            .column_spacing(6)
+            .row_spacing(6)
+            .hexpand(true)
+            .build();
+        for (row, tag) in tags.iter().enumerate() {
+            let label = gtk::Label::new(Some(&tag_label(&tag.key)));
+            label.set_xalign(0.0);
+            label.set_tooltip_text(Some(&format!("Output tag: {}", tag.key)));
+            label.add_css_class("info-label");
+            let value = gtk::Entry::builder().text(&tag.value).hexpand(true).build();
+            let save = gtk::Button::with_label("Save");
+            save.add_css_class("flat");
+            save.set_tooltip_text(Some("Save this tag using the scope selected above"));
+            let key = tag.key.clone();
+            let callback = on_action.clone();
+            let scope = scope.clone();
+            let edited_value = value.clone();
+            save.connect_clicked(move |_| {
+                callback(InfoAction::SetTag {
+                    title_id,
+                    key: key.clone(),
+                    value: edited_value.text().to_string(),
+                    all_tracks: scope.selected() == 1,
+                });
+            });
+            grid.attach(&label, 0, row as i32, 1, 1);
+            grid.attach(&value, 1, row as i32, 1, 1);
+            grid.attach(&save, 2, row as i32, 1, 1);
+        }
+        self.tags_content.append(&grid);
+        self.tags_content
+            .append(&add_tag_row(title_id, &scope, on_action));
+    }
+
+    fn render_tags_unavailable(&self, message: &str) {
+        clear(&self.tags_content);
+        let label = gtk::Label::new(Some(message));
+        label.set_xalign(0.0);
+        label.set_yalign(0.0);
+        label.set_wrap(true);
+        label.add_css_class("row-detail");
+        self.tags_content.append(&label);
+    }
+
+    fn append_track_artwork(
+        &self,
+        cover_art: Option<&CoverArt>,
+        title_id: u32,
+        on_action: Rc<dyn Fn(InfoAction)>,
+    ) {
+        const ARTWORK_SIZE: i32 = 128;
+        let artwork = artwork_control(cover_art, Some(title_id), ARTWORK_SIZE, on_action);
+        artwork.set_tooltip_text(Some("Track cover artwork"));
+        artwork.set_halign(gtk::Align::End);
+        artwork.set_valign(gtk::Align::Start);
+        artwork.set_margin_top(9);
+        artwork.set_margin_end(9);
+        clear(&self.info_artwork);
+        self.info_artwork.append(&artwork);
+    }
+
+    fn remove_info_artwork(&self) {
+        clear(&self.info_artwork);
+    }
+
+    fn append_output_file_editor(
+        &self,
+        row: usize,
+        title_id: u32,
+        output_file: &str,
+        on_action: Rc<dyn Fn(InfoAction)>,
+    ) {
+        let label = gtk::Label::new(Some("File name"));
+        label.set_xalign(0.0);
+        label.add_css_class("info-label");
+        let entry = gtk::Entry::builder()
+            .text(output_file)
+            .hexpand(true)
+            .build();
+        entry.connect_changed(move |entry| {
+            on_action(InfoAction::SetOutputFile {
+                title_id,
+                output_file: entry.text().to_string(),
+            });
+        });
+        self.info_grid.attach(&label, 0, row as i32, 1, 1);
+        self.info_grid.attach(&entry, 1, row as i32, 1, 1);
+    }
+}
+
+fn cover_art_editor(cover_art: Option<&CoverArt>, on_action: Rc<dyn Fn(InfoAction)>) -> gtk::Box {
+    let section = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let label = gtk::Label::new(Some("Album artwork"));
+    label.set_xalign(0.0);
+    label.add_css_class("info-label");
+    section.append(&label);
+    section.append(&artwork_control(cover_art, None, 128, on_action));
+    section
+}
+
+fn artwork_control(
+    cover_art: Option<&CoverArt>,
+    title_id: Option<u32>,
+    size: i32,
+    on_action: Rc<dyn Fn(InfoAction)>,
+) -> gtk::Fixed {
+    let pixbuf = cover_art.and_then(|cover_art| {
+        gdk_pixbuf::Pixbuf::from_read(Cursor::new(cover_art.data.clone())).ok()
+    });
+    let (width, height) = pixbuf
+        .as_ref()
+        .map(|pixbuf| artwork_size(pixbuf.width(), pixbuf.height(), size))
+        .unwrap_or((size, size));
+
+    let overlay = gtk::Overlay::new();
+    overlay.set_size_request(width, height);
+    overlay.set_halign(gtk::Align::Start);
+    overlay.set_valign(gtk::Align::Start);
+    overlay.set_hexpand(false);
+    overlay.set_vexpand(false);
+    overlay.add_css_class("artwork-control");
+
+    if let Some(pixbuf) = pixbuf {
+        let picture = gtk::Picture::for_pixbuf(&pixbuf);
+        picture.set_keep_aspect_ratio(true);
+        picture.set_can_shrink(true);
+        picture.set_size_request(width, height);
+        picture.set_hexpand(false);
+        picture.set_vexpand(false);
+        picture.add_css_class("cover-art");
+        overlay.set_child(Some(&picture));
+    } else {
+        let placeholder = gtk::Image::from_icon_name("image-x-generic-symbolic");
+        placeholder.set_pixel_size(size / 2);
+        placeholder.set_size_request(size, size);
+        placeholder.add_css_class("cover-art-placeholder");
+        overlay.set_child(Some(&placeholder));
+    }
+
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+    actions.set_halign(gtk::Align::End);
+    actions.set_valign(gtk::Align::End);
+    actions.set_margin_end(4);
+    actions.set_margin_bottom(4);
+    actions.set_opacity(0.0);
+    actions.set_can_target(false);
+    actions.add_css_class("artwork-overlay-actions");
+
+    let remove = gtk::Button::builder()
+        .icon_name("user-trash-symbolic")
+        .tooltip_text("Remove artwork")
+        .has_frame(false)
+        .sensitive(cover_art.is_some())
+        .build();
+    let callback = on_action.clone();
+    remove.connect_clicked(move |_| callback(InfoAction::RemoveCoverArt { title_id }));
+    actions.append(&remove);
+    let choose = gtk::Button::builder()
+        .icon_name("folder-open-symbolic")
+        .tooltip_text("Choose artwork")
+        .has_frame(false)
+        .build();
+    choose.connect_clicked(move |_| on_action(InfoAction::ChooseCoverArt { title_id }));
+    actions.append(&choose);
+    overlay.add_overlay(&actions);
+
+    let hover = gtk::EventControllerMotion::new();
+    hover.connect_enter({
+        let actions = actions.clone();
+        move |_, _, _| {
+            actions.set_opacity(1.0);
+            actions.set_can_target(true);
+        }
+    });
+    hover.connect_leave(move |_| {
+        actions.set_opacity(0.0);
+        actions.set_can_target(false);
+    });
+    overlay.add_controller(hover);
+
+    // GtkBox allocates its children across the full cross-axis. Keeping the styled
+    // overlay inside a Fixed prevents that allocation from becoming visible around
+    // the image while preserving the image's decoded aspect ratio.
+    let host = gtk::Fixed::new();
+    host.set_size_request(width, height);
+    host.set_halign(gtk::Align::Start);
+    host.set_valign(gtk::Align::Start);
+    host.set_hexpand(false);
+    host.set_vexpand(false);
+    host.put(&overlay, 0.0, 0.0);
+    host
+}
+
+fn artwork_size(width: i32, height: i32, maximum: i32) -> (i32, i32) {
+    if width <= 0 || height <= 0 {
+        return (maximum, maximum);
+    }
+    if width >= height {
+        (
+            maximum,
+            ((i64::from(maximum) * i64::from(height)) / i64::from(width)).max(1) as i32,
+        )
+    } else {
+        (
+            ((i64::from(maximum) * i64::from(width)) / i64::from(height)).max(1) as i32,
+            maximum,
+        )
+    }
+}
+
+fn add_tag_row(
+    title_id: u32,
+    scope: &gtk::DropDown,
+    on_action: Rc<dyn Fn(InfoAction)>,
+) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    row.add_css_class("add-tag-row");
+    let label = gtk::Label::new(Some("Add a tag"));
+    label.set_xalign(0.0);
+    label.add_css_class("info-label");
+    row.append(&label);
+
+    let inputs = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let key = gtk::Entry::builder()
+        .placeholder_text("Tag name")
+        .tooltip_text("For example: album, artist, genre, composer")
+        .hexpand(true)
+        .build();
+    let value = gtk::Entry::builder()
+        .placeholder_text("Value")
+        .hexpand(true)
+        .build();
+    inputs.append(&key);
+    inputs.append(&value);
+    row.append(&inputs);
+
+    let add = gtk::Button::with_label("Add tag");
+    add.set_halign(gtk::Align::End);
+    add.set_tooltip_text(Some("Add this tag using the scope selected above"));
+    let scope = scope.clone();
+    add.connect_clicked(move |_| {
+        on_action(InfoAction::AddTag {
+            title_id,
+            key: key.text().to_string(),
+            value: value.text().to_string(),
+            all_tracks: scope.selected() == 1,
+        });
+    });
+    row.append(&add);
+    row
+}
+
+fn clear(container: &impl IsA<gtk::Widget>) {
+    while let Some(child) = container.first_child() {
+        if let Some(grid) = container.dynamic_cast_ref::<gtk::Grid>() {
+            grid.remove(&child);
+        } else if let Some(box_) = container.dynamic_cast_ref::<gtk::Box>() {
+            box_.remove(&child);
+        }
+    }
+}
+
+fn tag_label(key: &str) -> String {
+    match key {
+        "album_artist" => "Album artist".to_owned(),
+        "musicbrainz_recordingid" => "MusicBrainz recording ID".to_owned(),
+        "musicbrainz_albumid" => "MusicBrainz release ID".to_owned(),
+        "musicbrainz_releasegroupid" => "MusicBrainz release group ID".to_owned(),
+        "musicbrainz_discid" => "MusicBrainz disc ID".to_owned(),
+        "release_type" => "Release type".to_owned(),
+        key => {
+            let mut label = key.replace('_', " ");
+            if let Some(first) = label.get_mut(0..1) {
+                first.make_ascii_uppercase();
+            }
+            label
         }
     }
 }
@@ -182,7 +630,14 @@ fn format_playlist_ranges(key: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::format_playlist_ranges;
+    use super::{artwork_size, format_playlist_ranges};
+
+    #[test]
+    fn artwork_bounds_follow_the_source_aspect_ratio() {
+        assert_eq!(artwork_size(500, 400, 128), (128, 102));
+        assert_eq!(artwork_size(400, 500, 128), (102, 128));
+        assert_eq!(artwork_size(500, 500, 128), (128, 128));
+    }
 
     #[test]
     fn formats_exact_playlist_ranges_for_diagnostics() {

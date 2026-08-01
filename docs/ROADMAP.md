@@ -14,7 +14,7 @@ can be audited against the intended behavior.
 - [x] Track child processes in a reusable process supervisor and add escalation from graceful
   termination to forced termination.
 - [x] Detect unexpected worker/channel termination and return the UI to an actionable state.
-- [ ] Add structured per-title job results so a partially completed multi-title job can be resumed.
+- [x] Add structured per-title job results so a partially completed multi-title job can be resumed.
 - [ ] Check available space against selected-size estimates, with an explicit override for unknown
   or estimated sizes.
 
@@ -85,7 +85,9 @@ duplicate work.
   provider, with encoder availability checks.
 - [x] Add MP4 and WebM muxers where selected streams are compatible.
 - [x] Add Audio CD discovery, secure extraction, local CD-TEXT tagging, and audio output defaults.
-- [ ] Add online Audio CD metadata and checksum verification through an explicit opt-in provider.
+- [x] Add exact MusicBrainz Audio CD matching, a validated CD-TEXT release-search fallback,
+  editable tags, and an offline CD-TEXT fallback.
+- [ ] Add optional Audio CD checksum verification.
 
 ## Platforms and distribution
 

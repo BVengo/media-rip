@@ -1,5 +1,5 @@
 use gtk::prelude::*;
-use media_rip_core::Drive;
+use media_rip_core::{DiscKind, Drive};
 
 #[derive(Debug, Clone)]
 pub(crate) struct SourceBar {
@@ -23,14 +23,15 @@ impl SourceBar {
         root.append(&drives);
 
         let open = gtk::Button::builder()
-            .label("Open disc")
             .icon_name("media-optical-symbolic")
+            .tooltip_text("Open disc")
             .build();
         root.append(&open);
         Self { root, drives, open }
     }
 
     pub fn set_drives(&self, drives: &[Drive]) {
+        let selected = self.drives.active_id().map(|id| id.to_string());
         self.drives.remove_all();
         if drives.is_empty() {
             self.drives.append(
@@ -43,23 +44,25 @@ impl SourceBar {
         }
 
         for drive in drives {
-            let media = drive
-                .media_label
-                .as_deref()
-                .map(|label| format!(" — {label}"))
-                .unwrap_or_default();
-            let id_path = drive.mount_path.as_ref().unwrap_or(&drive.device_path);
+            let media = drive_description(drive);
             self.drives.append(
-                Some(&id_path.to_string_lossy()),
+                Some(&drive.device_path.to_string_lossy()),
                 &format!(
-                    "{} ({}){media}",
+                    "{} ({}) — {media}",
                     drive.display_name,
                     drive.device_path.display()
                 ),
             );
         }
-        self.drives.set_active(Some(0));
-        self.open.set_sensitive(true);
+        let restored = selected
+            .as_deref()
+            .and_then(|id| {
+                drives
+                    .iter()
+                    .position(|drive| drive.device_path.to_string_lossy() == id)
+            })
+            .map(|index| index as u32);
+        self.drives.set_active(Some(restored.unwrap_or(0)));
     }
 
     pub fn show_open_source(&self, path: &std::path::Path, name: &str) {
@@ -69,6 +72,21 @@ impl SourceBar {
             &format!("{name} — {}", path.display()),
         );
         self.drives.set_active(Some(0));
-        self.open.set_sensitive(true);
     }
+}
+
+fn drive_description(drive: &Drive) -> String {
+    if !drive.media_present {
+        return "No disc".to_owned();
+    }
+    let kind = match drive.media_kind {
+        DiscKind::Unknown => "Reading disc".to_owned(),
+        kind => kind.display_name().to_owned(),
+    };
+    drive
+        .media_label
+        .as_deref()
+        .filter(|label| !label.is_empty())
+        .map(|label| format!("{kind}: {label}"))
+        .unwrap_or(kind)
 }

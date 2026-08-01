@@ -3,7 +3,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use media_rip_core::{MediaCatalog, StreamKind, Track};
+use media_rip_core::{
+    MediaCatalog, StreamKind, Track,
+    util::{ensure_extension, sanitize_file_name},
+};
 use serde::{Deserialize, Deserializer, Serialize};
 
 const SETTINGS_VERSION: u32 = 2;
@@ -84,8 +87,10 @@ pub(crate) struct BluraySettings {
 #[serde(default)]
 pub(crate) struct AudioCdSettings {
     pub output_format: String,
+    pub file_name_template: String,
     pub secure_extraction: bool,
     pub use_disc_metadata: bool,
+    pub auto_tagging: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,8 +199,10 @@ impl Default for AudioCdSettings {
     fn default() -> Self {
         Self {
             output_format: "flac".into(),
+            file_name_template: "{artist}/{album}/{disc}-{track:02} - {title}.flac".into(),
             secure_extraction: true,
             use_disc_metadata: true,
+            auto_tagging: true,
         }
     }
 }
@@ -258,6 +265,7 @@ impl AppSettings {
 
     pub fn apply_catalog_defaults(&self, catalog: &mut MediaCatalog) {
         self.apply_audio_cd_metadata_preference(catalog);
+        self.apply_audio_cd_file_names(catalog);
         let had_multiple_titles = catalog.titles.len() > 1;
         let source_kind = catalog.source.kind;
         let duplicate_representatives = duplicate_representatives(catalog);
@@ -283,9 +291,28 @@ impl AppSettings {
         }
     }
 
+    fn apply_audio_cd_file_names(&self, catalog: &mut MediaCatalog) {
+        if catalog.source.kind != media_rip_core::DiscKind::AudioCd {
+            return;
+        }
+        for title in &mut catalog.titles {
+            title.output_file = format_audio_cd_file_name(
+                &self.audio_cd.file_name_template,
+                title,
+                &catalog.source.name,
+            );
+        }
+    }
+
     fn apply_audio_cd_metadata_preference(&self, catalog: &mut MediaCatalog) {
         if catalog.source.kind != media_rip_core::DiscKind::AudioCd
             || self.audio_cd.use_disc_metadata
+            || catalog.titles.iter().any(|title| {
+                title
+                    .tags
+                    .iter()
+                    .any(|tag| tag.key == "musicbrainz_albumid")
+            })
         {
             return;
         }
@@ -294,6 +321,13 @@ impl AppSettings {
         catalog
             .source_info
             .retain(|field| field.label != "Album artist");
+        if let Some(source) = catalog
+            .source_info
+            .iter_mut()
+            .find(|field| field.label == "Tag source")
+        {
+            source.value = "Generic track information".to_owned();
+        }
         if let Some(name) = catalog
             .source_info
             .iter_mut()
@@ -319,6 +353,10 @@ impl AppSettings {
             let generic_name = format!("Track {number:0width$}");
             title.name.clone_from(&generic_name);
             title.output_file = format!("{number:0width$} - {generic_name}.flac");
+            title.tags = vec![
+                media_rip_core::MediaTag::new("title", &generic_name),
+                media_rip_core::MediaTag::new("track", number.to_string()),
+            ];
             for track in &mut title.tracks {
                 if let Some(artist) = track.name.take() {
                     track.properties.retain(|property| property != &artist);
@@ -326,6 +364,81 @@ impl AppSettings {
             }
         }
     }
+}
+
+pub(crate) fn format_audio_cd_file_name(
+    template: &str,
+    title: &media_rip_core::Title,
+    album: &str,
+) -> String {
+    let template = if template.trim().is_empty() {
+        "{artist}/{album}/{disc}-{track:02} - {title}.flac"
+    } else {
+        template
+    };
+    let tag = |key: &str| {
+        title
+            .tags
+            .iter()
+            .find(|tag| tag.key == key)
+            .map(|tag| tag.value.as_str())
+            .and_then(nonempty)
+    };
+    let clean_value = |value: &str| {
+        if value.is_empty() {
+            String::new()
+        } else {
+            sanitize_file_name(value)
+        }
+    };
+    let track = tag("track")
+        .or_else(|| nonempty(&title.source_title_id))
+        .map(str::to_owned)
+        .unwrap_or_else(|| title.id.saturating_add(1).to_string());
+    let track = clean_value(&track);
+    let padded_track = track
+        .parse::<u32>()
+        .map(|number| format!("{number:02}"))
+        .unwrap_or_else(|_| track.clone());
+    let title_name = tag("title")
+        .or_else(|| nonempty(&title.name))
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("Track {padded_track}"));
+    let artist = tag("artist")
+        .or_else(|| tag("album_artist"))
+        .or_else(|| {
+            title
+                .tracks
+                .first()
+                .and_then(|track| track.name.as_deref())
+                .and_then(nonempty)
+        })
+        .unwrap_or("Unknown Artist");
+    let album = tag("album")
+        .or_else(|| nonempty(album).filter(|album| !album.eq_ignore_ascii_case("Audio CD")))
+        .unwrap_or("Unknown Album");
+    let disc = tag("discnumber").unwrap_or("1");
+    let title_name = clean_value(&title_name);
+    let artist = clean_value(artist);
+    let album = clean_value(album);
+    let disc = clean_value(disc);
+    let expanded = template
+        // Keep these aliases so a previously entered template continues to work.
+        .replace("{disc:1d}", &disc)
+        .replace("{disc}", &disc)
+        .replace("{track:2d}", &padded_track)
+        .replace("{track:02}", &padded_track)
+        .replace("{track}", &track)
+        .replace("{name}", &title_name)
+        .replace("{title}", &title_name)
+        .replace("{artist}", &artist)
+        .replace("{album}", &album);
+    ensure_extension(&expanded, "flac")
+}
+
+fn nonempty(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
 }
 
 fn duplicate_representatives(catalog: &MediaCatalog) -> std::collections::HashMap<String, String> {
@@ -573,6 +686,7 @@ mod tests {
         assert_eq!(settings.output.destination_mode, "automatic");
         assert_eq!(settings.io.read_retry_count, 9);
         assert!(settings.general.av_sync_messages);
+        assert!(settings.audio_cd.auto_tagging);
     }
 
     #[test]
@@ -653,7 +767,10 @@ mod tests {
                 .all(|field| field.label != "Album artist")
         );
         assert_eq!(catalog.titles[0].name, "Track 01");
-        assert_eq!(catalog.titles[0].output_file, "01 - Track 01.flac");
+        assert_eq!(
+            catalog.titles[0].output_file,
+            "Unknown Artist/Unknown Album/1-01 - Track 01.flac"
+        );
         assert_eq!(catalog.titles[0].tracks[0].name, None);
         assert!(
             !catalog.titles[0].tracks[0]
@@ -665,12 +782,79 @@ mod tests {
     #[test]
     fn enabled_cd_text_preserves_disc_and_track_names() {
         let settings = AppSettings::default();
-        let expected = audio_cd_catalog();
+        let mut expected = audio_cd_catalog();
+        expected.titles[0].output_file = "Artist/Album/1-01 - Song.flac".into();
         let mut catalog = expected.clone();
 
         settings.apply_catalog_defaults(&mut catalog);
 
         assert_eq!(catalog, expected);
+    }
+
+    #[test]
+    fn disabling_cd_text_keeps_an_exact_online_match() {
+        let mut settings = AppSettings::default();
+        settings.audio_cd.use_disc_metadata = false;
+        let mut expected = audio_cd_catalog();
+        expected.titles[0].tags.push(media_rip_core::MediaTag::new(
+            "musicbrainz_albumid",
+            "release-id",
+        ));
+        expected.titles[0].output_file = "Artist/Album/1-01 - Song.flac".into();
+        let mut catalog = expected.clone();
+
+        settings.apply_catalog_defaults(&mut catalog);
+
+        assert_eq!(catalog, expected);
+    }
+
+    #[test]
+    fn matched_audio_cd_uses_the_configured_file_name_template() {
+        let mut settings = AppSettings::default();
+        settings.audio_cd.file_name_template = "{artist} - {track:02} - {title}".into();
+        let mut catalog = audio_cd_catalog();
+        catalog.titles[0].tags.push(media_rip_core::MediaTag::new(
+            "musicbrainz_albumid",
+            "release-id",
+        ));
+
+        settings.apply_catalog_defaults(&mut catalog);
+
+        assert_eq!(catalog.titles[0].output_file, "Artist - 01 - Song.flac");
+    }
+
+    #[test]
+    fn metadata_separators_do_not_create_unconfigured_folders() {
+        let mut catalog = audio_cd_catalog();
+        catalog.source.name = "Hits/Live".into();
+        catalog.titles[0].tracks[0].name = Some("AC/DC".into());
+        catalog.titles[0].tags.push(media_rip_core::MediaTag::new(
+            "musicbrainz_albumid",
+            "release-id",
+        ));
+
+        AppSettings::default().apply_catalog_defaults(&mut catalog);
+
+        assert_eq!(
+            catalog.titles[0].output_file,
+            "AC_DC/Hits_Live/1-01 - Song.flac"
+        );
+    }
+
+    #[test]
+    fn missing_metadata_keeps_the_configured_library_structure() {
+        let mut catalog = audio_cd_catalog();
+        catalog.source.name.clear();
+        catalog.titles[0].name.clear();
+        catalog.titles[0].source_title_id.clear();
+        catalog.titles[0].tracks[0].name = None;
+
+        AppSettings::default().apply_catalog_defaults(&mut catalog);
+
+        assert_eq!(
+            catalog.titles[0].output_file,
+            "Unknown Artist/Unknown Album/1-01 - Track 01.flac"
+        );
     }
 
     #[test]
@@ -719,6 +903,7 @@ mod tests {
                 segment_count: None,
                 segment_map: None,
                 duplicate_key: None,
+                tags: Vec::new(),
                 output_file: "01 - Song.flac".into(),
                 selected: true,
             }],
@@ -727,6 +912,8 @@ mod tests {
                 InfoField::new("Name", "Album"),
                 InfoField::new("Album artist", "Artist"),
             ],
+            cover_art: None,
+            track_cover_art: Default::default(),
         }
     }
 
@@ -747,6 +934,8 @@ mod tests {
                 title("00111", "00001:00000001:00015f90;"),
             ],
             source_info: Vec::new(),
+            cover_art: None,
+            track_cover_art: Default::default(),
         }
     }
 
@@ -773,6 +962,7 @@ mod tests {
             segment_count: Some(1),
             segment_map: Some("00001.m2ts".into()),
             duplicate_key: Some(duplicate_key.into()),
+            tags: Vec::new(),
             output_file: format!("{source_title_id}.mkv"),
             selected: true,
         }

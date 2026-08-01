@@ -73,7 +73,9 @@ impl OutputProfile {
                 "Efficient open video format; re-encodes video, audio and text subtitles."
             }
             Self::AudioFlac => "Lossless audio for music, audiobooks and Audio CD tracks.",
-            Self::AudioWav => "Uncompressed PCM audio for editing and maximum compatibility.",
+            Self::AudioWav => {
+                "Uncompressed PCM audio for editing. WAV does not support embedded cover artwork."
+            }
             Self::AudioOpus => "Efficient lossy audio for spoken word and portable listening.",
             Self::AudioAac => "Broadly compatible lossy audio in an M4A container.",
         }

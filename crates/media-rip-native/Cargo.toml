@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 gtk.workspace = true
+gdk-pixbuf.workspace = true
 media-rip-core = { path = "../media-rip-core" }
 media-rip-engine = { path = "../media-rip-engine" }
 serde.workspace = true

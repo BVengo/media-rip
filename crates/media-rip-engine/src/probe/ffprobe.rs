@@ -348,6 +348,7 @@ fn title_from_probe(
         segment_count: candidate.segment_count,
         segment_map: candidate.segment_map.clone(),
         duplicate_key: candidate.duplicate_key.clone(),
+        tags: Vec::new(),
         selected: true,
     })
 }

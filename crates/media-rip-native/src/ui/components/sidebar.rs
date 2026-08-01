@@ -23,8 +23,6 @@ impl Sidebar {
         root.set_size_request(300, -1);
 
         let info = InfoPanel::new();
-        info.root.set_vexpand(true);
-        root.append(&info.root);
 
         let profile_content = gtk::Box::new(gtk::Orientation::Vertical, 6);
         profile_content.set_margin_top(8);
@@ -41,15 +39,23 @@ impl Sidebar {
         profile_description.add_css_class("row-detail");
         profile_content.append(&output_profile);
         profile_content.append(&profile_description);
-        let profile_panel = super::panel("Format and processing", &profile_content);
+        let profile_label = gtk::Label::new(Some("Format and processing"));
+        profile_label.set_xalign(0.0);
+        profile_label.add_css_class("config-label");
+        profile_content.prepend(&profile_label);
+        let profile_panel = profile_content;
         profile_panel.set_visible(false);
-        root.append(&profile_panel);
 
-        let output_content = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        let output_content = gtk::Box::new(gtk::Orientation::Vertical, 5);
         output_content.set_margin_top(8);
         output_content.set_margin_bottom(8);
         output_content.set_margin_start(8);
         output_content.set_margin_end(8);
+        let output_label = gtk::Label::new(Some("Output folder"));
+        output_label.set_xalign(0.0);
+        output_label.add_css_class("config-label");
+        output_content.append(&output_label);
+        let output_row = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         let output_entry = gtk::Entry::builder()
             .placeholder_text("Choose an output folder")
             .hexpand(true)
@@ -58,11 +64,22 @@ impl Sidebar {
             .icon_name("folder-open-symbolic")
             .tooltip_text("Choose output folder")
             .build();
-        output_content.append(&output_entry);
-        output_content.append(&browse_output);
-        let output_panel = super::panel("Output folder", &output_content);
-        output_panel.add_css_class("output-panel");
-        root.append(&output_panel);
+        output_row.append(&output_entry);
+        output_row.append(&browse_output);
+        output_content.append(&output_row);
+
+        let config_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        config_content.append(&profile_panel);
+        config_content.append(&output_content);
+        let config_scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .min_content_height(110)
+            .child(&config_content)
+            .build();
+        info.add_tab("configuration", "Configuration", &config_scroll);
+        info.root.set_vexpand(true);
+        root.append(&info.root);
 
         let selection_summary = gtk::Label::new(Some("No items selected"));
         selection_summary.set_xalign(0.5);
@@ -74,9 +91,10 @@ impl Sidebar {
         rip.add_css_class("make-mkv-button");
         rip.add_css_class("suggested-action");
         rip.set_sensitive(false);
-        let rip_content = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        let rip_content = gtk::Box::new(gtk::Orientation::Horizontal, 7);
+        rip_content.set_halign(gtk::Align::Center);
         let rip_icon = gtk::Image::from_icon_name("document-save-symbolic");
-        rip_icon.set_pixel_size(48);
+        rip_icon.set_pixel_size(18);
         let rip_label = gtk::Label::new(Some("Start rip"));
         rip_content.append(&rip_icon);
         rip_content.append(&rip_label);

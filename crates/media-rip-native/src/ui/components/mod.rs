@@ -6,8 +6,8 @@ mod sidebar;
 mod source_bar;
 mod toolbar;
 
-pub(crate) use content_tree::{ContentAction, ContentTree};
-pub(crate) use info_panel::InfoPanel;
+pub(crate) use content_tree::{ContentAction, ContentTree, DiscUiState};
+pub(crate) use info_panel::{InfoAction, InfoPanel};
 pub(crate) use messages::MessagesPanel;
 pub(crate) use settings_dialog::SettingsDialog;
 pub(crate) use sidebar::Sidebar;

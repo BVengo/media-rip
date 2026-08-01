@@ -50,7 +50,12 @@ fn scans_and_remuxes_a_small_media_source() {
 
     let engine = OpenMediaEngine::new();
     let (scan_tx, scan_rx) = mpsc::channel();
-    engine.scan(input, scan_tx, CancellationToken::default());
+    engine.scan(
+        input,
+        media_rip_core::ScanOptions::default(),
+        scan_tx,
+        CancellationToken::default(),
+    );
     let catalog = scan_rx
         .try_iter()
         .find_map(|event| match event {

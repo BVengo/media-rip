@@ -11,6 +11,9 @@ media-rip-core = { path = "../media-rip-core" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+base64.workspace = true
+sha1.workspace = true
+ureq.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

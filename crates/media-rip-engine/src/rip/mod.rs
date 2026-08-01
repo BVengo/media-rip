@@ -292,6 +292,7 @@ mod tests {
                 segment_count: None,
                 segment_map: None,
                 duplicate_key: None,
+                tags: Vec::new(),
                 output_file: format!("title-{id}.mkv"),
                 selected: true,
             })
@@ -309,6 +310,8 @@ mod tests {
                 },
                 titles,
                 source_info: Vec::new(),
+                cover_art: None,
+                track_cover_art: Default::default(),
             },
             selections: vec![
                 RipSelection {

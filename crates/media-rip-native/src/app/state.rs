@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, path::PathBuf};
 
-use media_rip_core::{MediaCatalog, OutputProfile, ports::CancellationToken};
+use media_rip_core::{Drive, MediaCatalog, OutputProfile, ports::CancellationToken};
 
 use super::AppSettings;
 
@@ -26,6 +26,7 @@ pub(crate) enum BusyState {
 #[derive(Debug, Default)]
 pub(crate) struct AppState {
     pub catalog: Option<MediaCatalog>,
+    pub drives: Vec<Drive>,
     pub expanded_titles: BTreeSet<u32>,
     pub selection: Selection,
     pub output_directory: PathBuf,
@@ -33,6 +34,7 @@ pub(crate) struct AppState {
     pub settings: AppSettings,
     pub busy: BusyState,
     pub cancellation: Option<CancellationToken>,
+    pub completed_titles_this_job: usize,
     pub close_requested: bool,
 }
 

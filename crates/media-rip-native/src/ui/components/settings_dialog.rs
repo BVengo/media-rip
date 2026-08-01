@@ -34,8 +34,10 @@ pub(crate) struct SettingsForm {
     create_protection_dumps: gtk::Switch,
     java_executable: gtk::Entry,
     audio_cd_output_format: gtk::ComboBoxText,
+    audio_cd_file_name_template: gtk::Entry,
     audio_cd_secure_extraction: gtk::Switch,
     audio_cd_use_disc_metadata: gtk::Switch,
+    audio_cd_auto_tagging: gtk::Switch,
     optical_access_provider: gtk::ComboBoxText,
     expose_to_media_players: gtk::Switch,
     streaming_enabled: gtk::Switch,
@@ -202,8 +204,13 @@ impl SettingsForm {
             ],
             &settings.audio_cd.output_format,
         );
+        let audio_cd_file_name_template = entry(
+            &settings.audio_cd.file_name_template,
+            "{artist}/{album}/{disc}-{track:02} - {title}.flac",
+        );
         let audio_cd_secure_extraction = switch(settings.audio_cd.secure_extraction);
         let audio_cd_use_disc_metadata = switch(settings.audio_cd.use_disc_metadata);
+        let audio_cd_auto_tagging = switch(settings.audio_cd.auto_tagging);
         audio_cd_secure_extraction.set_active(true);
         audio_cd_secure_extraction.set_sensitive(false);
 
@@ -481,6 +488,11 @@ impl SettingsForm {
             &audio_cd_output_format,
         ));
         cd_output.append(&setting_row(
+            "Output path",
+            "Template used for Audio CD output. Slashes in this template create folders; slashes in metadata are sanitized. Available fields: {artist}, {album}, {disc}, {track}, {track:02}, and {title}.",
+            &audio_cd_file_name_template,
+        ));
+        cd_output.append(&setting_row(
             "Secure extraction (always on)",
             "Use cdparanoia to re-read uncertain sectors and compare results.",
             &audio_cd_secure_extraction,
@@ -489,6 +501,11 @@ impl SettingsForm {
             "Read disc metadata",
             "Use embedded CD-TEXT for album, artist, and track names when available.",
             &audio_cd_use_disc_metadata,
+        ));
+        cd_output.append(&setting_row(
+            "Automatically look up tags",
+            "Match the disc with MusicBrainz while it is read, then apply editable album and track tags.",
+            &audio_cd_auto_tagging,
         ));
         audio_cd.append(&cd_output);
 
@@ -707,7 +724,6 @@ impl SettingsForm {
             debug_logging,
             expert_controls,
             av_sync_messages,
-            allow_online_access,
             minimum_free_space_gib,
             read_retry_count,
             read_buffer_mib,
@@ -753,8 +769,10 @@ impl SettingsForm {
             create_protection_dumps,
             java_executable,
             audio_cd_output_format,
+            audio_cd_file_name_template,
             audio_cd_secure_extraction,
             audio_cd_use_disc_metadata,
+            audio_cd_auto_tagging,
             optical_access_provider,
             expose_to_media_players,
             streaming_enabled,
@@ -809,8 +827,10 @@ impl SettingsForm {
         watch!(self.create_protection_dumps, "active");
         watch!(self.java_executable, "text");
         watch!(self.audio_cd_output_format, "active-id");
+        watch!(self.audio_cd_file_name_template, "text");
         watch!(self.audio_cd_secure_extraction, "active");
         watch!(self.audio_cd_use_disc_metadata, "active");
+        watch!(self.audio_cd_auto_tagging, "active");
         watch!(self.optical_access_provider, "active-id");
         watch!(self.expose_to_media_players, "active");
         watch!(self.streaming_enabled, "active");
@@ -873,8 +893,10 @@ impl SettingsForm {
         settings.bluray.java_executable = text(&self.java_executable);
 
         settings.audio_cd.output_format = active_id(&self.audio_cd_output_format, "flac");
+        settings.audio_cd.file_name_template = text(&self.audio_cd_file_name_template);
         settings.audio_cd.secure_extraction = self.audio_cd_secure_extraction.is_active();
         settings.audio_cd.use_disc_metadata = self.audio_cd_use_disc_metadata.is_active();
+        settings.audio_cd.auto_tagging = self.audio_cd_auto_tagging.is_active();
 
         settings.integrations.optical_access_provider =
             active_id(&self.optical_access_provider, "system");

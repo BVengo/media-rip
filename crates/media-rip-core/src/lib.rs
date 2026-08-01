@@ -5,7 +5,8 @@ pub mod ports;
 pub mod util;
 
 pub use model::{
-    Chapter, DiscKind, Drive, EngineEvent, InfoField, LogLevel, MediaCatalog, MediaSource,
-    OutputProfile, RipProgress, RipRequest, RipSelection, StreamKind, Title, Track,
+    Chapter, CoverArt, DiscKind, Drive, EngineEvent, InfoField, LogLevel, MediaCatalog,
+    MediaSource, MediaTag, OutputProfile, RipProgress, RipRequest, RipSelection, RipTitleResult,
+    StreamKind, Title, Track, TrackCoverArt,
 };
-pub use ports::{MediaEngine, MediaEngineError};
+pub use ports::{MediaEngine, MediaEngineError, ScanOptions};

@@ -1,7 +1,8 @@
 use std::{path::PathBuf, sync::mpsc::Sender};
 
 use media_rip_core::{
-    Drive, EngineEvent, MediaEngine, MediaEngineError, RipRequest, ports::CancellationToken,
+    Drive, EngineEvent, MediaEngine, MediaEngineError, RipRequest, ScanOptions,
+    ports::CancellationToken,
 };
 
 use crate::{platform, probe, rip};
@@ -20,12 +21,18 @@ impl MediaEngine for OpenMediaEngine {
         platform::discover_optical_drives()
     }
 
-    fn scan(&self, source: PathBuf, events: Sender<EngineEvent>, cancellation: CancellationToken) {
+    fn scan(
+        &self,
+        source: PathBuf,
+        options: ScanOptions,
+        events: Sender<EngineEvent>,
+        cancellation: CancellationToken,
+    ) {
         let _ = events.send(EngineEvent::ScanStarted {
             source: source.clone(),
         });
 
-        match probe::scan_source(&source, &events, &cancellation) {
+        match probe::scan_source(&source, options, &events, &cancellation) {
             Ok(catalog) => {
                 let _ = events.send(EngineEvent::ScanFinished(Box::new(catalog)));
             }

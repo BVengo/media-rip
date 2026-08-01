@@ -6,12 +6,15 @@ use std::{
 
 use gtk::{glib, prelude::*};
 use media_rip_core::{
-    MediaCatalog, Title,
+    DiscKind, MediaCatalog, Title,
     util::{format_bytes, format_duration},
 };
 
+use crate::app::Selection;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ContentAction {
+    CycleSelectAll,
     SelectTitle(u32),
     SelectTrack {
         title_id: u32,
@@ -27,10 +30,6 @@ pub(crate) enum ContentAction {
         stream_index: u32,
         selected: bool,
     },
-    SetOutputFile {
-        title_id: u32,
-        output_file: String,
-    },
 }
 
 #[derive(Debug, Clone)]
@@ -40,16 +39,23 @@ pub(crate) struct ContentTree {
     scroll: gtk::ScrolledWindow,
     pending_scroll_restore: Rc<RefCell<Option<glib::SignalHandlerId>>>,
     expanded_rows: Rc<RefCell<HashMap<u32, ExpandedRow>>>,
+    select_all: Rc<RefCell<Option<gtk::CheckButton>>>,
     updating_checks: Rc<Cell<bool>>,
     pub idle_open: gtk::Button,
+    idle_image: gtk::Image,
+    idle_spinner: gtk::Spinner,
+    idle_label: gtk::Label,
+    idle_hint: gtk::Label,
 }
 
 #[derive(Debug, Clone)]
 struct ExpandedRow {
+    row: gtk::Box,
     button: gtk::Button,
     selected: gtk::CheckButton,
     tracks: gtk::Box,
     track_buttons: HashMap<u32, gtk::CheckButton>,
+    track_rows: HashMap<u32, gtk::Box>,
 }
 
 impl ContentTree {
@@ -64,19 +70,21 @@ impl ContentTree {
         let idle_open = gtk::Button::new();
         idle_open.add_css_class("idle-disc-button");
         let button_content = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        let image = gtk::Image::from_icon_name("media-optical-symbolic");
-        image.set_pixel_size(112);
-        let button_label = gtk::Label::new(Some("Open disc"));
-        button_label.add_css_class("idle-title");
-        button_content.append(&image);
-        button_content.append(&button_label);
+        let idle_image = gtk::Image::from_icon_name("media-optical-symbolic");
+        idle_image.set_pixel_size(112);
+        let idle_spinner = gtk::Spinner::new();
+        idle_spinner.set_size_request(112, 112);
+        idle_spinner.set_visible(false);
+        let idle_label = gtk::Label::new(Some("Open disc"));
+        idle_label.add_css_class("idle-title");
+        button_content.append(&idle_image);
+        button_content.append(&idle_spinner);
+        button_content.append(&idle_label);
         idle_open.set_child(Some(&button_content));
-        let hint = gtk::Label::new(Some(
-            "Insert an optical disc, or open a media file or folder above.",
-        ));
-        hint.add_css_class("idle-caption");
+        let idle_hint = gtk::Label::new(Some("No disc detected. Insert an optical disc to begin."));
+        idle_hint.add_css_class("idle-caption");
         idle.append(&idle_open);
-        idle.append(&hint);
+        idle.append(&idle_hint);
         stack.add_named(&idle, Some("empty"));
 
         let title_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -95,8 +103,50 @@ impl ContentTree {
             scroll,
             pending_scroll_restore: Rc::new(RefCell::new(None)),
             expanded_rows: Rc::new(RefCell::new(HashMap::new())),
+            select_all: Rc::new(RefCell::new(None)),
             updating_checks: Rc::new(Cell::new(false)),
             idle_open,
+            idle_image,
+            idle_spinner,
+            idle_label,
+            idle_hint,
+        }
+    }
+
+    pub fn set_disc_state(&self, state: DiscUiState, enabled: bool) {
+        self.idle_open.set_sensitive(enabled);
+        match state {
+            DiscUiState::Absent => {
+                self.idle_spinner.stop();
+                self.idle_spinner.set_visible(false);
+                self.idle_image.set_visible(true);
+                self.idle_image
+                    .set_icon_name(Some("media-optical-symbolic"));
+                self.idle_label.set_text("Open disc");
+                self.idle_hint
+                    .set_text("No disc detected. Insert an optical disc to begin.");
+            }
+            DiscUiState::Reading => {
+                self.idle_image.set_visible(false);
+                self.idle_spinner.set_visible(true);
+                self.idle_spinner.start();
+                self.idle_label.set_text("Reading disc…");
+                self.idle_hint
+                    .set_text("A disc was detected. Waiting for the system to identify it.");
+            }
+            DiscUiState::Ready { kind, label } => {
+                self.idle_spinner.stop();
+                self.idle_spinner.set_visible(false);
+                self.idle_image.set_visible(true);
+                self.idle_image.set_icon_name(Some(kind.icon_name()));
+                self.idle_label
+                    .set_text(&format!("Open {}", kind.display_name()));
+                self.idle_hint.set_text(
+                    label
+                        .as_deref()
+                        .unwrap_or("Disc ready. Open it to read the available content."),
+                );
+            }
         }
     }
 
@@ -105,6 +155,7 @@ impl ContentTree {
             self.scroll.vadjustment().disconnect(handler);
         }
         self.expanded_rows.borrow_mut().clear();
+        self.select_all.borrow_mut().take();
         clear_box(&self.title_box);
         self.stack.set_visible_child_name("empty");
     }
@@ -113,12 +164,18 @@ impl ContentTree {
         &self,
         catalog: &MediaCatalog,
         expanded: &BTreeSet<u32>,
+        selection: &Selection,
         on_action: Rc<dyn Fn(ContentAction)>,
     ) {
         let adjustment = self.scroll.vadjustment();
         let scroll_position = adjustment.value();
         self.expanded_rows.borrow_mut().clear();
+        self.select_all.borrow_mut().take();
         clear_box(&self.title_box);
+        let (selection_row, select_all) =
+            select_all_row(catalog, on_action.clone(), self.updating_checks.clone());
+        self.title_box.append(&selection_row);
+        *self.select_all.borrow_mut() = Some(select_all);
         for title in &catalog.titles {
             let section = gtk::Box::new(gtk::Orientation::Vertical, 0);
             let (header, button, selected) = title_row(
@@ -130,6 +187,7 @@ impl ContentTree {
             section.append(&header);
             let tracks = gtk::Box::new(gtk::Orientation::Vertical, 0);
             let mut track_buttons = HashMap::new();
+            let mut track_rows = HashMap::new();
             for track in &title.tracks {
                 let (row, selected) = track_row(
                     title.id,
@@ -139,6 +197,7 @@ impl ContentTree {
                 );
                 tracks.append(&row);
                 track_buttons.insert(track.index, selected);
+                track_rows.insert(track.index, row);
             }
             tracks.set_visible(expanded.contains(&title.id));
             section.append(&tracks);
@@ -146,13 +205,16 @@ impl ContentTree {
             self.expanded_rows.borrow_mut().insert(
                 title.id,
                 ExpandedRow {
+                    row: header,
                     button,
                     selected,
                     tracks,
                     track_buttons,
+                    track_rows,
                 },
             );
         }
+        self.sync_view_selection(selection);
         self.stack.set_visible_child_name("titles");
         if let Some(handler) = self.pending_scroll_restore.borrow_mut().take() {
             adjustment.disconnect(handler);
@@ -200,6 +262,61 @@ impl ContentTree {
         }
         self.updating_checks.set(false);
     }
+
+    pub fn sync_select_all(&self, catalog: &MediaCatalog) {
+        let Some(button) = self.select_all.borrow().as_ref().cloned() else {
+            return;
+        };
+        self.updating_checks.set(true);
+        set_check_button_state(&button, select_all_check_state(catalog));
+        self.updating_checks.set(false);
+    }
+
+    pub fn sync_all_checks(&self, catalog: &MediaCatalog) {
+        for title in &catalog.titles {
+            self.sync_title_checks(title);
+        }
+        self.sync_select_all(catalog);
+    }
+
+    pub fn sync_view_selection(&self, selection: &Selection) {
+        for (title_id, expanded_row) in self.expanded_rows.borrow().iter() {
+            set_viewing(
+                &expanded_row.row,
+                matches!(selection, Selection::Title(selected_id) if selected_id == title_id),
+            );
+            for (stream_index, track_row) in &expanded_row.track_rows {
+                set_viewing(
+                    track_row,
+                    matches!(
+                        selection,
+                        Selection::Track {
+                            title_id: selected_title_id,
+                            stream_index: selected_stream_index,
+                        } if selected_title_id == title_id && selected_stream_index == stream_index
+                    ),
+                );
+            }
+        }
+    }
+}
+
+fn set_viewing(row: &gtk::Box, viewing: bool) {
+    if viewing {
+        row.add_css_class("viewing-row");
+    } else {
+        row.remove_css_class("viewing-row");
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum DiscUiState {
+    Absent,
+    Reading,
+    Ready {
+        kind: DiscKind,
+        label: Option<String>,
+    },
 }
 
 fn title_row(
@@ -296,21 +413,6 @@ fn title_row(
     labels.append(&detail);
     row.append(&labels);
 
-    let output_file = gtk::Entry::builder()
-        .text(&title.output_file)
-        .width_chars(18)
-        .max_width_chars(28)
-        .tooltip_text("Output file name")
-        .build();
-    let callback = on_action.clone();
-    output_file.connect_changed(move |entry| {
-        callback(ContentAction::SetOutputFile {
-            title_id,
-            output_file: entry.text().to_string(),
-        });
-    });
-    row.append(&output_file);
-
     let click = gtk::GestureClick::new();
     let callback = on_action.clone();
     click.connect_released(move |_, _, _, _| callback(ContentAction::SelectTitle(title_id)));
@@ -328,27 +430,82 @@ enum CheckState {
 impl CheckState {
     fn tooltip(self) -> &'static str {
         match self {
-            Self::None => "No tracks are included",
-            Self::Some => "Some tracks are included",
-            Self::All => "All tracks are included",
+            Self::None => "This title is excluded; its track choices are preserved",
+            Self::Some => "This title is included with selected tracks",
+            Self::All => "This title and all its tracks are included",
         }
     }
 }
 
 fn title_check_state(title: &Title) -> CheckState {
-    if title.tracks.is_empty() {
-        return if title.selected {
-            CheckState::All
-        } else {
-            CheckState::None
-        };
+    if !title.selected {
+        return CheckState::None;
     }
     let selected = title.tracks.iter().filter(|track| track.selected).count();
-    match selected {
-        0 => CheckState::None,
-        count if count == title.tracks.len() => CheckState::All,
-        _ => CheckState::Some,
+    if title.tracks.is_empty() || selected == title.tracks.len() {
+        CheckState::All
+    } else {
+        CheckState::Some
     }
+}
+
+fn select_all_check_state(catalog: &MediaCatalog) -> CheckState {
+    if catalog.titles.iter().all(|title| !title.selected) {
+        return CheckState::None;
+    }
+    if catalog
+        .titles
+        .iter()
+        .all(|title| title.selected && title.tracks.iter().all(|track| track.selected))
+    {
+        CheckState::All
+    } else {
+        CheckState::Some
+    }
+}
+
+fn set_check_button_state(button: &gtk::CheckButton, state: CheckState) {
+    button.set_active(state == CheckState::All);
+    button.set_inconsistent(state == CheckState::Some);
+    button.set_tooltip_text(Some(match state {
+        CheckState::None => "Select every title while preserving its track choices",
+        CheckState::Some => "Select every title and every track",
+        CheckState::All => "Deselect every title while preserving its track choices",
+    }));
+}
+
+fn select_all_row(
+    catalog: &MediaCatalog,
+    on_action: Rc<dyn Fn(ContentAction)>,
+    updating_checks: Rc<Cell<bool>>,
+) -> (gtk::Box, gtk::CheckButton) {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    row.add_css_class("select-all-row");
+
+    let selected = gtk::CheckButton::new();
+    set_check_button_state(&selected, select_all_check_state(catalog));
+    selected.connect_toggled(move |_| {
+        if !updating_checks.get() {
+            on_action(ContentAction::CycleSelectAll);
+        }
+    });
+    row.append(&selected);
+
+    let labels = gtk::Box::new(gtk::Orientation::Vertical, 1);
+    labels.set_hexpand(true);
+    let label = gtk::Label::new(Some("Select all content"));
+    label.set_xalign(0.0);
+    label.add_css_class("row-title");
+    let detail = gtk::Label::new(Some(
+        "Cycles through none, preferred tracks, and everything",
+    ));
+    detail.set_xalign(0.0);
+    detail.add_css_class("row-detail");
+    labels.append(&label);
+    labels.append(&detail);
+    row.append(&labels);
+
+    (row, selected)
 }
 
 fn track_row(
@@ -411,18 +568,66 @@ fn clear_box(container: &gtk::Box) {
 mod tests {
     use media_rip_core::{StreamKind, Track};
 
-    use super::{CheckState, title_check_state};
+    use std::{collections::BTreeMap, path::PathBuf};
+
+    use media_rip_core::{DiscKind, MediaCatalog, MediaSource};
+
+    use super::{CheckState, select_all_check_state, title_check_state};
 
     #[test]
     fn title_checkbox_reports_none_some_and_all_tracks() {
         let mut title = title_with_tracks(&[false, false]);
-        assert_eq!(title_check_state(&title), CheckState::None);
+        assert_eq!(title_check_state(&title), CheckState::Some);
 
         title.tracks[0].selected = true;
         assert_eq!(title_check_state(&title), CheckState::Some);
 
         title.tracks[1].selected = true;
         assert_eq!(title_check_state(&title), CheckState::All);
+
+        title.selected = false;
+        assert_eq!(title_check_state(&title), CheckState::None);
+    }
+
+    #[test]
+    fn select_all_checkbox_reports_top_level_and_nested_selection() {
+        let mut catalog = catalog_with_titles(&[&[true, false], &[true]]);
+        assert_eq!(select_all_check_state(&catalog), CheckState::Some);
+
+        catalog.titles[0].tracks[1].selected = true;
+        assert_eq!(select_all_check_state(&catalog), CheckState::All);
+
+        catalog
+            .titles
+            .iter_mut()
+            .for_each(|title| title.selected = false);
+        assert_eq!(select_all_check_state(&catalog), CheckState::None);
+    }
+
+    fn catalog_with_titles(selections: &[&[bool]]) -> MediaCatalog {
+        MediaCatalog {
+            source: MediaSource {
+                id: "test".into(),
+                name: "Test".into(),
+                path: PathBuf::from("test"),
+                kind: DiscKind::File,
+                drive: None,
+                capacity_bytes: None,
+                encrypted: None,
+            },
+            titles: selections
+                .iter()
+                .enumerate()
+                .map(|(id, selected)| {
+                    let mut title = title_with_tracks(selected);
+                    title.id = id as u32;
+                    title
+                })
+                .collect(),
+            source_info: Vec::new(),
+            cover_art: None,
+            track_cover_art: BTreeMap::new(),
+        }
     }
 
     fn title_with_tracks(selected: &[bool]) -> media_rip_core::Title {
@@ -452,6 +657,7 @@ mod tests {
             segment_count: None,
             segment_map: None,
             duplicate_key: None,
+            tags: Vec::new(),
             output_file: "test.mkv".into(),
             selected: true,
         }

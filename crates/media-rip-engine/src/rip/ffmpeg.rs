@@ -8,9 +8,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use media_rip_core::{
-    DiscKind, EngineEvent, LogLevel, MediaEngineError, OutputProfile, RipProgress, RipRequest,
-    RipSelection, Title, ports::CancellationToken, util::ensure_extension,
+    CoverArt, DiscKind, EngineEvent, LogLevel, MediaEngineError, OutputProfile, RipProgress,
+    RipRequest, RipSelection, RipTitleResult, Title, ports::CancellationToken,
+    util::ensure_extension,
 };
 
 use crate::process::ProcessSupervisor;
@@ -77,6 +79,13 @@ pub(super) fn process_title(
             destination.display()
         )));
     }
+    let parent = destination.parent().unwrap_or(&request.output_directory);
+    fs::create_dir_all(parent).map_err(|error| {
+        MediaEngineError::Other(format!(
+            "could not create output folder {}: {error}",
+            parent.display()
+        ))
+    })?;
 
     let temporary = temporary_output_path(&destination, title.id);
     let extracted_cd = if request.catalog.source.kind == DiscKind::AudioCd {
@@ -98,12 +107,38 @@ pub(super) fn process_title(
         title,
         extracted_cd.as_ref().map(|audio| audio.0.as_path()),
     );
+    let attached_cover = attached_cover_art(request, title)
+        .map(|art| TemporaryCoverArt::write(&destination, title.id, art))
+        .transpose()?;
+    if let Some(cover) = &attached_cover {
+        command.arg("-i").arg(&cover.0);
+    }
     for stream in &selection.stream_indices {
         command.args(["-map", &format!("0:{stream}")]);
     }
+    if attached_cover.is_some() {
+        command.args(["-map", "1:v:0"]);
+    }
     command.args(["-map_chapters", "0"]);
     add_audio_cd_metadata(&mut command, request, title);
-    add_output_profile(&mut command, request.output_profile);
+    add_opus_cover_art_metadata(&mut command, request, title);
+    add_output_profile(
+        &mut command,
+        request.output_profile,
+        attached_cover.is_some(),
+    );
+    if attached_cover.is_some() {
+        command.args([
+            "-c:v",
+            "copy",
+            "-disposition:v:0",
+            "attached_pic",
+            "-metadata:s:v:0",
+            "title=Album cover",
+            "-metadata:s:v:0",
+            "comment=Cover (front)",
+        ]);
+    }
     command.args(["-progress", "pipe:1", "-nostats"]);
     if request.overwrite {
         command.arg("-y");
@@ -201,10 +236,15 @@ pub(super) fn process_title(
                     destination.display()
                 ))
             })?;
-            let _ = events.send(EngineEvent::TitleFinished {
+            let bytes_written = fs::metadata(&destination)
+                .map(|metadata| metadata.len())
+                .ok();
+            let _ = events.send(EngineEvent::TitleFinished(RipTitleResult {
+                title_id: title.id,
                 title_name: title.name.clone(),
                 destination,
-            });
+                bytes_written,
+            }));
             return Ok(());
         }
 
@@ -212,7 +252,7 @@ pub(super) fn process_title(
     }
 }
 
-fn add_output_profile(command: &mut Command, profile: OutputProfile) {
+fn add_output_profile(command: &mut Command, profile: OutputProfile, has_cover_stream: bool) {
     match profile {
         OutputProfile::PreserveMkv => {
             command.args(["-c", "copy", "-f", "matroska"]);
@@ -232,7 +272,7 @@ fn add_output_profile(command: &mut Command, profile: OutputProfile) {
                 "-c:s",
                 "mov_text",
                 "-movflags",
-                "+faststart",
+                "+faststart+use_metadata_tags",
                 "-f",
                 "mp4",
             ]);
@@ -264,15 +304,10 @@ fn add_output_profile(command: &mut Command, profile: OutputProfile) {
             ]);
         }
         OutputProfile::AudioFlac => {
-            command.args([
-                "-vn",
-                "-c:a",
-                "flac",
-                "-compression_level",
-                "8",
-                "-f",
-                "flac",
-            ]);
+            if !has_cover_stream {
+                command.arg("-vn");
+            }
+            command.args(["-c:a", "flac", "-compression_level", "8", "-f", "flac"]);
         }
         OutputProfile::AudioWav => {
             command.args(["-vn", "-c:a", "pcm_s16le", "-f", "wav"]);
@@ -283,14 +318,16 @@ fn add_output_profile(command: &mut Command, profile: OutputProfile) {
             ]);
         }
         OutputProfile::AudioAac => {
+            if !has_cover_stream {
+                command.arg("-vn");
+            }
             command.args([
-                "-vn",
                 "-c:a",
                 "aac",
                 "-b:a",
                 "192k",
                 "-movflags",
-                "+faststart",
+                "+faststart+use_metadata_tags",
                 "-f",
                 "mp4",
             ]);
@@ -406,7 +443,64 @@ fn add_audio_cd_metadata(command: &mut Command, request: &RipRequest, title: &Ti
     }
 }
 
-fn audio_cd_metadata(request: &RipRequest, title: &Title) -> Vec<(&'static str, String)> {
+fn attached_cover_art<'a>(request: &'a RipRequest, title: &Title) -> Option<&'a CoverArt> {
+    (request.catalog.source.kind == DiscKind::AudioCd
+        && matches!(
+            request.output_profile,
+            OutputProfile::AudioFlac | OutputProfile::AudioAac
+        ))
+    .then_some(request.catalog.cover_art_for_title(title.id))
+    .flatten()
+}
+
+fn add_opus_cover_art_metadata(command: &mut Command, request: &RipRequest, title: &Title) {
+    if request.catalog.source.kind != DiscKind::AudioCd
+        || request.output_profile != OutputProfile::AudioOpus
+    {
+        return;
+    }
+    if let Some(cover_art) = request.catalog.cover_art_for_title(title.id) {
+        command.args([
+            "-metadata",
+            &format!(
+                "METADATA_BLOCK_PICTURE={}",
+                metadata_block_picture(cover_art)
+            ),
+        ]);
+    }
+}
+
+/// Build the FLAC picture block used by Vorbis comments in Ogg Opus files.
+fn metadata_block_picture(cover_art: &CoverArt) -> String {
+    let mut block = Vec::with_capacity(32 + cover_art.mime_type.len() + cover_art.data.len());
+    push_u32(&mut block, 3); // Front cover
+    push_bytes(&mut block, cover_art.mime_type.as_bytes());
+    push_bytes(&mut block, &[]); // Description
+    for value in [0, 0, 0, 0] {
+        push_u32(&mut block, value); // Width, height, depth and palette size are unknown.
+    }
+    push_bytes(&mut block, &cover_art.data);
+    STANDARD.encode(block)
+}
+
+fn push_bytes(output: &mut Vec<u8>, value: &[u8]) {
+    push_u32(output, value.len() as u32);
+    output.extend_from_slice(value);
+}
+
+fn push_u32(output: &mut Vec<u8>, value: u32) {
+    output.extend_from_slice(&value.to_be_bytes());
+}
+
+fn audio_cd_metadata(request: &RipRequest, title: &Title) -> Vec<(String, String)> {
+    if !title.tags.is_empty() {
+        return title
+            .tags
+            .iter()
+            .filter(|tag| !tag.key.trim().is_empty() && !tag.value.is_empty())
+            .map(|tag| (tag.key.clone(), tag.value.clone()))
+            .collect();
+    }
     let album_artist = request
         .catalog
         .source_info
@@ -418,31 +512,18 @@ fn audio_cd_metadata(request: &RipRequest, title: &Title) -> Vec<(&'static str, 
         .first()
         .and_then(|track| track.name.as_deref())
         .or(album_artist);
-    let track_total = request
-        .catalog
-        .titles
-        .iter()
-        .filter_map(|title| title.source_title_id.parse::<u32>().ok())
-        .max()
-        .unwrap_or(request.catalog.titles.len() as u32);
-    let track_number = if track_total > 0 {
-        format!("{}/{track_total}", title.source_title_id)
-    } else {
-        title.source_title_id.clone()
-    };
-
     [
         ("title", Some(title.name.as_str())),
         ("album", Some(request.catalog.source.name.as_str())),
         ("artist", artist),
         ("album_artist", album_artist),
-        ("track", Some(track_number.as_str())),
+        ("track", Some(title.source_title_id.as_str())),
     ]
     .into_iter()
     .filter_map(|(key, value)| {
         value
             .filter(|value| !value.is_empty())
-            .map(|value| (key, value.to_owned()))
+            .map(|value| (key.to_owned(), value.to_owned()))
     })
     .collect()
 }
@@ -462,6 +543,44 @@ fn cd_wave_path(destination: &Path, title_id: u32) -> PathBuf {
 struct TemporaryCdAudio(PathBuf);
 
 impl Drop for TemporaryCdAudio {
+    fn drop(&mut self) {
+        cleanup_partial(&self.0);
+    }
+}
+
+struct TemporaryCoverArt(PathBuf);
+
+impl TemporaryCoverArt {
+    fn write(
+        destination: &Path,
+        title_id: u32,
+        cover_art: &CoverArt,
+    ) -> Result<Self, MediaEngineError> {
+        let extension = if cover_art.mime_type == "image/png" {
+            "png"
+        } else {
+            "jpg"
+        };
+        let file_name = destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("track");
+        let path = destination.with_file_name(format!(
+            ".{file_name}.{}.{}.cover.{extension}",
+            std::process::id(),
+            title_id
+        ));
+        fs::write(&path, &cover_art.data).map_err(|error| {
+            MediaEngineError::Other(format!(
+                "could not prepare album artwork beside {}: {error}",
+                destination.display()
+            ))
+        })?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for TemporaryCoverArt {
     fn drop(&mut self) {
         cleanup_partial(&self.0);
     }
@@ -559,7 +678,7 @@ mod tests {
     #[test]
     fn profile_arguments_select_the_requested_container_and_codecs() {
         let mut command = Command::new("ffmpeg");
-        add_output_profile(&mut command, OutputProfile::H264Mp4);
+        add_output_profile(&mut command, OutputProfile::H264Mp4, false);
         let arguments = command
             .get_args()
             .map(|value| value.to_string_lossy())
@@ -577,7 +696,7 @@ mod tests {
             (OutputProfile::AudioAac, "aac", "mp4"),
         ] {
             let mut command = Command::new("ffmpeg");
-            add_output_profile(&mut command, profile);
+            add_output_profile(&mut command, profile, false);
             let arguments = command
                 .get_args()
                 .map(|value| value.to_string_lossy())
@@ -623,6 +742,7 @@ mod tests {
                 segment_count: None,
                 segment_map: None,
                 duplicate_key: None,
+                tags: Vec::new(),
                 output_file: format!("{number:02}.flac"),
                 selected: true,
             })
@@ -640,6 +760,8 @@ mod tests {
                 },
                 source_info: vec![InfoField::new("Album artist", "The Narrator")],
                 titles,
+                cover_art: None,
+                track_cover_art: Default::default(),
             },
             selections: Vec::new(),
             output_directory: PathBuf::new(),
@@ -649,11 +771,139 @@ mod tests {
 
         let metadata = audio_cd_metadata(&request, &request.catalog.titles[8]);
 
-        assert!(metadata.contains(&("title", "Chapter 9".to_owned())));
-        assert!(metadata.contains(&("album", "The Book".to_owned())));
-        assert!(metadata.contains(&("artist", "The Narrator".to_owned())));
-        assert!(metadata.contains(&("album_artist", "The Narrator".to_owned())));
-        assert!(metadata.contains(&("track", "9/12".to_owned())));
+        assert!(metadata.contains(&("title".to_owned(), "Chapter 9".to_owned())));
+        assert!(metadata.contains(&("album".to_owned(), "The Book".to_owned())));
+        assert!(metadata.contains(&("artist".to_owned(), "The Narrator".to_owned())));
+        assert!(metadata.contains(&("album_artist".to_owned(), "The Narrator".to_owned())));
+        assert!(metadata.contains(&("track".to_owned(), "9".to_owned())));
+    }
+
+    #[test]
+    fn audio_cd_metadata_uses_the_edited_tag_values() {
+        let mut request = audio_cd_request();
+        request.catalog.titles[0].tags = vec![
+            media_rip_core::MediaTag::new("title", "Edited title"),
+            media_rip_core::MediaTag::new("musicbrainz_discid", "disc-id"),
+        ];
+
+        assert_eq!(
+            audio_cd_metadata(&request, &request.catalog.titles[0]),
+            vec![
+                ("title".to_owned(), "Edited title".to_owned()),
+                ("musicbrainz_discid".to_owned(), "disc-id".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn opus_cover_art_uses_a_metadata_block_picture_tag() {
+        let mut request = audio_cd_request();
+        request.output_profile = OutputProfile::AudioOpus;
+        request.catalog.cover_art = Some(CoverArt::new("image/jpeg", vec![1, 2, 3, 4]));
+        let mut command = Command::new("ffmpeg");
+
+        add_opus_cover_art_metadata(&mut command, &request, &request.catalog.titles[0]);
+
+        let arguments = command
+            .get_args()
+            .map(|value| value.to_string_lossy())
+            .collect::<Vec<_>>();
+        let picture = arguments
+            .iter()
+            .find_map(|value| value.strip_prefix("METADATA_BLOCK_PICTURE="))
+            .expect("picture metadata");
+        let decoded = STANDARD.decode(picture).expect("valid base64");
+        assert_eq!(&decoded[0..4], &3_u32.to_be_bytes());
+        assert!(decoded.ends_with(&[1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn attached_cover_streams_are_used_only_by_compatible_audio_containers() {
+        let mut request = audio_cd_request();
+        request.catalog.cover_art = Some(CoverArt::new("image/png", vec![1]));
+        for profile in [OutputProfile::AudioFlac, OutputProfile::AudioAac] {
+            request.output_profile = profile;
+            assert!(attached_cover_art(&request, &request.catalog.titles[0]).is_some());
+        }
+        for profile in [OutputProfile::AudioOpus, OutputProfile::AudioWav] {
+            request.output_profile = profile;
+            assert!(attached_cover_art(&request, &request.catalog.titles[0]).is_none());
+        }
+    }
+
+    #[test]
+    fn track_cover_art_can_inherit_override_or_remove_album_art() {
+        let mut request = audio_cd_request();
+        let title = &request.catalog.titles[0];
+        request.catalog.cover_art = Some(CoverArt::new("image/png", vec![1]));
+        assert_eq!(
+            attached_cover_art(&request, title).map(|art| art.data.as_slice()),
+            Some(&[1][..])
+        );
+
+        request.catalog.track_cover_art.insert(
+            title.id,
+            media_rip_core::TrackCoverArt::Custom(CoverArt::new("image/jpeg", vec![2])),
+        );
+        assert_eq!(
+            attached_cover_art(&request, title).map(|art| art.data.as_slice()),
+            Some(&[2][..])
+        );
+
+        request
+            .catalog
+            .track_cover_art
+            .insert(title.id, media_rip_core::TrackCoverArt::Removed);
+        assert!(attached_cover_art(&request, title).is_none());
+    }
+
+    fn audio_cd_request() -> RipRequest {
+        RipRequest {
+            catalog: MediaCatalog {
+                source: MediaSource {
+                    id: "cd".into(),
+                    name: "Album".into(),
+                    path: PathBuf::from("/dev/cdrom"),
+                    kind: DiscKind::AudioCd,
+                    drive: None,
+                    capacity_bytes: None,
+                    encrypted: None,
+                },
+                titles: vec![Title {
+                    id: 0,
+                    source_title_id: "1".into(),
+                    name: "Track 01".into(),
+                    is_main_title: false,
+                    duration_ms: 1_000,
+                    size_bytes: None,
+                    size_is_estimate: false,
+                    chapters: Vec::new(),
+                    tracks: vec![Track {
+                        index: 0,
+                        kind: StreamKind::Audio,
+                        codec: "PCM".into(),
+                        codec_long_name: None,
+                        language: None,
+                        name: None,
+                        properties: Vec::new(),
+                        selected: true,
+                    }],
+                    segment_count: None,
+                    segment_map: None,
+                    duplicate_key: None,
+                    tags: Vec::new(),
+                    output_file: "01.flac".into(),
+                    selected: true,
+                }],
+                source_info: Vec::new(),
+                cover_art: None,
+                track_cover_art: Default::default(),
+            },
+            selections: Vec::new(),
+            output_directory: PathBuf::new(),
+            overwrite: false,
+            output_profile: OutputProfile::AudioFlac,
+        }
     }
 
     #[test]

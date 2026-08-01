@@ -25,6 +25,18 @@ pub struct RipProgress {
     pub destination: PathBuf,
 }
 
+/// The durable result of saving one title in a potentially multi-title job.
+///
+/// Frontends can use the stable title ID to remove completed work from the
+/// active selection, making a failed or cancelled job safe to resume.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RipTitleResult {
+    pub title_id: u32,
+    pub title_name: String,
+    pub destination: PathBuf,
+    pub bytes_written: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EngineEvent {
     Log {
@@ -46,10 +58,7 @@ pub enum EngineEvent {
         title_count: usize,
     },
     RipProgress(RipProgress),
-    TitleFinished {
-        title_name: String,
-        destination: PathBuf,
-    },
+    TitleFinished(RipTitleResult),
     RipFinished {
         saved_titles: usize,
         destination: PathBuf,

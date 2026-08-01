@@ -11,6 +11,21 @@ use thiserror::Error;
 
 use crate::{Drive, EngineEvent, RipRequest};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScanOptions {
+    pub auto_tag_audio: bool,
+    pub allow_online_access: bool,
+}
+
+impl Default for ScanOptions {
+    fn default() -> Self {
+        Self {
+            auto_tag_audio: true,
+            allow_online_access: true,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum MediaEngineError {
     #[error("the input does not exist: {0}")]
@@ -45,7 +60,13 @@ impl CancellationToken {
 /// UI-facing media operations. Implementations must do long work off the GTK thread.
 pub trait MediaEngine: Send + Sync {
     fn available_drives(&self) -> Result<Vec<Drive>, MediaEngineError>;
-    fn scan(&self, source: PathBuf, events: Sender<EngineEvent>, cancellation: CancellationToken);
+    fn scan(
+        &self,
+        source: PathBuf,
+        options: ScanOptions,
+        events: Sender<EngineEvent>,
+        cancellation: CancellationToken,
+    );
     fn rip(
         &self,
         request: RipRequest,

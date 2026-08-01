@@ -1,5 +1,7 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
+    fs,
+    io::Cursor,
     path::{Path, PathBuf},
     process::Command,
     rc::Rc,
@@ -10,15 +12,16 @@ use std::{
 
 use gtk::{gio, glib, prelude::*};
 use media_rip_core::{
-    EngineEvent, LogLevel, MediaEngine, OutputProfile, RipRequest,
+    CoverArt, DiscKind, Drive, EngineEvent, LogLevel, MediaEngine, OutputProfile, RipRequest,
+    ScanOptions, TrackCoverArt,
     ports::CancellationToken,
     util::{ensure_extension, format_bytes, format_duration, format_rate, sanitize_file_name},
 };
 use media_rip_engine::{OpenMediaEngine, tool_availability};
 
 use crate::{
-    app::{AppSettings, AppState, BusyState, Selection},
-    ui::{ContentAction, MainWindow, SettingsDialog, install_styles},
+    app::{AppSettings, AppState, BusyState, Selection, settings::format_audio_cd_file_name},
+    ui::{ContentAction, DiscUiState, InfoAction, MainWindow, SettingsDialog, install_styles},
 };
 
 #[derive(Clone)]
@@ -55,6 +58,7 @@ pub fn launch(application: &gtk::Application, initial_source: Option<PathBuf>) {
     controller.install_shortcuts(application);
     controller.bind_window_lifecycle();
     controller.start_event_pump(receiver);
+    controller.start_drive_watch();
     controller.log_startup();
     if let Some(warning) = settings_warning {
         controller
@@ -100,6 +104,13 @@ impl Controller {
                 .source
                 .open
                 .connect_clicked(move |_| this.open_selected_disc());
+        }
+        {
+            let this = self.clone();
+            self.ui
+                .source
+                .drives
+                .connect_changed(move |_| this.update_disc_controls());
         }
         {
             let this = self.clone();
@@ -269,36 +280,204 @@ impl Controller {
             return;
         }
         match self.engine.available_drives() {
-            Ok(drives) => {
-                self.ui.source.set_drives(&drives);
-                let message = if drives.is_empty() {
-                    "No optical drive detected."
-                } else {
-                    "Optical drives refreshed."
-                };
-                self.ui.set_status(message, None);
-                self.ui.messages.append(message);
-            }
+            Ok(drives) => self.handle_drive_snapshot(drives, true),
             Err(error) => self.show_error("Could not enumerate optical drives", &error.to_string()),
         }
     }
 
+    fn start_drive_watch(&self) {
+        let (sender, receiver) = mpsc::channel();
+        let scan_in_flight = Rc::new(Cell::new(false));
+        let this = self.clone();
+        glib::timeout_add_local(Duration::from_millis(750), move || {
+            while let Ok(result) = receiver.try_recv() {
+                scan_in_flight.set(false);
+                if let Ok(drives) = result {
+                    this.handle_drive_snapshot(drives, false);
+                }
+            }
+            if !scan_in_flight.replace(true) {
+                let engine = this.engine.clone();
+                let sender = sender.clone();
+                thread::spawn(move || {
+                    let result = engine.available_drives().map_err(|error| error.to_string());
+                    let _ = sender.send(result);
+                });
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
+    fn handle_drive_snapshot(&self, drives: Vec<Drive>, announce_refresh: bool) {
+        let (previous, opened_device, has_non_disc_catalog) = {
+            let state = self.state.borrow();
+            let opened_device = state
+                .catalog
+                .as_ref()
+                .and_then(|catalog| catalog.source.drive.as_ref())
+                .map(|drive| drive.device_path.clone());
+            (
+                state.drives.clone(),
+                opened_device,
+                state.catalog.is_some()
+                    && state
+                        .catalog
+                        .as_ref()
+                        .is_some_and(|catalog| catalog.source.drive.is_none()),
+            )
+        };
+
+        let ejected = opened_device.as_ref().is_some_and(|device| {
+            !drives
+                .iter()
+                .any(|drive| &drive.device_path == device && drive.media_present)
+        });
+        {
+            let mut state = self.state.borrow_mut();
+            state.drives.clone_from(&drives);
+            if ejected {
+                state.catalog = None;
+                state.expanded_titles.clear();
+                state.selection = Selection::Source;
+            }
+        }
+
+        if ejected {
+            self.ui.source.set_drives(&drives);
+            self.ui
+                .messages
+                .append("Disc ejected; closed its content list.");
+            self.ui.set_status("Disc ejected.", None);
+            self.render();
+        } else if !has_non_disc_catalog && opened_device.is_none() {
+            self.ui.source.set_drives(&drives);
+        }
+
+        if announce_refresh {
+            let message = if drives.is_empty() {
+                "No optical drive detected."
+            } else if drives.iter().any(|drive| drive.media_present) {
+                "Optical drives refreshed; disc detected."
+            } else {
+                "Optical drives refreshed; no disc detected."
+            };
+            self.ui.set_status(message, None);
+            self.ui.messages.append(message);
+        } else if !ejected {
+            self.announce_drive_transition(&previous, &drives);
+        }
+        self.update_disc_controls();
+    }
+
+    fn announce_drive_transition(&self, previous: &[Drive], drives: &[Drive]) {
+        for drive in drives {
+            let old = previous
+                .iter()
+                .find(|old| old.device_path == drive.device_path);
+            let was_present = old.is_some_and(|old| old.media_present);
+            if drive.media_present && !was_present {
+                let message = if drive_is_ready(drive) {
+                    format!(
+                        "{} detected and ready to open.",
+                        drive.media_kind.display_name()
+                    )
+                } else {
+                    "Disc detected; the system is reading it…".to_owned()
+                };
+                self.ui.set_status(&message, None);
+                self.ui.messages.append(&message);
+            } else if drive_is_ready(drive) && old.is_some_and(|old| !drive_is_ready(old)) {
+                let message = format!("{} is ready to open.", drive.media_kind.display_name());
+                self.ui.set_status(&message, Some("status-success"));
+                self.ui.messages.append(&message);
+            }
+        }
+    }
+
+    fn selected_drive(&self) -> Option<Drive> {
+        let state = self.state.borrow();
+        if let Some(device) = state
+            .catalog
+            .as_ref()
+            .and_then(|catalog| catalog.source.drive.as_ref())
+            .map(|drive| &drive.device_path)
+        {
+            return state
+                .drives
+                .iter()
+                .find(|drive| &drive.device_path == device)
+                .cloned();
+        }
+        let selected = self.ui.source.drives.active_id();
+        state
+            .drives
+            .iter()
+            .find(|drive| {
+                selected
+                    .as_deref()
+                    .is_some_and(|id| drive.device_path.to_string_lossy() == id)
+            })
+            .or_else(|| state.drives.first())
+            .cloned()
+    }
+
+    fn update_disc_controls(&self) {
+        let drive = self.selected_drive();
+        let busy = self.state.borrow().is_busy();
+        let ready = drive.as_ref().is_some_and(drive_is_ready);
+        let icon = drive
+            .as_ref()
+            .filter(|_| ready)
+            .map(|drive| drive.media_kind.icon_name())
+            .unwrap_or("media-optical-symbolic");
+        let ui_state = match drive.as_ref() {
+            Some(drive) if drive_is_ready(drive) => DiscUiState::Ready {
+                kind: drive.media_kind,
+                label: drive.media_label.clone(),
+            },
+            Some(drive) if drive.media_present => DiscUiState::Reading,
+            _ => DiscUiState::Absent,
+        };
+        let enabled = ready && !busy;
+        self.ui.content.set_disc_state(ui_state, enabled);
+        self.ui.toolbar.open_disc.set_icon_name(icon);
+        self.ui.toolbar.open_disc.set_sensitive(enabled);
+        self.ui.source.open.set_icon_name(icon);
+        let open_tooltip = if ready {
+            drive
+                .as_ref()
+                .map(|drive| format!("Open {}", drive.media_kind.display_name()))
+                .unwrap_or_else(|| "Open disc".to_owned())
+        } else if drive.as_ref().is_some_and(|drive| drive.media_present) {
+            "Reading disc…".to_owned()
+        } else {
+            "Open disc".to_owned()
+        };
+        self.ui.source.open.set_tooltip_text(Some(&open_tooltip));
+        self.ui.source.open.set_sensitive(enabled);
+        self.ui
+            .toolbar
+            .eject
+            .set_sensitive(!busy && drive.as_ref().is_some_and(|drive| drive.media_present));
+        if let Some(action) = self
+            .ui
+            .window
+            .lookup_action("open-disc")
+            .and_then(|action| action.downcast::<gio::SimpleAction>().ok())
+        {
+            action.set_enabled(enabled);
+        }
+    }
+
     fn open_selected_disc(&self) {
-        let Some(id) = self.ui.source.drives.active_id() else {
+        let Some(drive) = self.selected_drive().filter(drive_is_ready) else {
             self.show_error(
                 "No optical source",
-                "Insert a disc, refresh the drive list, or open a disc folder.",
+                "Insert a disc and wait for the system to finish reading it, or open a disc folder.",
             );
             return;
         };
-        let path = PathBuf::from(id.as_str());
-        if path.as_os_str().is_empty() {
-            self.show_error(
-                "No optical source",
-                "Insert a disc, refresh the drive list, or open a disc folder.",
-            );
-            return;
-        }
+        let path = drive.mount_path.unwrap_or(drive.device_path);
         self.start_scan(path);
     }
 
@@ -363,6 +542,7 @@ impl Controller {
             state.cancellation = Some(token.clone());
         }
         self.ui.set_busy(true);
+        self.update_disc_controls();
         self.ui.sidebar.profile_panel.set_visible(false);
         self.ui.progress.set_fraction(0.0);
         self.ui.progress.set_text(Some("Scanning…"));
@@ -373,9 +553,14 @@ impl Controller {
         self.ui.set_status("Opening source…", None);
 
         let engine = self.engine.clone();
+        let settings = &self.state.borrow().settings;
+        let options = ScanOptions {
+            auto_tag_audio: settings.audio_cd.auto_tagging,
+            allow_online_access: settings.general.allow_online_access,
+        };
         let (events, receiver) = mpsc::channel();
         *self.worker_events.borrow_mut() = Some(receiver);
-        thread::spawn(move || engine.scan(path, events, token));
+        thread::spawn(move || engine.scan(path, options, events, token));
     }
 
     fn start_rip(&self) {
@@ -422,8 +607,10 @@ impl Controller {
             state.output_directory = request.output_directory.clone();
             state.busy = BusyState::Ripping;
             state.cancellation = Some(token.clone());
+            state.completed_titles_this_job = 0;
         }
         self.ui.set_busy(true);
+        self.update_disc_controls();
         self.ui.progress.set_fraction(0.0);
         self.ui.progress.set_text(Some("0%"));
         self.ui.progress_title.set_text("Preparing selected items");
@@ -645,13 +832,22 @@ impl Controller {
                 }
                 self.ui.progress_detail.set_text(&details.join("  •  "));
             }
-            EngineEvent::TitleFinished {
-                title_name,
-                destination,
-            } => {
-                self.ui
-                    .messages
-                    .append(&format!("Saved {title_name} to {}.", destination.display()));
+            EngineEvent::TitleFinished(result) => {
+                let size = result
+                    .bytes_written
+                    .map(|bytes| format!(" ({})", format_bytes(bytes)))
+                    .unwrap_or_default();
+                self.ui.messages.append(&format!(
+                    "Saved {} to {}{size}.",
+                    result.title_name,
+                    result.destination.display(),
+                ));
+                let mut state = self.state.borrow_mut();
+                if let Some(catalog) = &mut state.catalog
+                    && mark_title_completed(catalog, result.title_id)
+                {
+                    state.completed_titles_this_job += 1;
+                }
             }
             EngineEvent::RipFinished {
                 saved_titles,
@@ -671,17 +867,27 @@ impl Controller {
                 }
             }
             EngineEvent::RipFailed(error) => {
+                let completed = self.state.borrow().completed_titles_this_job;
                 if self.finish_busy() {
                     return;
                 }
-                self.show_error("Could not save selected items", &error);
+                let detail = resumable_failure_detail(&error, completed);
+                self.show_error("Could not save selected items", &detail);
                 self.render();
             }
             EngineEvent::RipCancelled => {
+                let completed = self.state.borrow().completed_titles_this_job;
                 if self.finish_busy() {
                     return;
                 }
-                self.ui.messages.append("Save operation cancelled.");
+                let message = if completed == 0 {
+                    "Save operation cancelled.".to_owned()
+                } else {
+                    format!(
+                        "Save operation cancelled after {completed} item(s). Unfinished items remain selected; start again to resume."
+                    )
+                };
+                self.ui.messages.append(&message);
                 self.ui.set_status("Cancelled.", None);
                 self.render();
             }
@@ -696,6 +902,7 @@ impl Controller {
             state.close_requested
         };
         self.ui.set_busy(false);
+        self.update_disc_controls();
         self.ui.progress_area.set_visible(false);
         if close_requested {
             self.ui.window.close();
@@ -706,12 +913,21 @@ impl Controller {
     fn handle_content_action(&self, action: ContentAction) {
         let content_changed = matches!(
             action,
-            ContentAction::SetTitleChecked { .. } | ContentAction::SetTrackChecked { .. }
+            ContentAction::CycleSelectAll
+                | ContentAction::SetTitleChecked { .. }
+                | ContentAction::SetTrackChecked { .. }
         );
+        let mut all_checks_changed = false;
         let mut expanded_change = None;
         {
             let mut state = self.state.borrow_mut();
             match action {
+                ContentAction::CycleSelectAll => {
+                    if let Some(catalog) = state.catalog.as_mut() {
+                        cycle_catalog_selection(catalog);
+                        all_checks_changed = true;
+                    }
+                }
                 ContentAction::SelectTitle(id) => state.selection = Selection::Title(id),
                 ContentAction::SelectTrack {
                     title_id,
@@ -764,26 +980,23 @@ impl Controller {
                         stream_index,
                     };
                 }
-                ContentAction::SetOutputFile {
-                    title_id,
-                    output_file,
-                } => {
-                    if let Some(title) = state.catalog.as_mut().and_then(|catalog| {
-                        catalog.titles.iter_mut().find(|item| item.id == title_id)
-                    }) {
-                        title.output_file = output_file;
-                    }
-                    state.selection = Selection::Title(title_id);
-                }
             }
         }
         if let Some((title_id, expanded)) = expanded_change {
             self.ui.content.set_expanded(title_id, expanded);
             return;
         }
+        {
+            let state = self.state.borrow();
+            self.ui.content.sync_view_selection(&state.selection);
+        }
         if content_changed {
             let state = self.state.borrow();
-            if let Some(title) = state.catalog.as_ref().and_then(|catalog| {
+            if all_checks_changed {
+                if let Some(catalog) = state.catalog.as_ref() {
+                    self.ui.content.sync_all_checks(catalog);
+                }
+            } else if let Some(title) = state.catalog.as_ref().and_then(|catalog| {
                 let title_id = match state.selection {
                     Selection::Title(title_id) | Selection::Track { title_id, .. } => title_id,
                     Selection::Source => return None,
@@ -791,22 +1004,155 @@ impl Controller {
                 catalog.titles.iter().find(|title| title.id == title_id)
             }) {
                 self.ui.content.sync_title_checks(title);
+                if let Some(catalog) = state.catalog.as_ref() {
+                    self.ui.content.sync_select_all(catalog);
+                }
             }
-            self.ui
-                .sidebar
-                .info
-                .render(state.catalog.as_ref(), &state.selection);
             drop(state);
+            self.render_info();
             self.update_rip_sensitivity();
         } else {
-            let state = self.state.borrow();
-            self.ui
-                .sidebar
-                .info
-                .render(state.catalog.as_ref(), &state.selection);
-            drop(state);
+            self.render_info();
             self.update_rip_sensitivity();
         }
+    }
+
+    fn handle_info_action(&self, action: InfoAction) {
+        if let InfoAction::ChooseCoverArt { title_id } = &action {
+            self.choose_cover_art(*title_id);
+            return;
+        }
+        let mut state = self.state.borrow_mut();
+        let file_name_template = state.settings.audio_cd.file_name_template.clone();
+        let output_extension = state.output_profile.extension();
+        let Some(catalog) = state.catalog.as_mut() else {
+            return;
+        };
+        let rerender = match action {
+            InfoAction::SetTag {
+                title_id,
+                key,
+                value,
+                all_tracks,
+            } => set_tag(
+                catalog,
+                title_id,
+                &key,
+                &value,
+                all_tracks,
+                &file_name_template,
+                output_extension,
+            ),
+            InfoAction::AddTag {
+                title_id,
+                key,
+                value,
+                all_tracks,
+            } => {
+                let key = key.trim();
+                if key.is_empty() {
+                    return;
+                }
+                set_tag(
+                    catalog,
+                    title_id,
+                    key,
+                    value.trim(),
+                    all_tracks,
+                    &file_name_template,
+                    output_extension,
+                );
+                true
+            }
+            InfoAction::SetOutputFile {
+                title_id,
+                output_file,
+            } => {
+                if let Some(title) = catalog.titles.iter_mut().find(|title| title.id == title_id) {
+                    title.output_file = output_file.trim().to_owned();
+                }
+                false
+            }
+            InfoAction::RemoveCoverArt { title_id: None } => {
+                remove_cover_art(catalog, None);
+                true
+            }
+            InfoAction::RemoveCoverArt {
+                title_id: Some(title_id),
+            } => {
+                remove_cover_art(catalog, Some(title_id));
+                true
+            }
+            InfoAction::ChooseCoverArt { .. } => unreachable!(),
+        };
+        drop(state);
+        if rerender {
+            self.render_info();
+        }
+    }
+
+    fn choose_cover_art(&self, title_id: Option<u32>) {
+        let is_audio_cd = self
+            .state
+            .borrow()
+            .catalog
+            .as_ref()
+            .is_some_and(|catalog| catalog.source.kind == DiscKind::AudioCd);
+        if !is_audio_cd || self.state.borrow().is_busy() {
+            return;
+        }
+        let dialog = gtk::FileChooserNative::builder()
+            .title(if title_id.is_some() {
+                "Choose track cover artwork"
+            } else {
+                "Choose album artwork"
+            })
+            .transient_for(&self.ui.window)
+            .modal(true)
+            .action(gtk::FileChooserAction::Open)
+            .accept_label("Use image")
+            .cancel_label("Cancel")
+            .build();
+        let filter = gtk::FileFilter::new();
+        filter.set_name(Some("JPEG and PNG images"));
+        for mime_type in ["image/jpeg", "image/png"] {
+            filter.add_mime_type(mime_type);
+        }
+        dialog.add_filter(&filter);
+
+        let this = self.clone();
+        dialog.connect_response(move |dialog, response| {
+            if response == gtk::ResponseType::Accept
+                && let Some(path) = dialog.file().and_then(|file| file.path())
+            {
+                match cover_art_from_file(&path) {
+                    Ok(cover_art) => {
+                        if let Some(catalog) = &mut this.state.borrow_mut().catalog {
+                            set_cover_art(catalog, title_id, cover_art);
+                        }
+                        this.ui
+                            .messages
+                            .append(&format!("Using {} as cover artwork.", path.display()));
+                        this.render_info();
+                    }
+                    Err(error) => this.show_error("Could not use cover artwork", &error),
+                }
+            }
+            dialog.destroy();
+        });
+        dialog.show();
+    }
+
+    fn render_info(&self) {
+        let callback = {
+            let this = self.clone();
+            Rc::new(move |action| this.handle_info_action(action)) as Rc<dyn Fn(InfoAction)>
+        };
+        let state = self.state.borrow();
+        self.ui
+            .sidebar
+            .info
+            .render(state.catalog.as_ref(), &state.selection, callback);
     }
 
     fn render(&self) {
@@ -822,13 +1168,12 @@ impl Controller {
         if let Some(catalog) = &state.catalog {
             self.ui
                 .content
-                .render(catalog, &state.expanded_titles, callback);
-            self.ui.sidebar.info.render(Some(catalog), &state.selection);
+                .render(catalog, &state.expanded_titles, &state.selection, callback);
         } else {
             self.ui.content.clear();
-            self.ui.sidebar.info.render(None, &Selection::Source);
         }
         drop(state);
+        self.render_info();
         self.update_rip_sensitivity();
     }
 
@@ -966,10 +1311,10 @@ impl Controller {
         if self.state.borrow().is_busy() {
             return;
         }
-        let Some(id) = self.ui.source.drives.active_id() else {
+        let Some(drive) = self.selected_drive().filter(|drive| drive.media_present) else {
             return;
         };
-        let path = PathBuf::from(id.as_str());
+        let path = drive.device_path;
         let events = self.events.clone();
         thread::spawn(move || {
             let result = Command::new("eject").arg(&path).output();
@@ -1063,6 +1408,10 @@ impl Controller {
     }
 }
 
+fn drive_is_ready(drive: &Drive) -> bool {
+    drive.media_present && (drive.media_kind != DiscKind::Unknown || drive.mount_path.is_some())
+}
+
 fn drain_available_events(receiver: &mpsc::Receiver<EngineEvent>) -> (Vec<EngineEvent>, bool) {
     let mut events = Vec::new();
     let disconnected = loop {
@@ -1086,6 +1435,124 @@ fn log_label(level: LogLevel) -> &'static str {
         LogLevel::Error => "error",
         LogLevel::Success => "ok",
     }
+}
+
+fn set_tag(
+    catalog: &mut media_rip_core::MediaCatalog,
+    title_id: u32,
+    key: &str,
+    value: &str,
+    all_tracks: bool,
+    file_name_template: &str,
+    output_extension: &str,
+) -> bool {
+    let album = catalog.source.name.clone();
+    let is_audio_cd = catalog.source.kind == DiscKind::AudioCd;
+    let mut renamed = false;
+    for title in &mut catalog.titles {
+        if title.id != title_id && !all_tracks {
+            continue;
+        }
+        let had_auto_name = is_audio_cd
+            && title.output_file
+                == ensure_extension(
+                    &format_audio_cd_file_name(file_name_template, title, &album),
+                    output_extension,
+                );
+        if let Some(tag) = title.tags.iter_mut().find(|tag| tag.key == key) {
+            tag.value = value.to_owned();
+        } else {
+            title.tags.push(media_rip_core::MediaTag::new(key, value));
+        }
+        if had_auto_name {
+            let updated_output_file = ensure_extension(
+                &format_audio_cd_file_name(file_name_template, title, &album),
+                output_extension,
+            );
+            if title.output_file != updated_output_file {
+                title.output_file = updated_output_file;
+                renamed = true;
+            }
+        }
+    }
+    renamed
+}
+
+fn set_cover_art(
+    catalog: &mut media_rip_core::MediaCatalog,
+    title_id: Option<u32>,
+    cover_art: CoverArt,
+) {
+    if let Some(title_id) = title_id {
+        if catalog.cover_art.as_ref() == Some(&cover_art) {
+            catalog.track_cover_art.remove(&title_id);
+        } else {
+            catalog
+                .track_cover_art
+                .insert(title_id, TrackCoverArt::Custom(cover_art));
+        }
+    } else {
+        catalog.track_cover_art.retain(|_, track_art| {
+            !matches!(track_art, TrackCoverArt::Custom(custom) if custom == &cover_art)
+        });
+        catalog.cover_art = Some(cover_art);
+    }
+}
+
+fn remove_cover_art(catalog: &mut media_rip_core::MediaCatalog, title_id: Option<u32>) {
+    if let Some(title_id) = title_id {
+        catalog
+            .track_cover_art
+            .insert(title_id, TrackCoverArt::Removed);
+    } else {
+        catalog.cover_art = None;
+    }
+}
+
+fn mark_title_completed(catalog: &mut media_rip_core::MediaCatalog, title_id: u32) -> bool {
+    let Some(title) = catalog.titles.iter_mut().find(|title| title.id == title_id) else {
+        return false;
+    };
+    title.selected = false;
+    for track in &mut title.tracks {
+        track.selected = false;
+    }
+    true
+}
+
+fn cycle_catalog_selection(catalog: &mut media_rip_core::MediaCatalog) {
+    let any_title_selected = catalog.titles.iter().any(|title| title.selected);
+    let everything_selected = !catalog.titles.is_empty()
+        && catalog
+            .titles
+            .iter()
+            .all(|title| title.selected && title.tracks.iter().all(|track| track.selected));
+
+    if everything_selected {
+        for title in &mut catalog.titles {
+            title.selected = false;
+        }
+    } else if any_title_selected {
+        for title in &mut catalog.titles {
+            title.selected = true;
+            for track in &mut title.tracks {
+                track.selected = true;
+            }
+        }
+    } else {
+        for title in &mut catalog.titles {
+            title.selected = true;
+        }
+    }
+}
+
+fn resumable_failure_detail(error: &str, completed: usize) -> String {
+    if completed == 0 {
+        return error.to_owned();
+    }
+    format!(
+        "{error}\n\n{completed} item(s) were completed and left in place. Unfinished items remain selected; start again to resume."
+    )
 }
 
 fn default_output_directory(
@@ -1119,6 +1586,33 @@ fn default_output_directory(
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| Path::new(".").to_owned());
     base.join(sanitize_file_name(source_name))
+}
+
+fn cover_art_from_file(path: &Path) -> Result<CoverArt, String> {
+    const MAX_COVER_ART_BYTES: u64 = 20 * 1024 * 1024;
+    let size = fs::metadata(path)
+        .map_err(|error| format!("could not inspect {}: {error}", path.display()))?
+        .len();
+    if size > MAX_COVER_ART_BYTES {
+        return Err("The selected image is larger than 20 MB.".to_owned());
+    }
+    let data =
+        fs::read(path).map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    let mime_type =
+        cover_art_mime_type(&data).ok_or_else(|| "Choose a valid JPEG or PNG image.".to_owned())?;
+    gdk_pixbuf::Pixbuf::from_read(Cursor::new(data.clone()))
+        .map_err(|error| format!("the selected image could not be decoded: {error}"))?;
+    Ok(CoverArt::new(mime_type, data))
+}
+
+fn cover_art_mime_type(data: &[u8]) -> Option<&'static str> {
+    if data.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        Some("image/png")
+    } else if data.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -1169,5 +1663,297 @@ mod tests {
 
         assert!(events.is_empty());
         assert!(!disconnected);
+    }
+
+    #[test]
+    fn open_disc_waits_for_inserted_media_to_be_identified_or_mounted() {
+        let mut drive = Drive::empty("/dev/sr0", "Test drive");
+        assert!(!drive_is_ready(&drive));
+
+        drive.media_present = true;
+        assert!(!drive_is_ready(&drive));
+
+        drive.media_kind = DiscKind::Dvd;
+        assert!(drive_is_ready(&drive));
+
+        drive.media_kind = DiscKind::Unknown;
+        drive.mount_path = Some(PathBuf::from("/media/disc"));
+        assert!(drive_is_ready(&drive));
+    }
+
+    #[test]
+    fn completed_title_is_removed_from_a_resumable_selection() {
+        use media_rip_core::{DiscKind, MediaCatalog, MediaSource, StreamKind, Title, Track};
+
+        let title = Title {
+            id: 7,
+            source_title_id: "7".to_owned(),
+            name: "Feature".to_owned(),
+            is_main_title: true,
+            duration_ms: 1_000,
+            size_bytes: Some(1_024),
+            size_is_estimate: false,
+            chapters: Vec::new(),
+            tracks: vec![Track {
+                index: 0,
+                kind: StreamKind::Video,
+                codec: "h264".to_owned(),
+                codec_long_name: None,
+                language: None,
+                name: None,
+                properties: Vec::new(),
+                selected: true,
+            }],
+            segment_count: None,
+            segment_map: None,
+            duplicate_key: None,
+            tags: Vec::new(),
+            output_file: "feature.mkv".to_owned(),
+            selected: true,
+        };
+        let mut catalog = MediaCatalog {
+            source: MediaSource {
+                id: "source".to_owned(),
+                name: "Disc".to_owned(),
+                path: PathBuf::from("disc"),
+                kind: DiscKind::File,
+                drive: None,
+                capacity_bytes: None,
+                encrypted: None,
+            },
+            titles: vec![title],
+            source_info: Vec::new(),
+            cover_art: None,
+            track_cover_art: Default::default(),
+        };
+
+        assert!(mark_title_completed(&mut catalog, 7));
+        assert!(!catalog.titles[0].selected);
+        assert!(catalog.titles[0].tracks.iter().all(|track| !track.selected));
+        assert!(!mark_title_completed(&mut catalog, 99));
+    }
+
+    #[test]
+    fn select_all_cycles_without_losing_preserved_track_choices() {
+        use media_rip_core::{DiscKind, MediaCatalog, MediaSource, StreamKind, Title, Track};
+
+        let track = |index, selected| Track {
+            index,
+            kind: StreamKind::Audio,
+            codec: "test".to_owned(),
+            codec_long_name: None,
+            language: None,
+            name: None,
+            properties: Vec::new(),
+            selected,
+        };
+        let mut catalog = MediaCatalog {
+            source: MediaSource {
+                id: "test".to_owned(),
+                name: "Test".to_owned(),
+                path: PathBuf::from("test"),
+                kind: DiscKind::File,
+                drive: None,
+                capacity_bytes: None,
+                encrypted: None,
+            },
+            titles: vec![Title {
+                id: 0,
+                source_title_id: "0".to_owned(),
+                name: "Test".to_owned(),
+                is_main_title: false,
+                duration_ms: 1_000,
+                size_bytes: None,
+                size_is_estimate: false,
+                chapters: Vec::new(),
+                tracks: vec![track(0, true), track(1, false)],
+                segment_count: None,
+                segment_map: None,
+                duplicate_key: None,
+                tags: Vec::new(),
+                output_file: "test.mkv".to_owned(),
+                selected: false,
+            }],
+            source_info: Vec::new(),
+            cover_art: None,
+            track_cover_art: Default::default(),
+        };
+
+        cycle_catalog_selection(&mut catalog);
+        assert!(catalog.titles[0].selected);
+        assert_eq!(
+            catalog.titles[0]
+                .tracks
+                .iter()
+                .map(|track| track.selected)
+                .collect::<Vec<_>>(),
+            [true, false]
+        );
+
+        cycle_catalog_selection(&mut catalog);
+        assert!(catalog.titles[0].tracks.iter().all(|track| track.selected));
+
+        cycle_catalog_selection(&mut catalog);
+        assert!(!catalog.titles[0].selected);
+        assert!(catalog.titles[0].tracks.iter().all(|track| track.selected));
+    }
+
+    #[test]
+    fn partial_failure_explains_how_to_resume() {
+        assert_eq!(resumable_failure_detail("disk error", 0), "disk error");
+        let detail = resumable_failure_detail("disk error", 2);
+        assert!(detail.contains("2 item(s) were completed"));
+        assert!(detail.contains("start again to resume"));
+    }
+
+    #[test]
+    fn tags_can_be_added_to_one_or_all_audio_tracks() {
+        use media_rip_core::{DiscKind, MediaCatalog, MediaSource, StreamKind, Title, Track};
+
+        let title = |id| Title {
+            id,
+            source_title_id: (id + 1).to_string(),
+            name: format!("Track {}", id + 1),
+            is_main_title: false,
+            duration_ms: 1_000,
+            size_bytes: None,
+            size_is_estimate: false,
+            chapters: Vec::new(),
+            tracks: vec![Track {
+                index: 0,
+                kind: StreamKind::Audio,
+                codec: "PCM".to_owned(),
+                codec_long_name: None,
+                language: None,
+                name: None,
+                properties: Vec::new(),
+                selected: true,
+            }],
+            segment_count: None,
+            segment_map: None,
+            duplicate_key: None,
+            tags: Vec::new(),
+            output_file: format!("{}.flac", id + 1),
+            selected: true,
+        };
+        let mut catalog = MediaCatalog {
+            source: MediaSource {
+                id: "cd".to_owned(),
+                name: "Album".to_owned(),
+                path: PathBuf::from("/dev/cdrom"),
+                kind: DiscKind::AudioCd,
+                drive: None,
+                capacity_bytes: None,
+                encrypted: None,
+            },
+            titles: vec![title(0), title(1)],
+            source_info: Vec::new(),
+            cover_art: None,
+            track_cover_art: Default::default(),
+        };
+
+        set_tag(
+            &mut catalog,
+            0,
+            "composer",
+            "Composer",
+            false,
+            "{track:02} - {title}",
+            "flac",
+        );
+        assert_eq!(catalog.titles[0].tags[0].value, "Composer");
+        assert!(catalog.titles[1].tags.is_empty());
+
+        set_tag(
+            &mut catalog,
+            0,
+            "artist",
+            "Various Artists",
+            true,
+            "{track:02} - {title}",
+            "flac",
+        );
+        assert!(catalog.titles.iter().all(|title| {
+            title
+                .tags
+                .contains(&media_rip_core::MediaTag::new("artist", "Various Artists"))
+        }));
+
+        set_tag(
+            &mut catalog,
+            1,
+            "artist",
+            "Soloist",
+            false,
+            "{track:02} - {title}",
+            "flac",
+        );
+        assert_eq!(
+            catalog.titles[1]
+                .tags
+                .iter()
+                .find(|tag| tag.key == "artist")
+                .map(|tag| tag.value.as_str()),
+            Some("Soloist")
+        );
+
+        catalog.titles[0]
+            .tags
+            .push(media_rip_core::MediaTag::new("title", "Track 1"));
+        catalog.titles[0]
+            .tags
+            .push(media_rip_core::MediaTag::new("track", "1"));
+        catalog.titles[0].output_file = "01 - Track 1.opus".to_owned();
+        assert!(set_tag(
+            &mut catalog,
+            0,
+            "track",
+            "7",
+            false,
+            "{track:02} - {title}",
+            "opus",
+        ));
+        assert_eq!(catalog.titles[0].output_file, "07 - Track 1.opus");
+
+        catalog.titles[0].output_file = "My custom name.opus".to_owned();
+        assert!(!set_tag(
+            &mut catalog,
+            0,
+            "track",
+            "8",
+            false,
+            "{track:02} - {title}",
+            "opus",
+        ));
+        assert_eq!(catalog.titles[0].output_file, "My custom name.opus");
+
+        let album_art = CoverArt::new("image/png", vec![1]);
+        set_cover_art(&mut catalog, None, album_art.clone());
+        set_cover_art(&mut catalog, Some(0), album_art);
+        assert!(!catalog.track_cover_art.contains_key(&0));
+
+        set_cover_art(&mut catalog, Some(0), CoverArt::new("image/jpeg", vec![2]));
+        assert!(matches!(
+            catalog.track_cover_art.get(&0),
+            Some(TrackCoverArt::Custom(_))
+        ));
+        remove_cover_art(&mut catalog, Some(0));
+        assert_eq!(
+            catalog.track_cover_art.get(&0),
+            Some(&TrackCoverArt::Removed)
+        );
+    }
+
+    #[test]
+    fn cover_art_type_is_detected_from_file_contents() {
+        assert_eq!(
+            cover_art_mime_type(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]),
+            Some("image/png")
+        );
+        assert_eq!(
+            cover_art_mime_type(&[0xff, 0xd8, 0xff, 0xe0]),
+            Some("image/jpeg")
+        );
+        assert_eq!(cover_art_mime_type(b"not an image"), None);
     }
 }

@@ -8,6 +8,7 @@ use std::{
 
 use media_rip_core::{
     DiscKind, Drive, EngineEvent, InfoField, LogLevel, MediaCatalog, MediaEngineError, MediaSource,
+    ScanOptions,
     ports::CancellationToken,
     util::{format_bytes, sanitize_file_name},
 };
@@ -31,6 +32,7 @@ pub fn tool_availability() -> ToolAvailability {
 
 pub(crate) fn scan_source(
     path: &Path,
+    options: ScanOptions,
     events: &Sender<EngineEvent>,
     cancellation: &CancellationToken,
 ) -> Result<MediaCatalog, MediaEngineError> {
@@ -72,9 +74,35 @@ pub(crate) fn scan_source(
             path.display()
         ),
     );
-    let (mut titles, disc_album, disc_artist) = if kind == DiscKind::AudioCd {
-        let catalog = source::audio_cd_catalog(&media_path, cancellation)?;
-        (catalog.titles, catalog.album, catalog.artist)
+    let (
+        mut titles,
+        disc_album,
+        disc_artist,
+        online_tagged,
+        exact_musicbrainz_match,
+        musicbrainz_error,
+        cover_art,
+    ) = if kind == DiscKind::AudioCd {
+        let catalog = source::audio_cd_catalog(
+            &media_path,
+            options.auto_tag_audio && options.allow_online_access,
+            cancellation,
+        )?;
+        let online_tagged = catalog.titles.iter().any(|title| {
+            title
+                .tags
+                .iter()
+                .any(|tag| tag.key == "musicbrainz_albumid")
+        });
+        (
+            catalog.titles,
+            catalog.album,
+            catalog.artist,
+            online_tagged,
+            catalog.exact_musicbrainz_match,
+            catalog.musicbrainz_error,
+            catalog.cover_art,
+        )
     } else {
         let candidates = source::candidates_for(&media_path, kind)?;
         log(
@@ -134,7 +162,7 @@ pub(crate) fn scan_source(
                 ),
             );
         }
-        (titles, None, None)
+        (titles, None, None, false, false, None, None)
     };
 
     if kind == DiscKind::AudioCd {
@@ -143,6 +171,29 @@ pub(crate) fn scan_source(
             LogLevel::Info,
             format!("Discovered {} audio track(s).", titles.len()),
         );
+        if options.auto_tag_audio && options.allow_online_access {
+            log(
+                events,
+                if online_tagged {
+                    LogLevel::Success
+                } else {
+                    LogLevel::Warning
+                },
+                if online_tagged {
+                    if exact_musicbrainz_match {
+                        "Applied tags from an exact MusicBrainz disc match.".to_owned()
+                    } else {
+                        "Applied MusicBrainz tags from a release matching the CD-TEXT track list."
+                            .to_owned()
+                    }
+                } else if let Some(error) = &musicbrainz_error {
+                    format!("MusicBrainz lookup failed ({error}); using CD-TEXT or generic tags.")
+                } else {
+                    "No exact MusicBrainz disc match was available; using CD-TEXT or generic tags."
+                        .to_owned()
+                },
+            );
+        }
     }
 
     for (index, title) in titles.iter_mut().enumerate() {
@@ -173,6 +224,38 @@ pub(crate) fn scan_source(
     });
     let mut source_info =
         source_information(&media_path, kind, &source_name, capacity, drive.as_ref());
+    if kind == DiscKind::AudioCd {
+        source_info.insert(
+            2,
+            InfoField::new(
+                "Tag source",
+                if online_tagged {
+                    if exact_musicbrainz_match {
+                        "MusicBrainz (exact disc match)"
+                    } else {
+                        "MusicBrainz (CD-TEXT release match)"
+                    }
+                } else if disc_album.is_some() || disc_artist.is_some() {
+                    "CD-TEXT"
+                } else {
+                    "Generic track information"
+                },
+            ),
+        );
+        if online_tagged {
+            source_info.insert(
+                3,
+                InfoField::new(
+                    "Cover artwork",
+                    if cover_art.is_some() {
+                        "Cover Art Archive (embedded in supported audio outputs)"
+                    } else {
+                        "No front cover was available for this release"
+                    },
+                ),
+            );
+        }
+    }
     if let Some(artist) = disc_artist {
         source_info.insert(2, InfoField::new("Album artist", artist));
     }
@@ -197,6 +280,8 @@ pub(crate) fn scan_source(
         },
         titles,
         source_info,
+        cover_art,
+        track_cover_art: Default::default(),
     })
 }
 
@@ -271,7 +356,16 @@ mod live_tests {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/dev/sr0"));
         let (events, _receiver) = mpsc::channel();
-        let catalog = scan_source(&device, &events, &CancellationToken::default()).unwrap();
+        let catalog = scan_source(
+            &device,
+            ScanOptions {
+                auto_tag_audio: false,
+                allow_online_access: false,
+            },
+            &events,
+            &CancellationToken::default(),
+        )
+        .unwrap();
         assert_eq!(catalog.source.kind, DiscKind::AudioCd);
         assert!(!catalog.titles.is_empty());
         if let Ok(expected_album) = std::env::var("MEDIA_RIP_EXPECTED_CD_ALBUM") {

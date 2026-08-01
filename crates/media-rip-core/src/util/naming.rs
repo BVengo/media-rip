@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub fn sanitize_file_name(value: &str) -> String {
     let mut result = String::with_capacity(value.len());
@@ -31,7 +31,7 @@ pub fn sanitize_file_name(value: &str) -> String {
 }
 
 pub fn ensure_extension(value: &str, extension: &str) -> String {
-    let clean = sanitize_file_name(value);
+    let clean = sanitize_relative_path(value);
     if Path::new(&clean)
         .extension()
         .is_some_and(|current| current.eq_ignore_ascii_case(extension))
@@ -50,6 +50,25 @@ pub fn ensure_extension(value: &str, extension: &str) -> String {
         } else {
             format!("{clean}.{extension}")
         }
+    }
+}
+
+/// Sanitizes every component of a user-provided relative output path while
+/// preserving directory separators. Absolute paths and parent traversal are
+/// deliberately reduced to safe, relative components.
+pub fn sanitize_relative_path(value: &str) -> String {
+    let mut path = PathBuf::new();
+    for component in value.trim().split(['/', '\\']) {
+        if component.is_empty() || component == "." {
+            continue;
+        }
+        path.push(sanitize_file_name(component));
+    }
+
+    if path.as_os_str().is_empty() {
+        "title".to_owned()
+    } else {
+        path.to_string_lossy().into_owned()
     }
 }
 
@@ -78,5 +97,17 @@ mod tests {
         assert_eq!(ensure_extension("Movie.mkv", "mp4"), "Movie.mp4");
         assert_eq!(ensure_extension("Track.wav", "flac"), "Track.flac");
         assert_eq!(ensure_extension("Album.final", "flac"), "Album.final.flac");
+    }
+
+    #[test]
+    fn preserves_safe_folders_and_sanitizes_each_component() {
+        assert_eq!(
+            ensure_extension("Artist/Album/1-01 - Song.flac", "flac"),
+            "Artist/Album/1-01 - Song.flac"
+        );
+        assert_eq!(
+            ensure_extension("/Artist/../Album\\01: Song.wav", "flac"),
+            "Artist/title/Album/01_ Song.flac"
+        );
     }
 }

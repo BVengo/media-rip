@@ -42,9 +42,12 @@ Audio CD tables of contents are read with `cdparanoia`; embedded CD-TEXT can be 
 `cd-info` and no CDDB network request, or disabled in Settings. Each selected track is securely
 extracted to temporary 16-bit, 44.1 kHz stereo PCM and then written by FFmpeg as FLAC, WAV, Opus,
 or AAC/M4A. FLAC is the default for both music and audiobooks. Album, artist, title, and track/total
-tags are written when the source metadata is available. Temporary PCM files are removed after
-encoding, failure, or cancellation. Online checksum verification such as AccurateRip is not
-implemented yet.
+tags are written when the source metadata is available. When an exact MusicBrainz disc ID is not
+registered, MediaRip searches for a release using the CD-TEXT album and artist, then validates its
+track count, titles, and durations before applying it. MusicBrainz matches also fetch front cover
+artwork from the Cover Art Archive and embed it in FLAC, Opus, and AAC/M4A output. WAV does
+not provide a portable embedded-cover format. Temporary PCM files are removed after encoding,
+failure, or cancellation. Online checksum verification such as AccurateRip is not implemented yet.
 
 At startup, the Messages panel reports whether `ffprobe`, `ffmpeg`, and `cdparanoia` are available.
 An absent required tool also produces a direct error before an operation starts.

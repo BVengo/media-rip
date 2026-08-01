@@ -110,11 +110,8 @@ impl MainWindow {
     pub fn set_busy(&self, busy: bool) {
         self.toolbar.open_file.set_sensitive(!busy);
         self.toolbar.open_folder.set_sensitive(!busy);
-        self.toolbar.open_disc.set_sensitive(!busy);
         self.toolbar.refresh.set_sensitive(!busy);
         self.toolbar.preferences.set_sensitive(!busy);
-        self.source.open.set_sensitive(!busy);
-        self.content.idle_open.set_sensitive(!busy);
         self.sidebar.rip.set_sensitive(!busy);
         self.sidebar.browse_output.set_sensitive(!busy);
         self.sidebar.output_profile.set_sensitive(!busy);

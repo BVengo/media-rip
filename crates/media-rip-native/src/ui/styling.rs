@@ -6,6 +6,14 @@ window {
   color: @theme_fg_color;
 }
 
+window scrollbar.vertical slider {
+  min-width: 10px;
+}
+
+window scrollbar.horizontal slider {
+  min-height: 10px;
+}
+
 .menu-strip {
   background-color: @theme_bg_color;
   color: @theme_fg_color;
@@ -57,6 +65,19 @@ window {
   border-bottom: 1px solid @borders;
 }
 
+.panel-tabs {
+  min-height: 31px;
+  padding: 2px 5px;
+  background-color: @theme_bg_color;
+  border-bottom: 1px solid @borders;
+}
+
+.panel-tabs button {
+  min-height: 25px;
+  min-width: 0;
+  padding: 2px 6px;
+}
+
 .title-row {
   min-height: 40px;
   padding: 4px 7px;
@@ -65,9 +86,29 @@ window {
   border-bottom: 1px solid alpha(@borders, 0.55);
 }
 
+.select-all-row {
+  min-height: 40px;
+  padding: 4px 11px;
+  color: @theme_text_color;
+  background-color: alpha(@theme_bg_color, 0.7);
+  border-bottom: 1px solid @borders;
+}
+
 .title-row:hover,
 .track-row:hover {
   background-color: alpha(@theme_selected_bg_color, 0.18);
+}
+
+.title-row.viewing-row,
+.track-row.viewing-row {
+  color: @theme_text_color;
+  background-color: alpha(@theme_selected_bg_color, 0.3);
+  box-shadow: inset 3px 0 @theme_selected_bg_color;
+}
+
+.title-row.viewing-row:hover,
+.track-row.viewing-row:hover {
+  background-color: alpha(@theme_selected_bg_color, 0.38);
 }
 
 .track-row {
@@ -109,14 +150,66 @@ window {
   color: @theme_text_color;
 }
 
+.tags-content {
+  padding: 9px;
+}
+
+.tags-warning {
+  padding: 6px 8px;
+  color: @warning_color;
+  background-color: alpha(@warning_color, 0.09);
+  border: 1px solid alpha(@warning_color, 0.35);
+  border-radius: 4px;
+}
+
+.add-tag-row {
+  margin-top: 4px;
+  padding-top: 9px;
+  border-top: 1px solid alpha(@borders, 0.6);
+}
+
+.artwork-control {
+  border: 1px solid alpha(@borders, 0.75);
+  border-radius: 4px;
+  background-color: alpha(@theme_fg_color, 0.04);
+}
+
+.cover-art,
+.cover-art-placeholder {
+  border-radius: 3px;
+}
+
+.artwork-overlay-actions {
+  padding: 2px;
+  border-radius: 5px;
+  background-color: alpha(@theme_bg_color, 0.88);
+}
+
+.artwork-overlay-actions button {
+  min-width: 28px;
+  min-height: 28px;
+  padding: 2px;
+  border-radius: 4px;
+  background-color: alpha(@theme_base_color, 0.9);
+}
+
+.artwork-overlay-actions button:hover {
+  background-color: @theme_selected_bg_color;
+  color: @theme_selected_fg_color;
+}
+
+.config-label {
+  font-weight: 600;
+}
+
 .output-panel {
   background-color: @theme_bg_color;
 }
 
 .make-mkv-button {
   min-width: 128px;
-  min-height: 86px;
-  padding: 10px 14px;
+  min-height: 36px;
+  padding: 5px 12px;
   font-weight: 700;
   font-size: 1.05em;
   border-radius: 5px;

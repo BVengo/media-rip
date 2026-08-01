@@ -15,13 +15,18 @@ It is not a wrapper around MakeMKV. The project never invokes, links to, or requ
 - Linux optical-drive discovery with mounted-disc labels and device information.
 - DVD title discovery from `VIDEO_TS.IFO`.
 - Blu-ray playlist discovery with disc-defined main-title marking and authored-stream filtering.
-- Audio CD track discovery, CD-TEXT naming/tagging, and secure extraction for music and audiobooks.
+- Audio CD track discovery, enabled-by-default exact MusicBrainz matching with a validated
+  CD-TEXT release-search fallback, editable output tags,
+  Cover Art Archive artwork embedding, configurable matched-track names (default
+  `## - Song Name`), CD-TEXT fallback, and secure extraction for music and audiobooks.
 - Video, audio, subtitle, attachment, chapter, duration, size, language, and codec inspection.
 - Per-title and per-track selection with multilingual audio and subtitle defaults.
 - Lossless stream-copy remuxing into MKV through the open-source FFmpeg toolchain.
 - Optional H.264/MP4, H.265/MKV, AV1/WebM, FLAC, WAV, Opus, and AAC/M4A output profiles.
 - Live title progress, byte count, estimated rate/time remaining, cancellation, and safe partial
   output handling.
+- Resumable multi-title jobs: completed outputs stay in place while unfinished items remain selected
+  after a failure or cancellation.
 - Editable per-title output names and whole-job destination preflight before writing begins.
 - Media-file inputs, useful both directly and for developing without an optical drive.
 
@@ -57,6 +62,11 @@ Open a source immediately from the command line:
 ```sh
 cargo run -p media-rip -- /path/to/media-or-disc-folder
 ```
+
+Online Audio CD tagging uses the public MusicBrainz web service. MediaRip identifies itself,
+limits lookups to one request per second, and does not poll in the background. Distributors and
+commercial deployments remain responsible for complying with the
+[MusicBrainz API terms and rate limits](https://musicbrainz.org/doc/MusicBrainz_API).
 
 Useful project commands:
 

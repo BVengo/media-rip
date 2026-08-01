@@ -1,6 +1,45 @@
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaTag {
+    pub key: String,
+    pub value: String,
+}
+
+impl MediaTag {
+    pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+}
+
+/// Album artwork shared by all tracks discovered from an Audio CD.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoverArt {
+    pub mime_type: String,
+    pub data: Vec<u8>,
+}
+
+/// A per-track choice that differs from the Audio CD's shared album artwork.
+/// Missing entries inherit the album artwork; `Removed` explicitly suppresses it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TrackCoverArt {
+    Removed,
+    Custom(CoverArt),
+}
+
+impl CoverArt {
+    pub fn new(mime_type: impl Into<String>, data: Vec<u8>) -> Self {
+        Self {
+            mime_type: mime_type.into(),
+            data,
+        }
+    }
+}
 
 /// The physical or logical form of an input source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +81,8 @@ pub struct Drive {
     pub device_path: PathBuf,
     pub mount_path: Option<PathBuf>,
     pub display_name: String,
+    #[serde(default)]
+    pub media_present: bool,
     pub vendor: Option<String>,
     pub model: Option<String>,
     pub revision: Option<String>,
@@ -58,6 +99,7 @@ impl Drive {
             device_path: device_path.into(),
             mount_path: None,
             display_name: display_name.into(),
+            media_present: false,
             vendor: None,
             model: None,
             revision: None,
@@ -165,6 +207,10 @@ pub struct Title {
     pub segment_map: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duplicate_key: Option<String>,
+    /// Output-container metadata. Audio CD scans populate these values and the
+    /// frontend may edit them before a rip starts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<MediaTag>,
     pub output_file: String,
     pub selected: bool,
 }
@@ -195,4 +241,18 @@ pub struct MediaCatalog {
     pub source: MediaSource,
     pub titles: Vec<Title>,
     pub source_info: Vec<InfoField>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover_art: Option<CoverArt>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub track_cover_art: BTreeMap<u32, TrackCoverArt>,
+}
+
+impl MediaCatalog {
+    pub fn cover_art_for_title(&self, title_id: u32) -> Option<&CoverArt> {
+        match self.track_cover_art.get(&title_id) {
+            None => self.cover_art.as_ref(),
+            Some(TrackCoverArt::Removed) => None,
+            Some(TrackCoverArt::Custom(cover_art)) => Some(cover_art),
+        }
+    }
 }
