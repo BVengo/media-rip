@@ -1,5 +1,5 @@
-use std::io::Cursor;
 use std::rc::Rc;
+use std::{collections::BTreeSet, io::Cursor};
 
 use gtk::prelude::*;
 use media_rip_core::{
@@ -151,6 +151,7 @@ impl InfoPanel {
         match selection {
             Selection::Source => {
                 self.render_fields(&catalog.source_info);
+                self.append_readonly_artwork(catalog.cover_art.as_ref(), "Disc artwork");
                 self.render_tags_unavailable("Select an Audio CD track to edit its tags.");
             }
             Selection::Title(id) => {
@@ -166,11 +167,43 @@ impl InfoPanel {
                     InfoField::new("Duration", format_duration(title.duration_ms)),
                     InfoField::new("Chapters", title.chapters.len().to_string()),
                 ];
+                if let Some(number) = title.disc_title_number {
+                    fields.push(InfoField::new("Authored title number", number.to_string()));
+                }
                 if title.is_main_title {
                     fields.push(InfoField::new(
                         "Blu-ray role",
                         "Main title (identified by disc metadata)",
                     ));
+                }
+                if let Some(metadata) = &title.video_metadata {
+                    fields.push(InfoField::new(
+                        "Metadata source",
+                        &metadata.attribution.provider,
+                    ));
+                    fields.push(InfoField::new(
+                        "Match confidence",
+                        format!(
+                            "{}% — {}",
+                            metadata.attribution.confidence_percent,
+                            metadata.attribution.match_method
+                        ),
+                    ));
+                    if let Some(content_type) = &metadata.content_type {
+                        fields.push(InfoField::new("Content role", content_type));
+                    }
+                    if let Some(year) = metadata.year {
+                        fields.push(InfoField::new("Year", year.to_string()));
+                    }
+                    if let Some(season) = metadata.season {
+                        fields.push(InfoField::new("Season", season.to_string()));
+                    }
+                    if let Some(episode) = metadata.episode {
+                        fields.push(InfoField::new("Episode", episode.to_string()));
+                    }
+                    if let Some(tmdb_id) = metadata.tmdb_id {
+                        fields.push(InfoField::new("TMDB ID", tmdb_id.to_string()));
+                    }
                 }
                 if let Some(size) = title.size_bytes {
                     fields.push(InfoField::new(
@@ -201,6 +234,7 @@ impl InfoPanel {
                 ));
                 self.render_fields(&fields);
                 if catalog.source.kind == media_rip_core::DiscKind::AudioCd {
+                    let tag_keys = tag_key_suggestions(catalog);
                     self.append_track_artwork(
                         catalog.cover_art_for_title(title.id),
                         title.id,
@@ -215,10 +249,12 @@ impl InfoPanel {
                     self.render_editable_tags(
                         title.id,
                         &title.tags,
+                        &tag_keys,
                         catalog.cover_art.as_ref(),
                         on_action,
                     );
                 } else {
+                    self.append_readonly_artwork(catalog.cover_art.as_ref(), "Disc artwork");
                     self.append_output_file_editor(
                         fields.len(),
                         title.id,
@@ -294,6 +330,7 @@ impl InfoPanel {
         &self,
         title_id: u32,
         tags: &[media_rip_core::MediaTag],
+        tag_keys: &[String],
         cover_art: Option<&CoverArt>,
         on_action: Rc<dyn Fn(InfoAction)>,
     ) {
@@ -301,31 +338,6 @@ impl InfoPanel {
 
         self.tags_content
             .append(&cover_art_editor(cover_art, on_action.clone()));
-
-        let scope_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        let scope_label = gtk::Label::new(Some("Apply edits to"));
-        scope_label.set_xalign(0.0);
-        scope_label.set_hexpand(true);
-        let scope = gtk::DropDown::from_strings(&["This track", "Every track"]);
-        scope.set_tooltip_text(Some(
-            "Choose whether Save changes one track or the whole album",
-        ));
-        scope_row.append(&scope_label);
-        scope_row.append(&scope);
-        self.tags_content.append(&scope_row);
-
-        let warning = gtk::Label::new(Some(
-            "Album-wide mode is active. Saved values will replace the same tag on every track.",
-        ));
-        warning.set_xalign(0.0);
-        warning.set_wrap(true);
-        warning.add_css_class("tags-warning");
-        warning.set_visible(false);
-        scope.connect_selected_notify({
-            let warning = warning.clone();
-            move |scope| warning.set_visible(scope.selected() == 1)
-        });
-        self.tags_content.append(&warning);
 
         let grid = gtk::Grid::builder()
             .column_spacing(6)
@@ -338,19 +350,29 @@ impl InfoPanel {
             label.set_tooltip_text(Some(&format!("Output tag: {}", tag.key)));
             label.add_css_class("info-label");
             let value = gtk::Entry::builder().text(&tag.value).hexpand(true).build();
-            let save = gtk::Button::with_label("Save");
-            save.add_css_class("flat");
-            save.set_tooltip_text(Some("Save this tag using the scope selected above"));
             let key = tag.key.clone();
             let callback = on_action.clone();
-            let scope = scope.clone();
+            value.connect_changed(move |value| {
+                callback(InfoAction::SetTag {
+                    title_id,
+                    key: key.clone(),
+                    value: value.text().to_string(),
+                    all_tracks: false,
+                });
+            });
+            let save = gtk::Button::with_label("Save for all");
+            save.set_tooltip_text(Some(
+                "Replace this tag on every track with the current value",
+            ));
+            let key = tag.key.clone();
+            let callback = on_action.clone();
             let edited_value = value.clone();
             save.connect_clicked(move |_| {
                 callback(InfoAction::SetTag {
                     title_id,
                     key: key.clone(),
                     value: edited_value.text().to_string(),
-                    all_tracks: scope.selected() == 1,
+                    all_tracks: true,
                 });
             });
             grid.attach(&label, 0, row as i32, 1, 1);
@@ -359,7 +381,7 @@ impl InfoPanel {
         }
         self.tags_content.append(&grid);
         self.tags_content
-            .append(&add_tag_row(title_id, &scope, on_action));
+            .append(&add_tag_row(title_id, tag_keys, on_action));
     }
 
     fn render_tags_unavailable(&self, message: &str) {
@@ -391,6 +413,26 @@ impl InfoPanel {
 
     fn remove_info_artwork(&self) {
         clear(&self.info_artwork);
+    }
+
+    fn append_readonly_artwork(&self, cover_art: Option<&CoverArt>, tooltip: &str) {
+        let Some(cover_art) = cover_art else {
+            return;
+        };
+        let Some(pixbuf) = gdk_pixbuf::Pixbuf::from_read(Cursor::new(cover_art.data.clone())).ok()
+        else {
+            return;
+        };
+        let (width, height) = artwork_size(pixbuf.width(), pixbuf.height(), 128);
+        let picture = gtk::Picture::for_pixbuf(&pixbuf);
+        picture.set_keep_aspect_ratio(true);
+        picture.set_can_shrink(true);
+        picture.set_size_request(width, height);
+        picture.set_tooltip_text(Some(tooltip));
+        picture.set_margin_top(9);
+        picture.set_margin_end(9);
+        clear(&self.info_artwork);
+        self.info_artwork.append(&picture);
     }
 
     fn append_output_file_editor(
@@ -538,11 +580,7 @@ fn artwork_size(width: i32, height: i32, maximum: i32) -> (i32, i32) {
     }
 }
 
-fn add_tag_row(
-    title_id: u32,
-    scope: &gtk::DropDown,
-    on_action: Rc<dyn Fn(InfoAction)>,
-) -> gtk::Box {
+fn add_tag_row(title_id: u32, tag_keys: &[String], on_action: Rc<dyn Fn(InfoAction)>) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Vertical, 6);
     row.add_css_class("add-tag-row");
     let label = gtk::Label::new(Some("Add a tag"));
@@ -551,11 +589,17 @@ fn add_tag_row(
     row.append(&label);
 
     let inputs = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    let key = gtk::Entry::builder()
-        .placeholder_text("Tag name")
-        .tooltip_text("For example: album, artist, genre, composer")
-        .hexpand(true)
-        .build();
+    let key = gtk::ComboBoxText::with_entry();
+    key.set_hexpand(true);
+    for suggestion in tag_keys {
+        key.append_text(suggestion);
+    }
+    let key_entry = key
+        .child()
+        .and_then(|child| child.downcast::<gtk::Entry>().ok())
+        .expect("an editable tag combo box must contain an entry");
+    key_entry.set_placeholder_text(Some("Tag name"));
+    key_entry.set_tooltip_text(Some("Type a tag name or choose a suggested key"));
     let value = gtk::Entry::builder()
         .placeholder_text("Value")
         .hexpand(true)
@@ -564,20 +608,91 @@ fn add_tag_row(
     inputs.append(&value);
     row.append(&inputs);
 
-    let add = gtk::Button::with_label("Add tag");
-    add.set_halign(gtk::Align::End);
-    add.set_tooltip_text(Some("Add this tag using the scope selected above"));
-    let scope = scope.clone();
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    actions.set_halign(gtk::Align::End);
+    let add = gtk::Button::with_label("Add to this track");
+    add.set_tooltip_text(Some("Add this tag to the selected track"));
+    let callback = on_action.clone();
+    let selected_key = key_entry.clone();
+    let selected_value = value.clone();
     add.connect_clicked(move |_| {
-        on_action(InfoAction::AddTag {
+        callback(InfoAction::AddTag {
             title_id,
-            key: key.text().to_string(),
-            value: value.text().to_string(),
-            all_tracks: scope.selected() == 1,
+            key: tag_key_from_input(&selected_key.text()),
+            value: selected_value.text().to_string(),
+            all_tracks: false,
         });
     });
-    row.append(&add);
+    actions.append(&add);
+    let add_all = gtk::Button::with_label("Add for all");
+    add_all.set_tooltip_text(Some("Add or replace this tag on every track"));
+    add_all.connect_clicked(move |_| {
+        on_action(InfoAction::AddTag {
+            title_id,
+            key: tag_key_from_input(&key_entry.text()),
+            value: value.text().to_string(),
+            all_tracks: true,
+        });
+    });
+    actions.append(&add_all);
+    row.append(&actions);
     row
+}
+
+fn tag_key_suggestions(catalog: &MediaCatalog) -> Vec<String> {
+    let mut keys = [
+        "album",
+        "album_artist",
+        "albumartistsort",
+        "artist",
+        "artists",
+        "artistsort",
+        "barcode",
+        "catalognumber",
+        "comment",
+        "composer",
+        "copyright",
+        "date",
+        "discnumber",
+        "genre",
+        "isrc",
+        "label",
+        "lyrics",
+        "media",
+        "musicbrainz_albumid",
+        "musicbrainz_albumartistid",
+        "musicbrainz_artistid",
+        "musicbrainz_discid",
+        "musicbrainz_recordingid",
+        "musicbrainz_releasegroupid",
+        "musicbrainz_releasetrackid",
+        "musicbrainz_trackid",
+        "originaldate",
+        "originalyear",
+        "performer",
+        "releasecountry",
+        "releasestatus",
+        "releasetype",
+        "script",
+        "title",
+        "track",
+        "totaldiscs",
+        "totaltracks",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+    for tag in catalog.titles.iter().flat_map(|title| &title.tags) {
+        keys.insert(tag.key.trim().to_ascii_lowercase());
+    }
+    let mut labels = keys
+        .into_iter()
+        .filter(|key| !key.is_empty())
+        .map(|key| tag_label(&key))
+        .collect::<Vec<_>>();
+    labels.sort_by_key(|label| label.to_ascii_lowercase());
+    labels.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    labels
 }
 
 fn clear(container: &impl IsA<gtk::Widget>) {
@@ -591,22 +706,81 @@ fn clear(container: &impl IsA<gtk::Widget>) {
 }
 
 fn tag_label(key: &str) -> String {
-    match key {
-        "album_artist" => "Album artist".to_owned(),
-        "musicbrainz_recordingid" => "MusicBrainz recording ID".to_owned(),
-        "musicbrainz_albumid" => "MusicBrainz release ID".to_owned(),
-        "musicbrainz_releasegroupid" => "MusicBrainz release group ID".to_owned(),
-        "musicbrainz_discid" => "MusicBrainz disc ID".to_owned(),
-        "release_type" => "Release type".to_owned(),
-        key => {
-            let mut label = key.replace('_', " ");
-            if let Some(first) = label.get_mut(0..1) {
-                first.make_ascii_uppercase();
-            }
-            label
-        }
+    if let Some((_, label)) = PICARD_TAG_LABELS
+        .iter()
+        .find(|(tag, _)| tag.eq_ignore_ascii_case(key))
+    {
+        return (*label).to_owned();
     }
+    key.replace('_', " ")
+        .split_whitespace()
+        .map(title_case_word)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
+
+fn tag_key_from_input(input: &str) -> String {
+    let input = input.trim();
+    if let Some((key, _)) = PICARD_TAG_LABELS
+        .iter()
+        .find(|(key, label)| key.eq_ignore_ascii_case(input) || label.eq_ignore_ascii_case(input))
+    {
+        return (*key).to_owned();
+    }
+    input
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("_")
+        .to_ascii_lowercase()
+}
+
+fn title_case_word(word: &str) -> String {
+    let mut characters = word.chars();
+    let Some(first) = characters.next() else {
+        return String::new();
+    };
+    first.to_uppercase().chain(characters).collect()
+}
+
+const PICARD_TAG_LABELS: &[(&str, &str)] = &[
+    ("album", "Album"),
+    ("album_artist", "Album Artist"),
+    ("albumartistsort", "Album Artist Sort Order"),
+    ("artist", "Artist"),
+    ("artists", "Artists"),
+    ("artistsort", "Artist Sort Order"),
+    ("barcode", "Barcode"),
+    ("catalognumber", "Catalog Number"),
+    ("comment", "Comment"),
+    ("composer", "Composer"),
+    ("copyright", "Copyright"),
+    ("date", "Date"),
+    ("discnumber", "Disc Number"),
+    ("genre", "Genre"),
+    ("isrc", "ISRC"),
+    ("label", "Record Label"),
+    ("lyrics", "Lyrics"),
+    ("media", "Media"),
+    ("musicbrainz_albumartistid", "MusicBrainz Album Artist ID"),
+    ("musicbrainz_albumid", "MusicBrainz Release ID"),
+    ("musicbrainz_artistid", "MusicBrainz Artist ID"),
+    ("musicbrainz_discid", "MusicBrainz Disc ID"),
+    ("musicbrainz_recordingid", "MusicBrainz Recording ID"),
+    ("musicbrainz_releasegroupid", "MusicBrainz Release Group ID"),
+    ("musicbrainz_releasetrackid", "MusicBrainz Release Track ID"),
+    ("musicbrainz_trackid", "MusicBrainz Track ID"),
+    ("originaldate", "Original Release Date"),
+    ("originalyear", "Original Release Year"),
+    ("performer", "Performer"),
+    ("releasecountry", "Release Country"),
+    ("releasestatus", "Release Status"),
+    ("releasetype", "Release Type"),
+    ("script", "Script"),
+    ("title", "Title"),
+    ("totaldiscs", "Total Discs"),
+    ("totaltracks", "Total Tracks"),
+    ("track", "Track Number"),
+];
 
 fn format_playlist_ranges(key: &str) -> Option<String> {
     key.split_terminator(';')
@@ -630,7 +804,7 @@ fn format_playlist_ranges(key: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{artwork_size, format_playlist_ranges};
+    use super::{artwork_size, format_playlist_ranges, tag_key_from_input, tag_label};
 
     #[test]
     fn artwork_bounds_follow_the_source_aspect_ratio() {
@@ -649,5 +823,15 @@ mod tests {
             .as_deref(),
             Some("00001.m2ts 0:00:00–1:00:00, 00042.m2ts 0:00:01–0:00:02")
         );
+    }
+
+    #[test]
+    fn tag_names_use_picard_style_labels_and_stable_keys() {
+        assert_eq!(tag_label("album_artist"), "Album Artist");
+        assert_eq!(tag_label("musicbrainz_albumid"), "MusicBrainz Release ID");
+        assert_eq!(tag_label("custom_tag"), "Custom Tag");
+        assert_eq!(tag_key_from_input("Album Artist"), "album_artist");
+        assert_eq!(tag_key_from_input("Track Number"), "track");
+        assert_eq!(tag_key_from_input("Custom Tag"), "custom_tag");
     }
 }

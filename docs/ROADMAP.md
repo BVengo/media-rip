@@ -87,6 +87,8 @@ duplicate work.
 - [x] Add Audio CD discovery, secure extraction, local CD-TEXT tagging, and audio output defaults.
 - [x] Add exact MusicBrainz Audio CD matching, a validated CD-TEXT release-search fallback,
   editable tags, and an offline CD-TEXT fallback.
+- [x] Add authored DVD/Blu-ray metadata, exact TheDiscDB disc-layout matching, cached optional
+  TMDB enrichment, conservative title validation, and visible match provenance.
 - [ ] Add optional Audio CD checksum verification.
 
 ## Platforms and distribution

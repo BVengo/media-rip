@@ -8,12 +8,10 @@ use std::{
 
 use media_rip_core::{
     DiscKind, Drive, EngineEvent, InfoField, LogLevel, MediaCatalog, MediaEngineError, MediaSource,
-    ScanOptions,
-    ports::CancellationToken,
-    util::{format_bytes, sanitize_file_name},
+    ScanOptions, ports::CancellationToken, util::format_bytes,
 };
 
-use crate::source;
+use crate::{metadata, source};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToolAvailability {
@@ -81,7 +79,7 @@ pub(crate) fn scan_source(
         online_tagged,
         exact_musicbrainz_match,
         musicbrainz_error,
-        cover_art,
+        mut cover_art,
     ) = if kind == DiscKind::AudioCd {
         let catalog = source::audio_cd_catalog(
             &media_path,
@@ -196,14 +194,64 @@ pub(crate) fn scan_source(
         }
     }
 
-    for (index, title) in titles.iter_mut().enumerate() {
-        title.id = index as u32;
-        if kind != DiscKind::AudioCd {
-            title.output_file = format!(
-                "{}_t{index:02}.mkv",
-                sanitize_file_name(&source::source_stem(path))
+    let fallback_video_name = drive
+        .as_ref()
+        .and_then(|drive| drive.media_label.clone())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| source::source_stem(&media_path));
+    let mut video_enrichment = if matches!(kind, DiscKind::Dvd | DiscKind::BluRay) {
+        let enrichment = metadata::enrich_video(
+            &media_path,
+            kind,
+            &fallback_video_name,
+            &mut titles,
+            &options,
+            cancellation,
+        );
+        if cancellation.is_cancelled() {
+            return Err(MediaEngineError::Cancelled);
+        }
+        for warning in &enrichment.warnings {
+            log(events, LogLevel::Warning, warning.clone());
+        }
+        if !enrichment.attributions.is_empty() {
+            log(
+                events,
+                LogLevel::Success,
+                format!(
+                    "Applied video metadata from {}.",
+                    enrichment
+                        .attributions
+                        .iter()
+                        .map(|attribution| attribution.provider.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" + ")
+                ),
             );
         }
+        if cover_art.is_none() {
+            cover_art = enrichment.cover_art.clone();
+        }
+        Some(enrichment)
+    } else {
+        None
+    };
+
+    for (index, title) in titles.iter_mut().enumerate() {
+        let old_id = title.id;
+        if let Some(enrichment) = video_enrichment.as_mut() {
+            for suggestion in enrichment
+                .suggestions
+                .iter_mut()
+                .filter(|suggestion| suggestion.title_id == old_id)
+            {
+                suggestion.title_id = index as u32;
+            }
+        }
+        title.id = index as u32;
+    }
+    if kind != DiscKind::AudioCd {
+        metadata::assign_output_names(&mut titles, &source::source_stem(path));
     }
 
     let capacity = drive
@@ -219,7 +267,10 @@ pub(crate) fn scan_source(
         if kind == DiscKind::AudioCd {
             "Audio CD".to_owned()
         } else {
-            source::source_stem(&media_path)
+            video_enrichment
+                .as_ref()
+                .and_then(|enrichment| enrichment.source_name.clone())
+                .unwrap_or(fallback_video_name)
         }
     });
     let mut source_info =
@@ -256,6 +307,56 @@ pub(crate) fn scan_source(
             );
         }
     }
+    if let Some(enrichment) = &video_enrichment {
+        if let Some(content_type) = &enrichment.content_type {
+            source_info.insert(2, InfoField::new("Content", content_type));
+        }
+        if let Some(year) = enrichment.year {
+            source_info.insert(
+                3.min(source_info.len()),
+                InfoField::new("Year", year.to_string()),
+            );
+        }
+        if let Some(hash) = &enrichment.content_hash {
+            source_info.push(InfoField::new("Disc content hash", hash));
+        }
+        if let Some(status) = &enrichment.disc_match_status {
+            source_info.push(InfoField::new("Disc metadata match", status));
+        }
+        if let Some(identity) = &enrichment.disc_identity {
+            source_info.push(InfoField::new("Disc identity", identity));
+        }
+        if !enrichment.suggestions.is_empty() {
+            source_info.push(InfoField::new(
+                "Probable episode matches",
+                format!(
+                    "{} suggestion(s), not applied — review them in the content list",
+                    enrichment.suggestions.len()
+                ),
+            ));
+        }
+        if !enrichment.attributions.is_empty() {
+            source_info.push(InfoField::new(
+                "Metadata source",
+                enrichment
+                    .attributions
+                    .iter()
+                    .map(|attribution| {
+                        format!(
+                            "{} ({}%, {})",
+                            attribution.provider,
+                            attribution.confidence_percent,
+                            attribution.match_method
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            ));
+        }
+        if cover_art.is_some() {
+            source_info.push(InfoField::new("Artwork", "Embedded disc metadata or TMDB"));
+        }
+    }
     if let Some(artist) = disc_artist {
         source_info.insert(2, InfoField::new("Album artist", artist));
     }
@@ -282,6 +383,13 @@ pub(crate) fn scan_source(
         source_info,
         cover_art,
         track_cover_art: Default::default(),
+        metadata_attributions: video_enrichment
+            .as_ref()
+            .map(|enrichment| enrichment.attributions.clone())
+            .unwrap_or_default(),
+        video_metadata_suggestions: video_enrichment
+            .map(|enrichment| enrichment.suggestions)
+            .unwrap_or_default(),
     })
 }
 
@@ -360,7 +468,9 @@ mod live_tests {
             &device,
             ScanOptions {
                 auto_tag_audio: false,
+                auto_tag_video: false,
                 allow_online_access: false,
+                tmdb_access_token: None,
             },
             &events,
             &CancellationToken::default(),

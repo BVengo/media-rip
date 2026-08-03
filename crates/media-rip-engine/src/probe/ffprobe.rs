@@ -337,6 +337,7 @@ fn title_from_probe(
     Ok(Title {
         id: candidate.id,
         source_title_id: candidate.source_title_id.clone(),
+        disc_title_number: candidate.disc_title_number,
         output_file: format!("{}.mkv", sanitize_file_name(&name)),
         name,
         is_main_title: candidate.is_main_title,
@@ -349,6 +350,7 @@ fn title_from_probe(
         segment_map: candidate.segment_map.clone(),
         duplicate_key: candidate.duplicate_key.clone(),
         tags: Vec::new(),
+        video_metadata: None,
         selected: true,
     })
 }
@@ -525,6 +527,7 @@ mod tests {
             &ProbeCandidate {
                 id: 0,
                 source_title_id: "00800".to_owned(),
+                disc_title_number: None,
                 display_name: "Feature".to_owned(),
                 input: ProbeInput::File(PathBuf::from("feature.m2ts")),
                 size_hint: None,
@@ -559,6 +562,7 @@ mod tests {
         let candidate = ProbeCandidate {
             id: 0,
             source_title_id: "1".to_owned(),
+            disc_title_number: None,
             display_name: "Title 1".to_owned(),
             input: ProbeInput::Dvd {
                 root: PathBuf::from("/disc"),
@@ -596,6 +600,7 @@ mod tests {
         let candidate = ProbeCandidate {
             id: 0,
             source_title_id: "00014".to_owned(),
+            disc_title_number: None,
             display_name: "Feature".to_owned(),
             input: ProbeInput::File(PathBuf::from("feature.m2ts")),
             size_hint: None,
@@ -630,6 +635,7 @@ mod tests {
         let candidate = ProbeCandidate {
             id: 0,
             source_title_id: "00014".to_owned(),
+            disc_title_number: None,
             display_name: "Feature".to_owned(),
             input: ProbeInput::BluRay {
                 root: PathBuf::from("/disc"),
@@ -677,6 +683,7 @@ mod tests {
         let candidate = ProbeCandidate {
             id: 0,
             source_title_id: "00026".to_owned(),
+            disc_title_number: None,
             display_name: "Main feature".to_owned(),
             input: ProbeInput::BluRay {
                 root: PathBuf::from("/disc"),
@@ -724,6 +731,7 @@ mod tests {
         let candidate = ProbeCandidate {
             id: 0,
             source_title_id: "00014".to_owned(),
+            disc_title_number: None,
             display_name: "Feature".to_owned(),
             input: ProbeInput::BluRay {
                 root: PathBuf::from("/disc"),
@@ -761,6 +769,7 @@ mod tests {
         let candidate = ProbeCandidate {
             id: 0,
             source_title_id: "00014".to_owned(),
+            disc_title_number: None,
             display_name: "Feature".to_owned(),
             input: ProbeInput::File(PathBuf::from("feature.m2ts")),
             size_hint: None,

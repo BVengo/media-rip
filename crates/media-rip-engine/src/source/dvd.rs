@@ -14,6 +14,7 @@ const DVD_SECTOR_SIZE: usize = 2048;
 const TT_SRPT_SECTOR_OFFSET: usize = 0xC4;
 const VTS_PTT_SRPT_SECTOR_OFFSET: usize = 0xC8;
 const VTS_PGCIT_SECTOR_OFFSET: usize = 0xCC;
+const TXTDT_MGI_SECTOR_OFFSET: usize = 0xD4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DvdTitleReference {
@@ -59,6 +60,40 @@ pub(crate) fn dvd_candidates(path: &Path) -> Result<Vec<ProbeCandidate>, MediaEn
     Ok(title_candidates(root, title_count, &size_hints))
 }
 
+pub(crate) fn dvd_text_name(path: &Path) -> Option<String> {
+    let root = normalize_disc_root(path, "VIDEO_TS");
+    let bytes = if root.is_dir() {
+        let video_ts = locate_child_case_insensitive(&root, "VIDEO_TS")
+            .unwrap_or_else(|| root.join("VIDEO_TS"));
+        let manager = locate_child_case_insensitive(&video_ts, "VIDEO_TS.IFO")
+            .unwrap_or_else(|| video_ts.join("VIDEO_TS.IFO"));
+        fs::read(manager).ok()?
+    } else {
+        #[cfg(target_os = "linux")]
+        {
+            read_info_file_from_dvd(&root, 0)?
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            return None;
+        }
+    };
+    dvd_text_name_from_manager(&bytes)
+}
+
+fn dvd_text_name_from_manager(bytes: &[u8]) -> Option<String> {
+    let end = TXTDT_MGI_SECTOR_OFFSET.checked_add(4)?;
+    let sector = read_be_u32(bytes.get(TXTDT_MGI_SECTOR_OFFSET..end)?)?;
+    if sector == 0 {
+        return None;
+    }
+    let offset = usize::try_from(sector).ok()?.checked_mul(DVD_SECTOR_SIZE)?;
+    let raw = bytes.get(offset..offset.checked_add(12)?)?;
+    let end = raw.iter().position(|byte| *byte == 0).unwrap_or(raw.len());
+    let name = String::from_utf8_lossy(&raw[..end]).trim().to_owned();
+    (!name.is_empty() && name.chars().all(|character| !character.is_control())).then_some(name)
+}
+
 fn title_candidates(
     root: std::path::PathBuf,
     title_count: u32,
@@ -70,6 +105,7 @@ fn title_candidates(
         .map(|(index, title)| ProbeCandidate {
             id: title,
             source_title_id: title.to_string(),
+            disc_title_number: Some(title),
             display_name: format!("{disc_name} — Title {title}"),
             input: ProbeInput::Dvd {
                 root: root.clone(),
@@ -359,6 +395,19 @@ fn read_be_u32(bytes: &[u8]) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_the_optional_dvd_text_disc_name() {
+        let mut bytes = vec![0_u8; DVD_SECTOR_SIZE * 2];
+        bytes[TXTDT_MGI_SECTOR_OFFSET..TXTDT_MGI_SECTOR_OFFSET + 4]
+            .copy_from_slice(&1_u32.to_be_bytes());
+        bytes[DVD_SECTOR_SIZE..DVD_SECTOR_SIZE + 11].copy_from_slice(b"Example DVD");
+
+        assert_eq!(
+            dvd_text_name_from_manager(&bytes).as_deref(),
+            Some("Example DVD")
+        );
+    }
 
     #[test]
     fn reads_title_count_from_video_manager_table() {

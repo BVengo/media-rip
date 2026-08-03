@@ -3,7 +3,9 @@ mod ffmpeg;
 use std::{
     collections::HashSet,
     fs::{self, OpenOptions},
+    io::Write,
     sync::mpsc::Sender,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use media_rip_core::{
@@ -205,29 +207,41 @@ fn validate_output_directory(directory: &std::path::Path) -> Result<(), MediaEng
             directory.display()
         )));
     }
-    for suffix in 0..100 {
-        let probe = directory.join(format!(
-            ".mediarip-write-test-{}-{suffix}",
-            std::process::id()
-        ));
-        match OpenOptions::new().write(true).create_new(true).open(&probe) {
-            Ok(_) => {
-                let _ = fs::remove_file(probe);
-                return Ok(());
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => {
-                return Err(MediaEngineError::Other(format!(
-                    "cannot write to {}: {error}",
-                    directory.display()
-                )));
-            }
-        }
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let probe = directory.join(format!(
+        ".mediarip-write-test-{}-{nonce}",
+        std::process::id(),
+    ));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&probe)
+        .map_err(|error| {
+            let _ = fs::remove_file(&probe);
+            MediaEngineError::Other(format!("cannot write to {}: {error}", directory.display()))
+        })?;
+    let result = file
+        .write_all(b"MediaRip output-directory write test\n")
+        .and_then(|_| file.sync_all());
+    drop(file);
+    let cleanup = fs::remove_file(&probe);
+    if let Err(error) = result {
+        return Err(MediaEngineError::Other(format!(
+            "cannot write to {}: {error}",
+            directory.display()
+        )));
     }
-    Err(MediaEngineError::Other(format!(
-        "could not create a write test in {}",
-        directory.display()
-    )))
+    if let Err(error) = cleanup {
+        return Err(MediaEngineError::Other(format!(
+            "cannot remove a temporary file from {}: {error}",
+            directory.display()
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -268,11 +282,30 @@ mod tests {
         assert!(error.contains("Audio CDs must be saved"));
     }
 
+    #[test]
+    fn output_directory_validation_writes_and_removes_its_probe() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "mediarip-output-validation-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+
+        validate_output_directory(&directory).unwrap();
+
+        assert!(fs::read_dir(&directory).unwrap().next().is_none());
+        fs::remove_dir(directory).unwrap();
+    }
+
     fn request() -> RipRequest {
         let titles = (0..2)
             .map(|id| Title {
                 id,
                 source_title_id: id.to_string(),
+                disc_title_number: None,
                 name: format!("Title {id}"),
                 is_main_title: id == 0,
                 duration_ms: 1_000,
@@ -293,6 +326,7 @@ mod tests {
                 segment_map: None,
                 duplicate_key: None,
                 tags: Vec::new(),
+                video_metadata: None,
                 output_file: format!("title-{id}.mkv"),
                 selected: true,
             })
@@ -312,6 +346,8 @@ mod tests {
                 source_info: Vec::new(),
                 cover_art: None,
                 track_cover_art: Default::default(),
+                metadata_attributions: Vec::new(),
+                video_metadata_suggestions: Vec::new(),
             },
             selections: vec![
                 RipSelection {

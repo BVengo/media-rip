@@ -36,6 +36,7 @@ pub(crate) struct AppState {
     pub cancellation: Option<CancellationToken>,
     pub completed_titles_this_job: usize,
     pub close_requested: bool,
+    pub auto_read_armed: bool,
 }
 
 impl AppState {

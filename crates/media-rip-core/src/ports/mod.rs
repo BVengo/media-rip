@@ -11,17 +11,21 @@ use thiserror::Error;
 
 use crate::{Drive, EngineEvent, RipRequest};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanOptions {
     pub auto_tag_audio: bool,
+    pub auto_tag_video: bool,
     pub allow_online_access: bool,
+    pub tmdb_access_token: Option<String>,
 }
 
 impl Default for ScanOptions {
     fn default() -> Self {
         Self {
             auto_tag_audio: true,
+            auto_tag_video: true,
             allow_online_access: true,
+            tmdb_access_token: None,
         }
     }
 }

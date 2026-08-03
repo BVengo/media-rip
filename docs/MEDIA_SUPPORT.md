@@ -38,6 +38,25 @@ samples 30 seconds of packets to estimate the title size. Output files are writt
 explicit stream maps, profile-selected codecs, and muxers. This is an open-source media stack and
 contains no MakeMKV dependency.
 
+Before online lookup, MediaRip reads optional DVD text and Blu-ray Disc Library XML, including the
+disc name, authored title names, and local artwork. Mounted discs and disc folders also receive a
+TheDiscDB-compatible MD5 fingerprint made from sorted file sizes. Mounted folders and unmounted
+DVD devices with an ISO9660 bridge directory are supported. An exact TheDiscDB hash match can
+name main features, episodes, and extras, but every title mapping must also pass duration/size
+validation. A configured TMDB Read Access Token enriches exact identities with canonical title,
+year, type, and poster artwork; a title-only TMDB result is applied to a movie item only when its
+runtime uniquely identifies one scanned title. Raw Blu-ray devices and DVDs without an
+ISO9660 bridge directory cannot currently be fingerprinted, and community database coverage varies
+by release and region.
+
+For TV DVDs without an exact disc record, an authored label such as `SHOW_S2_D3` can be combined
+with the disc's play-all/title grouping and TMDB season order. These matches remain visibly marked
+as probable and separate from title metadata until the user applies one or all of them. Alternate
+authored title groups are retained as separate suggestions instead of being silently discarded.
+Split-volume labels such as `SHOW_S2_VOL2_D3` are retained as distinct evidence: MediaRip estimates
+the total disc count from the season size and episode runtime, then reports any inferred overall
+disc number in the source information panel rather than presenting it as authored fact.
+
 Audio CD tables of contents are read with `cdparanoia`; embedded CD-TEXT can be read locally with
 `cd-info` and no CDDB network request, or disabled in Settings. Each selected track is securely
 extracted to temporary 16-bit, 44.1 kHz stereo PCM and then written by FFmpeg as FLAC, WAV, Opus,
@@ -58,10 +77,3 @@ No decryption keys or circumvention components are bundled. CSS-protected DVDs m
 the user's legally installed `libdvdcss` is integrated with the system DVD stack. AACS/BD+
 availability similarly depends on the user's libbluray/libaacs setup and lawful key configuration.
 Failures are surfaced from the underlying open-source stack in the Messages panel.
-
-Future decryption work should implement a dedicated engine capability and report:
-
-- protection schemes detected;
-- provider name and availability;
-- whether a title can be opened;
-- actionable errors without leaking key material.

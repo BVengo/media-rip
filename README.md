@@ -15,6 +15,9 @@ It is not a wrapper around MakeMKV. The project never invokes, links to, or requ
 - Linux optical-drive discovery with mounted-disc labels and device information.
 - DVD title discovery from `VIDEO_TS.IFO`.
 - Blu-ray playlist discovery with disc-defined main-title marking and authored-stream filtering.
+- DVD/Blu-ray authored-metadata reading plus enabled-by-default exact TheDiscDB fingerprint
+  matching for movies, episodes, and extras. Optional TMDB enrichment adds canonical titles,
+  years, poster artwork, and output tags when the user supplies a Read Access Token.
 - Audio CD track discovery, enabled-by-default exact MusicBrainz matching with a validated
   CD-TEXT release-search fallback, editable output tags,
   Cover Art Archive artwork embedding, configurable matched-track names (default
@@ -67,6 +70,20 @@ Online Audio CD tagging uses the public MusicBrainz web service. MediaRip identi
 limits lookups to one request per second, and does not poll in the background. Distributors and
 commercial deployments remain responsible for complying with the
 [MusicBrainz API terms and rate limits](https://musicbrainz.org/doc/MusicBrainz_API).
+
+Video-disc matching sends only a fingerprint derived from sorted disc-file sizes to TheDiscDB;
+no audio or video is uploaded. Exact matches are checked again against each scanned title's
+duration and size before names are applied. Successful responses and artwork are cached under the
+platform cache directory. TheDiscDB needs no key. TMDB enrichment is optional: create a v4 API
+Read Access Token, enter it under **Settings → Integrations → Video metadata**, and review TMDB's
+terms before enabling it. Ambiguous matches retain their authored or generic names.
+
+This product uses the TMDB API but is not endorsed or certified by TMDB.
+
+When a TV disc has no exact TheDiscDB record, MediaRip can use an authored season/disc label, DVD
+play-all structure, and TMDB episode order to show lower-confidence episode suggestions. They are
+never applied automatically: review each suggestion in the content list and use **Apply** or
+**Apply all** explicitly.
 
 Useful project commands:
 

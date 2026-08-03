@@ -122,6 +122,7 @@ pub(crate) fn audio_cd_catalog(
             Title {
                 id: id as u32,
                 source_title_id: track.number.to_string(),
+                disc_title_number: None,
                 name: name.clone(),
                 is_main_title: false,
                 duration_ms: track.sectors.saturating_mul(1_000) / CD_SECTORS_PER_SECOND,
@@ -150,6 +151,7 @@ pub(crate) fn audio_cd_catalog(
                     cd_text.artist.as_deref(),
                     track.number,
                 ),
+                video_metadata: None,
                 output_file: format!(
                     "{:0width$} - {}.flac",
                     track.number,
@@ -1254,6 +1256,7 @@ mod tests {
         let mut titles = vec![Title {
             id: 0,
             source_title_id: "1".into(),
+            disc_title_number: None,
             name: "Track 01".into(),
             is_main_title: false,
             duration_ms: 1_000,
@@ -1274,6 +1277,7 @@ mod tests {
             segment_map: None,
             duplicate_key: None,
             tags: Vec::new(),
+            video_metadata: None,
             output_file: "01 - Track 01.flac".into(),
             selected: true,
         }];
@@ -1366,5 +1370,4 @@ mod tests {
         assert_eq!(locale_country("pt-BR").as_deref(), Some("BR"));
         assert_eq!(locale_country("C"), None);
     }
-
 }

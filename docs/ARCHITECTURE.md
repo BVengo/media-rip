@@ -74,12 +74,23 @@ enumerate DVD titles, Blu-ray playlists, or CD tracks
 FFprobe video/file candidates or read the CD TOC/CD-TEXT
    │
    ▼
+read authored video metadata; exact TheDiscDB hash lookup; optional TMDB enrichment
+   │
+   ▼
 MediaCatalog ──► title tree + Info panel
 ```
 
 DVD folders use the title table and program-cell sector ranges in their IFO files; raw DVD devices
 read the same metadata through `libdvdread`. Blu-ray folders enumerate `.mpls` playlists, while
 `libbluray` supplies playlist byte ranges and raw-device enumeration.
+
+Video enrichment is deliberately evidence-ordered. Authored metadata is local and exact. TheDiscDB
+is queried only by a disc-content fingerprint and its returned title mappings are independently
+checked against scanned duration and size. TMDB is then addressed by TheDiscDB's external ID, or by
+an exact normalized title as a lower-confidence fallback. Provider, method, and confidence remain
+attached to the catalog/title model so the UI can explain every automatic name. Network JSON and
+artwork are cached below the platform cache directory; cancellation and lookup failures never turn
+an otherwise readable disc into a failed scan.
 
 ## Rip flow and output safety
 

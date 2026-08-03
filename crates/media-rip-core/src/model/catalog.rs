@@ -8,6 +8,48 @@ pub struct MediaTag {
     pub value: String,
 }
 
+/// Identifies where an automatically applied name or description came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetadataAttribution {
+    pub provider: String,
+    pub confidence_percent: u8,
+    pub match_method: String,
+}
+
+impl MetadataAttribution {
+    pub fn new(
+        provider: impl Into<String>,
+        confidence_percent: u8,
+        match_method: impl Into<String>,
+    ) -> Self {
+        Self {
+            provider: provider.into(),
+            confidence_percent: confidence_percent.min(100),
+            match_method: match_method.into(),
+        }
+    }
+}
+
+/// Structured video metadata associated with one DVD title or Blu-ray playlist.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VideoMetadata {
+    pub attribution: MetadataAttribution,
+    pub content_type: Option<String>,
+    pub year: Option<u32>,
+    pub season: Option<u32>,
+    pub episode: Option<u32>,
+    pub tmdb_id: Option<u64>,
+}
+
+/// A lower-confidence video title proposal that is never applied automatically.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VideoMetadataSuggestion {
+    pub title_id: u32,
+    pub name: String,
+    pub tags: Vec<MediaTag>,
+    pub metadata: VideoMetadata,
+}
+
 impl MediaTag {
     pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
@@ -17,7 +59,7 @@ impl MediaTag {
     }
 }
 
-/// Album artwork shared by all tracks discovered from an Audio CD.
+/// Source artwork: album art for Audio CDs or disc/poster art for video media.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoverArt {
     pub mime_type: String,
@@ -194,6 +236,8 @@ impl Track {
 pub struct Title {
     pub id: u32,
     pub source_title_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disc_title_number: Option<u32>,
     pub name: String,
     #[serde(default)]
     pub is_main_title: bool,
@@ -211,6 +255,8 @@ pub struct Title {
     /// frontend may edit them before a rip starts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<MediaTag>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_metadata: Option<VideoMetadata>,
     pub output_file: String,
     pub selected: bool,
 }
@@ -245,6 +291,10 @@ pub struct MediaCatalog {
     pub cover_art: Option<CoverArt>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub track_cover_art: BTreeMap<u32, TrackCoverArt>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata_attributions: Vec<MetadataAttribution>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub video_metadata_suggestions: Vec<VideoMetadataSuggestion>,
 }
 
 impl MediaCatalog {

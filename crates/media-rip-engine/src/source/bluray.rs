@@ -22,6 +22,7 @@ pub(crate) fn bluray_candidates(path: &Path) -> Result<Vec<ProbeCandidate>, Medi
                 .map(|(index, metadata)| ProbeCandidate {
                     id: index as u32,
                     source_title_id: format!("{:05}", metadata.playlist),
+                    disc_title_number: metadata.title_number,
                     display_name: format!("{disc_name} — Playlist {:05}.mpls", metadata.playlist),
                     input: ProbeInput::BluRay {
                         root: root.clone(),
@@ -42,6 +43,7 @@ pub(crate) fn bluray_candidates(path: &Path) -> Result<Vec<ProbeCandidate>, Medi
         return Ok(vec![ProbeCandidate {
             id: 0,
             source_title_id: "-1".to_owned(),
+            disc_title_number: None,
             display_name: format!("{} — Main playlist", source_stem(&root)),
             input: ProbeInput::BluRay {
                 root,
@@ -121,6 +123,7 @@ pub(crate) fn bluray_candidates(path: &Path) -> Result<Vec<ProbeCandidate>, Medi
             ProbeCandidate {
                 id: index as u32,
                 source_title_id: format!("{playlist:05}"),
+                disc_title_number: metadata.and_then(|metadata| metadata.title_number),
                 display_name: format!("{disc_name} — Playlist {playlist:05}.mpls"),
                 input: ProbeInput::BluRay {
                     root: root.clone(),
@@ -148,6 +151,7 @@ pub(crate) fn bluray_candidates(path: &Path) -> Result<Vec<ProbeCandidate>, Medi
 #[derive(Debug, Default)]
 struct BlurayPlaylistMetadata {
     playlist: u32,
+    title_number: Option<u32>,
     size: Option<u64>,
     chapters: Option<Vec<Chapter>>,
     duplicate_key: Option<String>,
@@ -190,6 +194,7 @@ fn bluray_disc_titles(root: &Path) -> Vec<BlurayPlaylistMetadata> {
                 .filter(|size| *size > 0);
             titles.push(BlurayPlaylistMetadata {
                 playlist,
+                title_number: Some(index.saturating_add(1)),
                 size,
                 chapters,
                 duplicate_key,
@@ -237,6 +242,7 @@ fn bluray_playlist_metadata(root: &Path, playlists: &[u32]) -> Vec<BlurayPlaylis
                 .collect();
         }
         let main_playlist = main_playlist(bluray);
+        let title_numbers = title_numbers_by_playlist(bluray);
         let metadata = playlists
             .iter()
             .map(|playlist| {
@@ -247,6 +253,7 @@ fn bluray_playlist_metadata(root: &Path, playlists: &[u32]) -> Vec<BlurayPlaylis
                 if info.is_null() {
                     return BlurayPlaylistMetadata {
                         playlist: *playlist,
+                        title_number: title_numbers.get(playlist).copied(),
                         size,
                         ..Default::default()
                     };
@@ -254,6 +261,7 @@ fn bluray_playlist_metadata(root: &Path, playlists: &[u32]) -> Vec<BlurayPlaylis
                 let title_info = &*info.cast::<BlurayTitleInfo>();
                 let result = BlurayPlaylistMetadata {
                     playlist: *playlist,
+                    title_number: title_numbers.get(playlist).copied(),
                     size,
                     chapters: chapters_from_title_info(title_info),
                     duplicate_key: duplicate_key_from_title_info(title_info),
@@ -394,6 +402,22 @@ unsafe fn main_playlist(bluray: *mut std::ffi::c_void) -> Option<u32> {
     let playlist = unsafe { (*info.cast::<BlurayTitleInfo>()).playlist };
     unsafe { bd_free_title_info(info) };
     Some(playlist)
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn title_numbers_by_playlist(bluray: *mut std::ffi::c_void) -> HashMap<u32, u32> {
+    let title_count = unsafe { bd_get_titles(bluray, 0, 0) };
+    let mut numbers = HashMap::new();
+    for index in 0..title_count {
+        let info = unsafe { bd_get_title_info(bluray, index, 0) };
+        if info.is_null() {
+            continue;
+        }
+        let playlist = unsafe { (*info.cast::<BlurayTitleInfo>()).playlist };
+        numbers.entry(playlist).or_insert(index.saturating_add(1));
+        unsafe { bd_free_title_info(info) };
+    }
+    numbers
 }
 
 #[cfg(target_os = "linux")]

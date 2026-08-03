@@ -9,7 +9,7 @@ use media_rip_core::{
 };
 use serde::{Deserialize, Deserializer, Serialize};
 
-const SETTINGS_VERSION: u32 = 2;
+const SETTINGS_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -17,6 +17,7 @@ pub(crate) struct AppSettings {
     pub version: u32,
     pub general: GeneralSettings,
     pub output: OutputSettings,
+    pub automation: AutomationSettings,
     pub selection: SelectionSettings,
     pub io: IoSettings,
     pub dvd: DvdSettings,
@@ -41,8 +42,27 @@ pub(crate) struct GeneralSettings {
 pub(crate) struct OutputSettings {
     pub destination_mode: String,
     pub custom_directory: String,
+    pub audio_cd_directory: String,
+    pub dvd_directory: String,
+    pub bluray_directory: String,
     pub minimum_title_seconds: u32,
     pub minimum_free_space_gib: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct AutomationSettings {
+    pub audio_cd: MediaAutomationSettings,
+    pub dvd: MediaAutomationSettings,
+    pub bluray: MediaAutomationSettings,
+    pub require_audio_cd_metadata: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub(crate) struct MediaAutomationSettings {
+    pub read_automatically: bool,
+    pub save_automatically: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +116,8 @@ pub(crate) struct AudioCdSettings {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct IntegrationSettings {
+    pub video_metadata_enabled: bool,
+    pub tmdb_access_token: String,
     pub optical_access_provider: String,
     pub expose_to_media_players: bool,
     pub streaming_enabled: bool,
@@ -120,6 +142,7 @@ impl Default for AppSettings {
             version: SETTINGS_VERSION,
             general: GeneralSettings::default(),
             output: OutputSettings::default(),
+            automation: AutomationSettings::default(),
             selection: SelectionSettings::default(),
             io: IoSettings::default(),
             dvd: DvdSettings::default(),
@@ -148,8 +171,33 @@ impl Default for OutputSettings {
         Self {
             destination_mode: "automatic".into(),
             custom_directory: String::new(),
+            audio_cd_directory: String::new(),
+            dvd_directory: String::new(),
+            bluray_directory: String::new(),
             minimum_title_seconds: 120,
             minimum_free_space_gib: 4,
+        }
+    }
+}
+
+impl Default for AutomationSettings {
+    fn default() -> Self {
+        Self {
+            audio_cd: MediaAutomationSettings::default(),
+            dvd: MediaAutomationSettings::default(),
+            bluray: MediaAutomationSettings::default(),
+            require_audio_cd_metadata: true,
+        }
+    }
+}
+
+impl AutomationSettings {
+    pub fn for_kind(&self, kind: media_rip_core::DiscKind) -> Option<&MediaAutomationSettings> {
+        match kind {
+            media_rip_core::DiscKind::AudioCd => Some(&self.audio_cd),
+            media_rip_core::DiscKind::Dvd => Some(&self.dvd),
+            media_rip_core::DiscKind::BluRay => Some(&self.bluray),
+            _ => None,
         }
     }
 }
@@ -210,6 +258,8 @@ impl Default for AudioCdSettings {
 impl Default for IntegrationSettings {
     fn default() -> Self {
         Self {
+            video_metadata_enabled: true,
+            tmdb_access_token: String::new(),
             optical_access_provider: "system".into(),
             expose_to_media_players: false,
             streaming_enabled: false,
@@ -258,6 +308,7 @@ impl AppSettings {
         let temporary = path.with_extension("json.tmp");
         fs::write(&temporary, format!("{contents}\n"))
             .map_err(|error| format!("could not write {}: {error}", temporary.display()))?;
+        secure_settings_file(&temporary)?;
         fs::rename(&temporary, &path)
             .map_err(|error| format!("could not replace {}: {error}", path.display()))?;
         Ok(path)
@@ -364,6 +415,19 @@ impl AppSettings {
             }
         }
     }
+}
+
+#[cfg(unix)]
+fn secure_settings_file(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .map_err(|error| format!("could not secure {}: {error}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn secure_settings_file(_path: &Path) -> Result<(), String> {
+    Ok(())
 }
 
 pub(crate) fn format_audio_cd_file_name(
@@ -687,6 +751,9 @@ mod tests {
         assert_eq!(settings.io.read_retry_count, 9);
         assert!(settings.general.av_sync_messages);
         assert!(settings.audio_cd.auto_tagging);
+        assert!(!settings.automation.audio_cd.read_automatically);
+        assert!(settings.automation.require_audio_cd_metadata);
+        assert!(settings.output.audio_cd_directory.is_empty());
     }
 
     #[test]
@@ -884,6 +951,7 @@ mod tests {
             titles: vec![Title {
                 id: 0,
                 source_title_id: "1".into(),
+                disc_title_number: None,
                 name: "Song".into(),
                 is_main_title: false,
                 duration_ms: 180_000,
@@ -904,6 +972,7 @@ mod tests {
                 segment_map: None,
                 duplicate_key: None,
                 tags: Vec::new(),
+                video_metadata: None,
                 output_file: "01 - Song.flac".into(),
                 selected: true,
             }],
@@ -914,6 +983,8 @@ mod tests {
             ],
             cover_art: None,
             track_cover_art: Default::default(),
+            metadata_attributions: Vec::new(),
+            video_metadata_suggestions: Vec::new(),
         }
     }
 
@@ -936,6 +1007,8 @@ mod tests {
             source_info: Vec::new(),
             cover_art: None,
             track_cover_art: Default::default(),
+            metadata_attributions: Vec::new(),
+            video_metadata_suggestions: Vec::new(),
         }
     }
 
@@ -943,6 +1016,7 @@ mod tests {
         Title {
             id: 0,
             source_title_id: source_title_id.into(),
+            disc_title_number: None,
             name: source_title_id.into(),
             is_main_title: false,
             duration_ms: 7_200_000,
@@ -963,6 +1037,7 @@ mod tests {
             segment_map: Some("00001.m2ts".into()),
             duplicate_key: Some(duplicate_key.into()),
             tags: Vec::new(),
+            video_metadata: None,
             output_file: format!("{source_title_id}.mkv"),
             selected: true,
         }

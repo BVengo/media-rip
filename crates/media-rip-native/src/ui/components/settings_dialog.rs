@@ -18,6 +18,9 @@ pub(crate) struct SettingsForm {
     allow_online_access: gtk::Switch,
     destination_mode: gtk::ComboBoxText,
     custom_directory: gtk::Entry,
+    audio_cd_directory: gtk::Entry,
+    dvd_directory: gtk::Entry,
+    bluray_directory: gtk::Entry,
     minimum_title_seconds: gtk::SpinButton,
     minimum_free_space_gib: gtk::SpinButton,
     preferred_languages: Vec<(String, gtk::CheckButton)>,
@@ -28,6 +31,13 @@ pub(crate) struct SettingsForm {
     read_buffer_mib: gtk::ComboBoxText,
     single_drive_mode: gtk::Switch,
     eject_when_finished: gtk::Switch,
+    audio_cd_auto_read: gtk::Switch,
+    audio_cd_auto_save: gtk::Switch,
+    dvd_auto_read: gtk::Switch,
+    dvd_auto_save: gtk::Switch,
+    bluray_auto_read: gtk::Switch,
+    bluray_auto_save: gtk::Switch,
+    require_audio_cd_metadata: gtk::Switch,
     dvd_structure_protection_method: gtk::ComboBoxText,
     dvd_processing_mode: gtk::ComboBoxText,
     bluray_playlist_policy: gtk::ComboBoxText,
@@ -38,6 +48,8 @@ pub(crate) struct SettingsForm {
     audio_cd_secure_extraction: gtk::Switch,
     audio_cd_use_disc_metadata: gtk::Switch,
     audio_cd_auto_tagging: gtk::Switch,
+    video_metadata_enabled: gtk::Switch,
+    tmdb_access_token: gtk::PasswordEntry,
     optical_access_provider: gtk::ComboBoxText,
     expose_to_media_players: gtk::Switch,
     streaming_enabled: gtk::Switch,
@@ -113,6 +125,18 @@ impl SettingsForm {
             &settings.output.custom_directory,
             "Choose a default output folder",
         );
+        let audio_cd_directory = entry(
+            &settings.output.audio_cd_directory,
+            "Use the global default destination",
+        );
+        let dvd_directory = entry(
+            &settings.output.dvd_directory,
+            "Use the global default destination",
+        );
+        let bluray_directory = entry(
+            &settings.output.bluray_directory,
+            "Use the global default destination",
+        );
         let minimum_title_seconds = spin(
             0.0,
             86_400.0,
@@ -161,6 +185,13 @@ impl SettingsForm {
         );
         let single_drive_mode = switch(settings.io.single_drive_mode);
         let eject_when_finished = switch(settings.io.eject_when_finished);
+        let audio_cd_auto_read = switch(settings.automation.audio_cd.read_automatically);
+        let audio_cd_auto_save = switch(settings.automation.audio_cd.save_automatically);
+        let dvd_auto_read = switch(settings.automation.dvd.read_automatically);
+        let dvd_auto_save = switch(settings.automation.dvd.save_automatically);
+        let bluray_auto_read = switch(settings.automation.bluray.read_automatically);
+        let bluray_auto_save = switch(settings.automation.bluray.save_automatically);
+        let require_audio_cd_metadata = switch(settings.automation.require_audio_cd_metadata);
 
         let dvd_structure_protection_method = combo(
             &[
@@ -213,6 +244,15 @@ impl SettingsForm {
         let audio_cd_auto_tagging = switch(settings.audio_cd.auto_tagging);
         audio_cd_secure_extraction.set_active(true);
         audio_cd_secure_extraction.set_sensitive(false);
+
+        let video_metadata_enabled = switch(settings.integrations.video_metadata_enabled);
+        let tmdb_access_token = gtk::PasswordEntry::builder()
+            .text(&settings.integrations.tmdb_access_token)
+            .placeholder_text("TMDB API Read Access Token (optional)")
+            .show_peek_icon(true)
+            .hexpand(true)
+            .build();
+        tmdb_access_token.set_size_request(328, -1);
 
         let optical_access_provider = combo(
             &[
@@ -322,7 +362,7 @@ impl SettingsForm {
         ));
         destination.append(&path_setting_row(
             "Custom folder",
-            "Used only when destination behaviour is Custom folder.",
+            "Global fallback used when a media type has no folder override.",
             &custom_directory,
             dialog,
             "Choose default output folder",
@@ -404,6 +444,46 @@ impl SettingsForm {
             &single_drive_mode,
         ));
         io.append(&reading);
+        let automation = section(
+            "Disc automation",
+            "Reading and saving are configured independently for each kind of disc.",
+        );
+        automation.append(&setting_row(
+            "Read Audio CDs automatically",
+            "Open an Audio CD as soon as the drive reports that it is ready.",
+            &audio_cd_auto_read,
+        ));
+        automation.append(&setting_row(
+            "Save Audio CDs automatically",
+            "Start saving all selected tracks immediately after the metadata scan.",
+            &audio_cd_auto_save,
+        ));
+        automation.append(&setting_row(
+            "Require Audio CD metadata",
+            "Keep the disc open for review instead of auto-saving when only generic track names are available.",
+            &require_audio_cd_metadata,
+        ));
+        automation.append(&setting_row(
+            "Read DVDs automatically",
+            "Open a DVD when it becomes ready; saving still waits unless enabled separately.",
+            &dvd_auto_read,
+        ));
+        automation.append(&setting_row(
+            "Save DVDs automatically",
+            "Save the titles selected by the normal filtering rules immediately after reading.",
+            &dvd_auto_save,
+        ));
+        automation.append(&setting_row(
+            "Read Blu-rays automatically",
+            "Open a Blu-ray when it becomes ready; saving still waits unless enabled separately.",
+            &bluray_auto_read,
+        ));
+        automation.append(&setting_row(
+            "Save Blu-rays automatically",
+            "Save the playlists selected by the normal filtering rules immediately after reading.",
+            &bluray_auto_save,
+        ));
+        io.append(&automation);
         let completion = section(
             "Completion",
             "What to do after every title is safely saved.",
@@ -429,6 +509,14 @@ impl SettingsForm {
             "Select how damaged or deliberately confusing cells are interpreted.",
             &dvd_structure_protection_method,
         ));
+        dvd_reading.append(&path_setting_row(
+            "Default destination",
+            "Optional DVD library folder. Leave empty to inherit the global destination.",
+            &dvd_directory,
+            dialog,
+            "Choose DVD output folder",
+            gtk::FileChooserAction::SelectFolder,
+        ));
         dvd_reading.append(&setting_row(
             "Discovery mode",
             "Controls how authored title and title-set boundaries are presented.",
@@ -452,6 +540,14 @@ impl SettingsForm {
             "Playlist policy",
             "Grouping never deletes source data and can be expanded in the title list.",
             &bluray_playlist_policy,
+        ));
+        playlists.append(&path_setting_row(
+            "Default destination",
+            "Optional Blu-ray library folder. Leave empty to inherit the global destination.",
+            &bluray_directory,
+            dialog,
+            "Choose Blu-ray output folder",
+            gtk::FileChooserAction::SelectFolder,
         ));
         bluray.append(&playlists);
         let bluray_tools = section(
@@ -487,6 +583,14 @@ impl SettingsForm {
             "Choose FLAC, uncompressed WAV, compact Opus, or broadly compatible M4A/AAC.",
             &audio_cd_output_format,
         ));
+        cd_output.append(&path_setting_row(
+            "Default destination",
+            "Optional music library folder. Leave empty to inherit the global destination.",
+            &audio_cd_directory,
+            dialog,
+            "Choose Audio CD output folder",
+            gtk::FileChooserAction::SelectFolder,
+        ));
         cd_output.append(&setting_row(
             "Output path",
             "Template used for Audio CD output. Slashes in this template create folders; slashes in metadata are sanitized. Available fields: {artist}, {album}, {disc}, {track}, {track:02}, and {title}.",
@@ -513,6 +617,21 @@ impl SettingsForm {
             "Integrations",
             "System media providers and optional local streaming.",
         );
+        let metadata = section(
+            "Video metadata",
+            "Identify authored DVD and Blu-ray contents while a disc is read.",
+        );
+        metadata.append(&setting_row(
+            "Look up video metadata",
+            "Use exact TheDiscDB fingerprints and cache successful matches locally.",
+            &video_metadata_enabled,
+        ));
+        metadata.append(&setting_row(
+            "TMDB Read Access Token",
+            "Optional. Adds canonical movie/series details and poster artwork; obtain a v4 token from themoviedb.org.",
+            &tmdb_access_token,
+        ));
+        integrations.append(&metadata);
         let providers = section(
             "Optical access",
             "Provider availability depends on libraries installed by the operating system.",
@@ -696,6 +815,18 @@ impl SettingsForm {
             custom_directory_for_mode.set_sensitive(mode.active_id().as_deref() == Some("custom"));
         });
 
+        require_audio_cd_metadata.set_sensitive(audio_cd_auto_save.is_active());
+        let require_metadata_for_auto_save = require_audio_cd_metadata.clone();
+        audio_cd_auto_save.connect_active_notify(move |toggle| {
+            require_metadata_for_auto_save.set_sensitive(toggle.is_active());
+        });
+
+        tmdb_access_token.set_sensitive(video_metadata_enabled.is_active());
+        let tmdb_token_for_toggle = tmdb_access_token.clone();
+        video_metadata_enabled.connect_active_notify(move |toggle| {
+            tmdb_token_for_toggle.set_sensitive(toggle.is_active());
+        });
+
         set_streaming_controls_sensitive(
             &streaming_address,
             &streaming_port,
@@ -753,6 +884,9 @@ impl SettingsForm {
             allow_online_access,
             destination_mode,
             custom_directory,
+            audio_cd_directory,
+            dvd_directory,
+            bluray_directory,
             minimum_title_seconds,
             minimum_free_space_gib,
             preferred_languages,
@@ -763,6 +897,13 @@ impl SettingsForm {
             read_buffer_mib,
             single_drive_mode,
             eject_when_finished,
+            audio_cd_auto_read,
+            audio_cd_auto_save,
+            dvd_auto_read,
+            dvd_auto_save,
+            bluray_auto_read,
+            bluray_auto_save,
+            require_audio_cd_metadata,
             dvd_structure_protection_method,
             dvd_processing_mode,
             bluray_playlist_policy,
@@ -773,6 +914,8 @@ impl SettingsForm {
             audio_cd_secure_extraction,
             audio_cd_use_disc_metadata,
             audio_cd_auto_tagging,
+            video_metadata_enabled,
+            tmdb_access_token,
             optical_access_provider,
             expose_to_media_players,
             streaming_enabled,
@@ -809,6 +952,9 @@ impl SettingsForm {
         watch!(self.allow_online_access, "active");
         watch!(self.destination_mode, "active-id");
         watch!(self.custom_directory, "text");
+        watch!(self.audio_cd_directory, "text");
+        watch!(self.dvd_directory, "text");
+        watch!(self.bluray_directory, "text");
         watch!(self.minimum_title_seconds, "value");
         watch!(self.minimum_free_space_gib, "value");
         for (_, button) in &self.preferred_languages {
@@ -821,6 +967,13 @@ impl SettingsForm {
         watch!(self.read_buffer_mib, "active-id");
         watch!(self.single_drive_mode, "active");
         watch!(self.eject_when_finished, "active");
+        watch!(self.audio_cd_auto_read, "active");
+        watch!(self.audio_cd_auto_save, "active");
+        watch!(self.dvd_auto_read, "active");
+        watch!(self.dvd_auto_save, "active");
+        watch!(self.bluray_auto_read, "active");
+        watch!(self.bluray_auto_save, "active");
+        watch!(self.require_audio_cd_metadata, "active");
         watch!(self.dvd_structure_protection_method, "active-id");
         watch!(self.dvd_processing_mode, "active-id");
         watch!(self.bluray_playlist_policy, "active-id");
@@ -831,6 +984,8 @@ impl SettingsForm {
         watch!(self.audio_cd_secure_extraction, "active");
         watch!(self.audio_cd_use_disc_metadata, "active");
         watch!(self.audio_cd_auto_tagging, "active");
+        watch!(self.video_metadata_enabled, "active");
+        watch!(self.tmdb_access_token, "text");
         watch!(self.optical_access_provider, "active-id");
         watch!(self.expose_to_media_players, "active");
         watch!(self.streaming_enabled, "active");
@@ -864,6 +1019,9 @@ impl SettingsForm {
 
         settings.output.destination_mode = active_id(&self.destination_mode, "automatic");
         settings.output.custom_directory = text(&self.custom_directory);
+        settings.output.audio_cd_directory = text(&self.audio_cd_directory);
+        settings.output.dvd_directory = text(&self.dvd_directory);
+        settings.output.bluray_directory = text(&self.bluray_directory);
         settings.output.minimum_title_seconds = spin_value(&self.minimum_title_seconds);
         settings.output.minimum_free_space_gib = spin_value(&self.minimum_free_space_gib);
 
@@ -884,6 +1042,14 @@ impl SettingsForm {
         settings.io.single_drive_mode = self.single_drive_mode.is_active();
         settings.io.eject_when_finished = self.eject_when_finished.is_active();
 
+        settings.automation.audio_cd.read_automatically = self.audio_cd_auto_read.is_active();
+        settings.automation.audio_cd.save_automatically = self.audio_cd_auto_save.is_active();
+        settings.automation.dvd.read_automatically = self.dvd_auto_read.is_active();
+        settings.automation.dvd.save_automatically = self.dvd_auto_save.is_active();
+        settings.automation.bluray.read_automatically = self.bluray_auto_read.is_active();
+        settings.automation.bluray.save_automatically = self.bluray_auto_save.is_active();
+        settings.automation.require_audio_cd_metadata = self.require_audio_cd_metadata.is_active();
+
         settings.dvd.structure_protection_method =
             active_id(&self.dvd_structure_protection_method, "automatic");
         settings.dvd.processing_mode = active_id(&self.dvd_processing_mode, "automatic");
@@ -898,6 +1064,8 @@ impl SettingsForm {
         settings.audio_cd.use_disc_metadata = self.audio_cd_use_disc_metadata.is_active();
         settings.audio_cd.auto_tagging = self.audio_cd_auto_tagging.is_active();
 
+        settings.integrations.video_metadata_enabled = self.video_metadata_enabled.is_active();
+        settings.integrations.tmdb_access_token = self.tmdb_access_token.text().to_string();
         settings.integrations.optical_access_provider =
             active_id(&self.optical_access_provider, "system");
         settings.integrations.expose_to_media_players = self.expose_to_media_players.is_active();
@@ -966,6 +1134,7 @@ fn setting_row(title: &str, subtitle: &str, control: &impl IsA<gtk::Widget>) -> 
     row.add_css_class("settings-row");
     let labels = gtk::Box::new(gtk::Orientation::Vertical, 2);
     labels.set_hexpand(true);
+    labels.set_size_request(0, -1);
     let title = gtk::Label::new(Some(&translate(title)));
     title.set_xalign(0.0);
     title.set_wrap(true);
@@ -973,6 +1142,8 @@ fn setting_row(title: &str, subtitle: &str, control: &impl IsA<gtk::Widget>) -> 
     let subtitle = gtk::Label::new(Some(&translate(subtitle)));
     subtitle.set_xalign(0.0);
     subtitle.set_wrap(true);
+    subtitle.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    subtitle.set_hexpand(true);
     subtitle.set_max_width_chars(48);
     subtitle.add_css_class("settings-row-detail");
     labels.append(&title);

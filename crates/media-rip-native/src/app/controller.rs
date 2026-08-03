@@ -367,6 +367,26 @@ impl Controller {
             self.announce_drive_transition(&previous, &drives);
         }
         self.update_disc_controls();
+
+        let state = self.state.borrow();
+        let automatic_drive = (!state.is_busy())
+            .then(|| {
+                automatic_read_candidate(state.auto_read_armed, &previous, &drives, &state.settings)
+            })
+            .flatten()
+            .cloned();
+        drop(state);
+        if let Some(drive) = automatic_drive {
+            let path = drive
+                .mount_path
+                .clone()
+                .unwrap_or_else(|| drive.device_path.clone());
+            self.ui.messages.append(&format!(
+                "Automatically opening {}.",
+                drive.media_kind.display_name()
+            ));
+            self.start_scan_with_origin(path, false);
+        }
     }
 
     fn announce_drive_transition(&self, previous: &[Drive], drives: &[Drive]) {
@@ -532,6 +552,10 @@ impl Controller {
     }
 
     fn start_scan(&self, path: PathBuf) {
+        self.start_scan_with_origin(path, true);
+    }
+
+    fn start_scan_with_origin(&self, path: PathBuf, user_initiated: bool) {
         if self.state.borrow().is_busy() {
             return;
         }
@@ -540,6 +564,9 @@ impl Controller {
             let mut state = self.state.borrow_mut();
             state.busy = BusyState::Scanning;
             state.cancellation = Some(token.clone());
+            if user_initiated {
+                state.auto_read_armed = true;
+            }
         }
         self.ui.set_busy(true);
         self.update_disc_controls();
@@ -556,7 +583,10 @@ impl Controller {
         let settings = &self.state.borrow().settings;
         let options = ScanOptions {
             auto_tag_audio: settings.audio_cd.auto_tagging,
+            auto_tag_video: settings.integrations.video_metadata_enabled,
             allow_online_access: settings.general.allow_online_access,
+            tmdb_access_token: (!settings.integrations.tmdb_access_token.trim().is_empty())
+                .then(|| settings.integrations.tmdb_access_token.trim().to_owned()),
         };
         let (events, receiver) = mpsc::channel();
         *self.worker_events.borrow_mut() = Some(receiver);
@@ -644,20 +674,24 @@ impl Controller {
     }
 
     fn pump_worker_events(&self) {
-        let (events, disconnected) = {
-            let worker_events = self.worker_events.borrow();
-            let Some(receiver) = worker_events.as_ref() else {
-                return;
-            };
-            drain_available_events(receiver)
+        // Remove the receiver while its events are handled. A terminal scan
+        // event can immediately start an automatic save and install a new
+        // receiver; keeping the disconnected scan receiver in this slot would
+        // make the cleanup below discard the save receiver instead.
+        let Some(receiver) = self.worker_events.borrow_mut().take() else {
+            return;
         };
+        let (events, disconnected) = drain_available_events(&receiver);
+
+        if !disconnected {
+            *self.worker_events.borrow_mut() = Some(receiver);
+        }
 
         for event in events {
             self.handle_event(event);
         }
 
-        if disconnected {
-            *self.worker_events.borrow_mut() = None;
+        if disconnected && self.worker_events.borrow().is_none() {
             self.handle_worker_disconnect();
         }
     }
@@ -738,9 +772,26 @@ impl Controller {
                 });
                 let output = default_output_directory(
                     &catalog.source.name,
+                    catalog.source.kind,
                     audio_only,
                     &self.state.borrow().settings,
                 );
+                let should_auto_save = catalog.source.drive.is_some()
+                    && self
+                        .state
+                        .borrow()
+                        .settings
+                        .automation
+                        .for_kind(catalog.source.kind)
+                        .is_some_and(|automation| automation.save_automatically);
+                let metadata_required = catalog.source.kind == DiscKind::AudioCd
+                    && self
+                        .state
+                        .borrow()
+                        .settings
+                        .automation
+                        .require_audio_cd_metadata;
+                let metadata_available = audio_cd_metadata_available(&catalog);
                 {
                     let mut state = self.state.borrow_mut();
                     state.expanded_titles.clear();
@@ -781,6 +832,18 @@ impl Controller {
                 self.ui
                     .set_status("Source opened successfully.", Some("status-success"));
                 self.render();
+                if should_auto_save && metadata_required && !metadata_available {
+                    self.ui.messages.append(
+                        "Automatic save skipped because the Audio CD has no album metadata.",
+                    );
+                    self.ui.set_status(
+                        "Audio CD opened; automatic save is waiting for metadata.",
+                        None,
+                    );
+                } else if should_auto_save {
+                    self.ui.messages.append("Starting automatic save.");
+                    self.start_rip();
+                }
             }
             EngineEvent::ScanFailed(error) => {
                 if self.finish_busy() {
@@ -914,13 +977,17 @@ impl Controller {
         let content_changed = matches!(
             action,
             ContentAction::CycleSelectAll
+                | ContentAction::ApplySuggestion(_)
+                | ContentAction::ApplyAllSuggestions
                 | ContentAction::SetTitleChecked { .. }
                 | ContentAction::SetTrackChecked { .. }
         );
         let mut all_checks_changed = false;
         let mut expanded_change = None;
+        let mut suggestions_applied = 0;
         {
             let mut state = self.state.borrow_mut();
+            let output_extension = state.output_profile.extension();
             match action {
                 ContentAction::CycleSelectAll => {
                     if let Some(catalog) = state.catalog.as_mut() {
@@ -946,6 +1013,29 @@ impl Controller {
                         true
                     };
                     expanded_change = Some((id, expanded));
+                }
+                ContentAction::ApplySuggestion(title_id) => {
+                    if let Some(catalog) = state.catalog.as_mut()
+                        && apply_video_suggestion(catalog, title_id, output_extension)
+                    {
+                        suggestions_applied = 1;
+                    }
+                }
+                ContentAction::ApplyAllSuggestions => {
+                    if let Some(catalog) = state.catalog.as_mut() {
+                        let title_ids = catalog
+                            .video_metadata_suggestions
+                            .iter()
+                            .map(|suggestion| suggestion.title_id)
+                            .collect::<Vec<_>>();
+                        for title_id in title_ids {
+                            suggestions_applied += usize::from(apply_video_suggestion(
+                                catalog,
+                                title_id,
+                                output_extension,
+                            ));
+                        }
+                    }
                 }
                 ContentAction::SetTitleChecked { title_id, selected } => {
                     if let Some(title) = state.catalog.as_mut().and_then(|catalog| {
@@ -984,6 +1074,17 @@ impl Controller {
         }
         if let Some((title_id, expanded)) = expanded_change {
             self.ui.content.set_expanded(title_id, expanded);
+            return;
+        }
+        if suggestions_applied > 0 {
+            self.ui.messages.append(&format!(
+                "Applied {suggestions_applied} probable episode metadata suggestion(s)."
+            ));
+            self.ui.set_status(
+                "Probable episode metadata applied; review names before ripping.",
+                Some("status-success"),
+            );
+            self.render();
             return;
         }
         {
@@ -1034,15 +1135,18 @@ impl Controller {
                 key,
                 value,
                 all_tracks,
-            } => set_tag(
-                catalog,
-                title_id,
-                &key,
-                &value,
-                all_tracks,
-                &file_name_template,
-                output_extension,
-            ),
+            } => {
+                set_tag(
+                    catalog,
+                    title_id,
+                    &key,
+                    &value,
+                    all_tracks,
+                    &file_name_template,
+                    output_extension,
+                );
+                false
+            }
             InfoAction::AddTag {
                 title_id,
                 key,
@@ -1412,6 +1516,28 @@ fn drive_is_ready(drive: &Drive) -> bool {
     drive.media_present && (drive.media_kind != DiscKind::Unknown || drive.mount_path.is_some())
 }
 
+fn automatic_read_candidate<'a>(
+    armed: bool,
+    previous: &[Drive],
+    drives: &'a [Drive],
+    settings: &AppSettings,
+) -> Option<&'a Drive> {
+    if !armed {
+        return None;
+    }
+    drives.iter().find(|drive| {
+        let newly_ready = drive_is_ready(drive)
+            && !previous
+                .iter()
+                .any(|old| old.device_path == drive.device_path && drive_is_ready(old));
+        newly_ready
+            && settings
+                .automation
+                .for_kind(drive.media_kind)
+                .is_some_and(|automation| automation.read_automatically)
+    })
+}
+
 fn drain_available_events(receiver: &mpsc::Receiver<EngineEvent>) -> (Vec<EngineEvent>, bool) {
     let mut events = Vec::new();
     let disconnected = loop {
@@ -1446,6 +1572,10 @@ fn set_tag(
     file_name_template: &str,
     output_extension: &str,
 ) -> bool {
+    let key = key.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return false;
+    }
     let album = catalog.source.name.clone();
     let is_audio_cd = catalog.source.kind == DiscKind::AudioCd;
     let mut renamed = false;
@@ -1459,10 +1589,21 @@ fn set_tag(
                     &format_audio_cd_file_name(file_name_template, title, &album),
                     output_extension,
                 );
-        if let Some(tag) = title.tags.iter_mut().find(|tag| tag.key == key) {
+        let mut updated = false;
+        title.tags.retain_mut(|tag| {
+            if !tag.key.eq_ignore_ascii_case(&key) {
+                return true;
+            }
+            if updated {
+                return false;
+            }
+            tag.key.clone_from(&key);
             tag.value = value.to_owned();
-        } else {
-            title.tags.push(media_rip_core::MediaTag::new(key, value));
+            updated = true;
+            true
+        });
+        if !updated {
+            title.tags.push(media_rip_core::MediaTag::new(&key, value));
         }
         if had_auto_name {
             let updated_output_file = ensure_extension(
@@ -1476,6 +1617,71 @@ fn set_tag(
         }
     }
     renamed
+}
+
+fn apply_video_suggestion(
+    catalog: &mut media_rip_core::MediaCatalog,
+    title_id: u32,
+    output_extension: &str,
+) -> bool {
+    let Some(position) = catalog
+        .video_metadata_suggestions
+        .iter()
+        .position(|suggestion| suggestion.title_id == title_id)
+    else {
+        return false;
+    };
+    let Some(title_index) = catalog
+        .titles
+        .iter()
+        .position(|title| title.id == title_id && title.video_metadata.is_none())
+    else {
+        return false;
+    };
+    let suggestion = catalog.video_metadata_suggestions.remove(position);
+    let mut output_file = ensure_extension(&sanitize_file_name(&suggestion.name), output_extension);
+    if catalog.titles.iter().enumerate().any(|(index, title)| {
+        index != title_index && title.output_file.eq_ignore_ascii_case(&output_file)
+    }) {
+        output_file = ensure_extension(
+            &format!(
+                "{}_{}",
+                sanitize_file_name(&suggestion.name),
+                sanitize_file_name(&catalog.titles[title_index].source_title_id)
+            ),
+            output_extension,
+        );
+    }
+    let title = &mut catalog.titles[title_index];
+    title.name = suggestion.name;
+    title.output_file = output_file;
+    title.video_metadata = Some(suggestion.metadata);
+    for suggested_tag in suggestion.tags {
+        if let Some(tag) = title
+            .tags
+            .iter_mut()
+            .find(|tag| tag.key.eq_ignore_ascii_case(&suggested_tag.key))
+        {
+            *tag = suggested_tag;
+        } else {
+            title.tags.push(suggested_tag);
+        }
+    }
+    let remaining = catalog.video_metadata_suggestions.len();
+    if let Some(field) = catalog
+        .source_info
+        .iter_mut()
+        .find(|field| field.label == "Probable episode matches")
+    {
+        field.value =
+            format!("{remaining} suggestion(s), not applied — review them in the content list");
+    }
+    if remaining == 0 {
+        catalog
+            .source_info
+            .retain(|field| field.label != "Probable episode matches");
+    }
+    true
 }
 
 fn set_cover_art(
@@ -1557,9 +1763,19 @@ fn resumable_failure_detail(error: &str, completed: usize) -> String {
 
 fn default_output_directory(
     source_name: &str,
+    source_kind: DiscKind,
     audio_only: bool,
     settings: &AppSettings,
 ) -> PathBuf {
+    let type_directory = match source_kind {
+        DiscKind::AudioCd => &settings.output.audio_cd_directory,
+        DiscKind::Dvd => &settings.output.dvd_directory,
+        DiscKind::BluRay => &settings.output.bluray_directory,
+        _ => "",
+    };
+    if !type_directory.trim().is_empty() {
+        return PathBuf::from(type_directory.trim());
+    }
     if settings.output.destination_mode == "none" {
         return PathBuf::new();
     }
@@ -1586,6 +1802,14 @@ fn default_output_directory(
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| Path::new(".").to_owned());
     base.join(sanitize_file_name(source_name))
+}
+
+fn audio_cd_metadata_available(catalog: &media_rip_core::MediaCatalog) -> bool {
+    catalog.source.kind != DiscKind::AudioCd
+        || catalog
+            .source_info
+            .iter()
+            .any(|field| field.label == "Tag source" && field.value != "Generic track information")
 }
 
 fn cover_art_from_file(path: &Path) -> Result<CoverArt, String> {
@@ -1625,7 +1849,7 @@ mod tests {
         settings.output.destination_mode = "none".to_owned();
 
         assert!(
-            default_output_directory("Movie", false, &settings)
+            default_output_directory("Movie", DiscKind::Dvd, false, &settings)
                 .as_os_str()
                 .is_empty()
         );
@@ -1638,9 +1862,53 @@ mod tests {
         settings.output.custom_directory = "/media/archive".to_owned();
 
         assert_eq!(
-            default_output_directory("Movie", false, &settings),
+            default_output_directory("Movie", DiscKind::Dvd, false, &settings),
             PathBuf::from("/media/archive")
         );
+    }
+
+    #[test]
+    fn media_type_output_directory_overrides_the_global_default() {
+        let mut settings = AppSettings::default();
+        settings.output.destination_mode = "custom".to_owned();
+        settings.output.custom_directory = "/media/all".to_owned();
+        settings.output.audio_cd_directory = "/media/music".to_owned();
+
+        assert_eq!(
+            default_output_directory("Album", DiscKind::AudioCd, true, &settings),
+            PathBuf::from("/media/music")
+        );
+        assert_eq!(
+            default_output_directory("Movie", DiscKind::Dvd, false, &settings),
+            PathBuf::from("/media/all")
+        );
+    }
+
+    #[test]
+    fn generic_audio_cd_track_names_do_not_count_as_metadata() {
+        use media_rip_core::{InfoField, MediaCatalog, MediaSource};
+
+        let mut catalog = MediaCatalog {
+            source: MediaSource {
+                id: "cd".to_owned(),
+                name: "Audio CD".to_owned(),
+                path: PathBuf::from("/dev/sr0"),
+                kind: DiscKind::AudioCd,
+                drive: None,
+                capacity_bytes: None,
+                encrypted: None,
+            },
+            titles: Vec::new(),
+            source_info: vec![InfoField::new("Tag source", "Generic track information")],
+            cover_art: None,
+            track_cover_art: Default::default(),
+            metadata_attributions: Vec::new(),
+            video_metadata_suggestions: Vec::new(),
+        };
+
+        assert!(!audio_cd_metadata_available(&catalog));
+        catalog.source_info[0].value = "CD-TEXT".to_owned();
+        assert!(audio_cd_metadata_available(&catalog));
     }
 
     #[test]
@@ -1682,12 +1950,26 @@ mod tests {
     }
 
     #[test]
+    fn automatic_read_is_armed_by_the_first_user_read() {
+        let mut settings = AppSettings::default();
+        settings.automation.dvd.read_automatically = true;
+        let mut drive = Drive::empty("/dev/sr0", "Test drive");
+        drive.media_present = true;
+        drive.media_kind = DiscKind::Dvd;
+        let drives = vec![drive];
+
+        assert!(automatic_read_candidate(false, &[], &drives, &settings).is_none());
+        assert!(automatic_read_candidate(true, &[], &drives, &settings).is_some());
+    }
+
+    #[test]
     fn completed_title_is_removed_from_a_resumable_selection() {
         use media_rip_core::{DiscKind, MediaCatalog, MediaSource, StreamKind, Title, Track};
 
         let title = Title {
             id: 7,
             source_title_id: "7".to_owned(),
+            disc_title_number: None,
             name: "Feature".to_owned(),
             is_main_title: true,
             duration_ms: 1_000,
@@ -1708,6 +1990,7 @@ mod tests {
             segment_map: None,
             duplicate_key: None,
             tags: Vec::new(),
+            video_metadata: None,
             output_file: "feature.mkv".to_owned(),
             selected: true,
         };
@@ -1725,6 +2008,8 @@ mod tests {
             source_info: Vec::new(),
             cover_art: None,
             track_cover_art: Default::default(),
+            metadata_attributions: Vec::new(),
+            video_metadata_suggestions: Vec::new(),
         };
 
         assert!(mark_title_completed(&mut catalog, 7));
@@ -1760,6 +2045,7 @@ mod tests {
             titles: vec![Title {
                 id: 0,
                 source_title_id: "0".to_owned(),
+                disc_title_number: None,
                 name: "Test".to_owned(),
                 is_main_title: false,
                 duration_ms: 1_000,
@@ -1771,12 +2057,15 @@ mod tests {
                 segment_map: None,
                 duplicate_key: None,
                 tags: Vec::new(),
+                video_metadata: None,
                 output_file: "test.mkv".to_owned(),
                 selected: false,
             }],
             source_info: Vec::new(),
             cover_art: None,
             track_cover_art: Default::default(),
+            metadata_attributions: Vec::new(),
+            video_metadata_suggestions: Vec::new(),
         };
 
         cycle_catalog_selection(&mut catalog);
@@ -1813,6 +2102,7 @@ mod tests {
         let title = |id| Title {
             id,
             source_title_id: (id + 1).to_string(),
+            disc_title_number: None,
             name: format!("Track {}", id + 1),
             is_main_title: false,
             duration_ms: 1_000,
@@ -1833,6 +2123,7 @@ mod tests {
             segment_map: None,
             duplicate_key: None,
             tags: Vec::new(),
+            video_metadata: None,
             output_file: format!("{}.flac", id + 1),
             selected: true,
         };
@@ -1850,6 +2141,8 @@ mod tests {
             source_info: Vec::new(),
             cover_art: None,
             track_cover_art: Default::default(),
+            metadata_attributions: Vec::new(),
+            video_metadata_suggestions: Vec::new(),
         };
 
         set_tag(
@@ -1896,6 +2189,30 @@ mod tests {
                 .map(|tag| tag.value.as_str()),
             Some("Soloist")
         );
+
+        catalog.titles[0]
+            .tags
+            .push(media_rip_core::MediaTag::new("Album", "Old name"));
+        catalog.titles[0]
+            .tags
+            .push(media_rip_core::MediaTag::new("album", "Duplicate"));
+        set_tag(
+            &mut catalog,
+            0,
+            "ALBUM",
+            "Canonical name",
+            false,
+            "{track:02} - {title}",
+            "flac",
+        );
+        let album_tags = catalog.titles[0]
+            .tags
+            .iter()
+            .filter(|tag| tag.key.eq_ignore_ascii_case("album"))
+            .collect::<Vec<_>>();
+        assert_eq!(album_tags.len(), 1);
+        assert_eq!(album_tags[0].key, "album");
+        assert_eq!(album_tags[0].value, "Canonical name");
 
         catalog.titles[0]
             .tags

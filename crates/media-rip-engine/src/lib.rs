@@ -3,6 +3,7 @@
 //! This crate intentionally has no dependency on MakeMKV or `makemkvcon`.
 
 mod engine;
+mod metadata;
 mod platform;
 mod probe;
 mod process;

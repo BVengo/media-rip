@@ -12,12 +12,13 @@ use media_rip_core::{Chapter, DiscKind, MediaEngineError};
 
 pub(crate) use audio_cd::audio_cd_catalog;
 pub(crate) use bluray::bluray_candidates;
-pub(crate) use dvd::dvd_candidates;
+pub(crate) use dvd::{dvd_candidates, dvd_text_name};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ProbeCandidate {
     pub id: u32,
     pub source_title_id: String,
+    pub disc_title_number: Option<u32>,
     pub display_name: String,
     pub input: ProbeInput,
     pub size_hint: Option<u64>,
@@ -110,6 +111,7 @@ pub(crate) fn candidates_for(
             Ok(vec![ProbeCandidate {
                 id: 0,
                 source_title_id: "0".to_owned(),
+                disc_title_number: None,
                 display_name: source_stem(path),
                 input: ProbeInput::File(path.to_owned()),
                 size_hint,

@@ -6,7 +6,7 @@ use std::{
 
 use gtk::{glib, prelude::*};
 use media_rip_core::{
-    DiscKind, MediaCatalog, Title,
+    DiscKind, MediaCatalog, Title, VideoMetadataSuggestion,
     util::{format_bytes, format_duration},
 };
 
@@ -21,6 +21,8 @@ pub(crate) enum ContentAction {
         stream_index: u32,
     },
     ToggleExpanded(u32),
+    ApplySuggestion(u32),
+    ApplyAllSuggestions,
     SetTitleChecked {
         title_id: u32,
         selected: bool,
@@ -176,10 +178,20 @@ impl ContentTree {
             select_all_row(catalog, on_action.clone(), self.updating_checks.clone());
         self.title_box.append(&selection_row);
         *self.select_all.borrow_mut() = Some(select_all);
+        if !catalog.video_metadata_suggestions.is_empty() {
+            self.title_box.append(&suggestions_row(
+                catalog.video_metadata_suggestions.len(),
+                on_action.clone(),
+            ));
+        }
         for title in &catalog.titles {
             let section = gtk::Box::new(gtk::Orientation::Vertical, 0);
             let (header, button, selected) = title_row(
                 title,
+                catalog
+                    .video_metadata_suggestions
+                    .iter()
+                    .find(|suggestion| suggestion.title_id == title.id),
                 expanded.contains(&title.id),
                 on_action.clone(),
                 self.updating_checks.clone(),
@@ -321,6 +333,7 @@ pub(crate) enum DiscUiState {
 
 fn title_row(
     title: &Title,
+    suggestion: Option<&VideoMetadataSuggestion>,
     expanded: bool,
     on_action: Rc<dyn Fn(ContentAction)>,
     updating_checks: Rc<Cell<bool>>,
@@ -411,6 +424,26 @@ fn title_row(
     detail.add_css_class("row-detail");
     labels.append(&name_line);
     labels.append(&detail);
+    if let Some(suggestion) = suggestion {
+        let suggestion_line = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let confidence = suggestion.metadata.attribution.confidence_percent;
+        let label = gtk::Label::new(Some(&format!(
+            "Suggested: {} ({confidence}% probable)",
+            suggestion.name
+        )));
+        label.set_xalign(0.0);
+        label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        label.set_hexpand(true);
+        label.add_css_class("row-detail");
+        let apply = gtk::Button::with_label("Apply");
+        apply.add_css_class("flat");
+        apply.set_tooltip_text(Some("Apply this probable episode name and tags"));
+        let callback = on_action.clone();
+        apply.connect_clicked(move |_| callback(ContentAction::ApplySuggestion(title_id)));
+        suggestion_line.append(&label);
+        suggestion_line.append(&apply);
+        labels.append(&suggestion_line);
+    }
     row.append(&labels);
 
     let click = gtk::GestureClick::new();
@@ -418,6 +451,31 @@ fn title_row(
     click.connect_released(move |_, _, _, _| callback(ContentAction::SelectTitle(title_id)));
     row.add_controller(click);
     (row, expander, selected)
+}
+
+fn suggestions_row(count: usize, on_action: Rc<dyn Fn(ContentAction)>) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    row.add_css_class("select-all-row");
+    let labels = gtk::Box::new(gtk::Orientation::Vertical, 1);
+    labels.set_hexpand(true);
+    let title = gtk::Label::new(Some(&format!("{count} probable episode matches")));
+    title.set_xalign(0.0);
+    title.add_css_class("row-title");
+    let detail = gtk::Label::new(Some(
+        "Review the suggestions below; existing names remain unchanged until you apply them.",
+    ));
+    detail.set_xalign(0.0);
+    detail.set_wrap(true);
+    detail.add_css_class("row-detail");
+    labels.append(&title);
+    labels.append(&detail);
+    let apply = gtk::Button::with_label("Apply all");
+    apply.add_css_class("suggested-action");
+    apply.set_valign(gtk::Align::Center);
+    apply.connect_clicked(move |_| on_action(ContentAction::ApplyAllSuggestions));
+    row.append(&labels);
+    row.append(&apply);
+    row
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -627,6 +685,8 @@ mod tests {
             source_info: Vec::new(),
             cover_art: None,
             track_cover_art: BTreeMap::new(),
+            metadata_attributions: Vec::new(),
+            video_metadata_suggestions: Vec::new(),
         }
     }
 
@@ -634,6 +694,7 @@ mod tests {
         media_rip_core::Title {
             id: 0,
             source_title_id: "00001".into(),
+            disc_title_number: None,
             name: "Playlist 00001".into(),
             is_main_title: false,
             duration_ms: 1_000,
@@ -658,6 +719,7 @@ mod tests {
             segment_map: None,
             duplicate_key: None,
             tags: Vec::new(),
+            video_metadata: None,
             output_file: "test.mkv".into(),
             selected: true,
         }

@@ -3,8 +3,9 @@ mod events;
 mod rip;
 
 pub use catalog::{
-    Chapter, CoverArt, DiscKind, Drive, InfoField, MediaCatalog, MediaSource, MediaTag, StreamKind,
-    Title, Track, TrackCoverArt,
+    Chapter, CoverArt, DiscKind, Drive, InfoField, MediaCatalog, MediaSource, MediaTag,
+    MetadataAttribution, StreamKind, Title, Track, TrackCoverArt, VideoMetadata,
+    VideoMetadataSuggestion,
 };
 pub use events::{EngineEvent, LogLevel, RipProgress, RipTitleResult};
 pub use rip::{OutputProfile, RipRequest, RipSelection};

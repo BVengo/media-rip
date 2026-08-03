@@ -120,7 +120,7 @@ pub(super) fn process_title(
         command.args(["-map", "1:v:0"]);
     }
     command.args(["-map_chapters", "0"]);
-    add_audio_cd_metadata(&mut command, request, title);
+    add_output_metadata(&mut command, request, title);
     add_opus_cover_art_metadata(&mut command, request, title);
     add_output_profile(
         &mut command,
@@ -434,8 +434,8 @@ fn extract_audio_cd_track(
     }
 }
 
-fn add_audio_cd_metadata(command: &mut Command, request: &RipRequest, title: &Title) {
-    if request.catalog.source.kind != DiscKind::AudioCd {
+fn add_output_metadata(command: &mut Command, request: &RipRequest, title: &Title) {
+    if title.tags.is_empty() && request.catalog.source.kind != DiscKind::AudioCd {
         return;
     }
     for (key, value) in audio_cd_metadata(request, title) {
@@ -723,6 +723,7 @@ mod tests {
             .map(|number| Title {
                 id: number - 1,
                 source_title_id: number.to_string(),
+                disc_title_number: None,
                 name: format!("Chapter {number}"),
                 is_main_title: false,
                 duration_ms: 60_000,
@@ -743,6 +744,7 @@ mod tests {
                 segment_map: None,
                 duplicate_key: None,
                 tags: Vec::new(),
+                video_metadata: None,
                 output_file: format!("{number:02}.flac"),
                 selected: true,
             })
@@ -762,6 +764,8 @@ mod tests {
                 titles,
                 cover_art: None,
                 track_cover_art: Default::default(),
+                metadata_attributions: Vec::new(),
+                video_metadata_suggestions: Vec::new(),
             },
             selections: Vec::new(),
             output_directory: PathBuf::new(),
@@ -793,6 +797,26 @@ mod tests {
                 ("musicbrainz_discid".to_owned(), "disc-id".to_owned()),
             ]
         );
+    }
+
+    #[test]
+    fn video_metadata_tags_are_written_to_the_output_container() {
+        let mut request = audio_cd_request();
+        request.catalog.source.kind = DiscKind::BluRay;
+        request.catalog.titles[0].tags = vec![
+            media_rip_core::MediaTag::new("title", "Currahee"),
+            media_rip_core::MediaTag::new("season_number", "1"),
+        ];
+        let mut command = Command::new("ffmpeg");
+
+        add_output_metadata(&mut command, &request, &request.catalog.titles[0]);
+
+        let arguments = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(arguments.contains(&"title=Currahee".to_owned()));
+        assert!(arguments.contains(&"season_number=1".to_owned()));
     }
 
     #[test]
@@ -872,6 +896,7 @@ mod tests {
                 titles: vec![Title {
                     id: 0,
                     source_title_id: "1".into(),
+                    disc_title_number: None,
                     name: "Track 01".into(),
                     is_main_title: false,
                     duration_ms: 1_000,
@@ -892,12 +917,15 @@ mod tests {
                     segment_map: None,
                     duplicate_key: None,
                     tags: Vec::new(),
+                    video_metadata: None,
                     output_file: "01.flac".into(),
                     selected: true,
                 }],
                 source_info: Vec::new(),
                 cover_art: None,
                 track_cover_art: Default::default(),
+                metadata_attributions: Vec::new(),
+                video_metadata_suggestions: Vec::new(),
             },
             selections: Vec::new(),
             output_directory: PathBuf::new(),
