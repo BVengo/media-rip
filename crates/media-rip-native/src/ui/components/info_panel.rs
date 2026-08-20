@@ -3,14 +3,28 @@ use std::{collections::BTreeSet, io::Cursor};
 
 use gtk::prelude::*;
 use media_rip_core::{
-    CoverArt, DiscKind, InfoField, MediaCatalog,
+    CoverArt, DiscKind, InfoField, MediaCatalog, VideoMetadata,
     util::{format_bytes, format_duration},
 };
 
-use crate::app::Selection;
+use crate::app::{EpisodeMetadataContext, Selection};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InfoAction {
+    ApplySuggestion(u32),
+    AssignEpisode {
+        title_id: u32,
+        episode: u32,
+    },
+    SetTitleName {
+        title_id: u32,
+        name: String,
+    },
+    SetTrackName {
+        title_id: u32,
+        stream_index: u32,
+        name: String,
+    },
     SetTag {
         title_id: u32,
         key: String,
@@ -40,9 +54,11 @@ pub(crate) struct InfoPanel {
     pub root: gtk::Box,
     stack: gtk::Stack,
     tags_page: gtk::StackPage,
+    metadata_page: gtk::StackPage,
     info_grid: gtk::Grid,
     info_artwork: gtk::Box,
     tags_content: gtk::Box,
+    metadata_content: gtk::Box,
 }
 
 impl InfoPanel {
@@ -80,6 +96,17 @@ impl InfoPanel {
             .child(&tags_content)
             .build();
 
+        let metadata_content = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        metadata_content.add_css_class("tags-content");
+        let metadata_scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .min_content_height(72)
+            .hexpand(true)
+            .vexpand(true)
+            .child(&metadata_content)
+            .build();
+
         let stack = gtk::Stack::builder()
             .transition_type(gtk::StackTransitionType::Crossfade)
             .transition_duration(120)
@@ -87,6 +114,8 @@ impl InfoPanel {
             .vexpand(true)
             .build();
         stack.add_titled(&info_scroll, Some("info"), "Info");
+        let metadata_page = stack.add_titled(&metadata_scroll, Some("metadata"), "Metadata");
+        metadata_page.set_visible(false);
         let tags_page = stack.add_titled(&tags_scroll, Some("tags"), "Tags");
         tags_page.set_visible(false);
         let switcher = gtk::StackSwitcher::builder()
@@ -111,15 +140,18 @@ impl InfoPanel {
             root,
             stack,
             tags_page,
+            metadata_page,
             info_grid,
             info_artwork,
             tags_content,
+            metadata_content,
         };
         panel.render_fields(&[
             InfoField::new("Type", "No source"),
             InfoField::new("Name", "Insert or open a disc to begin"),
         ]);
         panel.render_tags_unavailable("Tags are available for Audio CD tracks.");
+        panel.render_metadata_unavailable("Open a video disc to inspect metadata proposals.");
         panel
     }
 
@@ -131,12 +163,19 @@ impl InfoPanel {
         &self,
         catalog: Option<&MediaCatalog>,
         selection: &Selection,
+        episode_metadata: Option<&EpisodeMetadataContext>,
         on_action: Rc<dyn Fn(InfoAction)>,
     ) {
         let tags_available =
             catalog.is_some_and(|catalog| catalog.source.kind == DiscKind::AudioCd);
+        let metadata_available = catalog
+            .is_some_and(|catalog| matches!(catalog.source.kind, DiscKind::Dvd | DiscKind::BluRay));
         self.tags_page.set_visible(tags_available);
-        if !tags_available && self.stack.visible_child_name().as_deref() == Some("tags") {
+        self.metadata_page.set_visible(metadata_available);
+        if (!tags_available && self.stack.visible_child_name().as_deref() == Some("tags"))
+            || (!metadata_available
+                && self.stack.visible_child_name().as_deref() == Some("metadata"))
+        {
             self.stack.set_visible_child_name("info");
         }
         let Some(catalog) = catalog else {
@@ -145,8 +184,10 @@ impl InfoPanel {
                 InfoField::new("Name", "Insert or open a disc to begin"),
             ]);
             self.render_tags_unavailable("Open an Audio CD and select a track to edit its tags.");
+            self.render_metadata_unavailable("Open a video disc to inspect metadata proposals.");
             return;
         };
+        self.render_metadata(catalog, selection, episode_metadata, on_action.clone());
 
         match selection {
             Selection::Source => {
@@ -162,7 +203,6 @@ impl InfoPanel {
                 };
                 let mut fields = vec![
                     InfoField::new("Type", "Media item"),
-                    InfoField::new("Name", &title.name),
                     InfoField::new("Source item ID", &title.source_title_id),
                     InfoField::new("Duration", format_duration(title.duration_ms)),
                     InfoField::new("Chapters", title.chapters.len().to_string()),
@@ -176,34 +216,18 @@ impl InfoPanel {
                         "Main title (identified by disc metadata)",
                     ));
                 }
-                if let Some(metadata) = &title.video_metadata {
+                if let Some(original) = catalog
+                    .titles
+                    .iter()
+                    .take_while(|item| item.id != title.id)
+                    .find(|item| {
+                        item.duplicate_key.is_some() && item.duplicate_key == title.duplicate_key
+                    })
+                {
                     fields.push(InfoField::new(
-                        "Metadata source",
-                        &metadata.attribution.provider,
+                        "Exact duplicate of",
+                        format!("Playlist {}", original.source_title_id),
                     ));
-                    fields.push(InfoField::new(
-                        "Match confidence",
-                        format!(
-                            "{}% — {}",
-                            metadata.attribution.confidence_percent,
-                            metadata.attribution.match_method
-                        ),
-                    ));
-                    if let Some(content_type) = &metadata.content_type {
-                        fields.push(InfoField::new("Content role", content_type));
-                    }
-                    if let Some(year) = metadata.year {
-                        fields.push(InfoField::new("Year", year.to_string()));
-                    }
-                    if let Some(season) = metadata.season {
-                        fields.push(InfoField::new("Season", season.to_string()));
-                    }
-                    if let Some(episode) = metadata.episode {
-                        fields.push(InfoField::new("Episode", episode.to_string()));
-                    }
-                    if let Some(tmdb_id) = metadata.tmdb_id {
-                        fields.push(InfoField::new("TMDB ID", tmdb_id.to_string()));
-                    }
                 }
                 if let Some(size) = title.size_bytes {
                     fields.push(InfoField::new(
@@ -233,6 +257,12 @@ impl InfoPanel {
                     title.selected_track_count().to_string(),
                 ));
                 self.render_fields(&fields);
+                self.append_title_name_editor(
+                    fields.len(),
+                    title.id,
+                    &title.name,
+                    on_action.clone(),
+                );
                 if catalog.source.kind == media_rip_core::DiscKind::AudioCd {
                     let tag_keys = tag_key_suggestions(catalog);
                     self.append_track_artwork(
@@ -241,7 +271,7 @@ impl InfoPanel {
                         on_action.clone(),
                     );
                     self.append_output_file_editor(
-                        fields.len(),
+                        fields.len() + 1,
                         title.id,
                         &title.output_file,
                         on_action.clone(),
@@ -256,7 +286,7 @@ impl InfoPanel {
                 } else {
                     self.append_readonly_artwork(catalog.cover_art.as_ref(), "Disc artwork");
                     self.append_output_file_editor(
-                        fields.len(),
+                        fields.len() + 1,
                         title.id,
                         &title.output_file,
                         on_action,
@@ -294,13 +324,17 @@ impl InfoPanel {
                 if let Some(language) = &track.language {
                     fields.push(InfoField::new("Language", language));
                 }
-                if let Some(name) = &track.name {
-                    fields.push(InfoField::new("Name", name));
-                }
                 if !track.properties.is_empty() {
                     fields.push(InfoField::new("Properties", track.properties.join(", ")));
                 }
                 self.render_fields(&fields);
+                self.append_track_name_editor(
+                    fields.len(),
+                    *title_id,
+                    *stream_index,
+                    track.name.as_deref().unwrap_or_default(),
+                    on_action,
+                );
                 self.render_tags_unavailable("Select the Audio CD track row to edit its tags.");
             }
         }
@@ -394,6 +428,173 @@ impl InfoPanel {
         self.tags_content.append(&label);
     }
 
+    fn render_metadata(
+        &self,
+        catalog: &MediaCatalog,
+        selection: &Selection,
+        episode_metadata: Option<&EpisodeMetadataContext>,
+        on_action: Rc<dyn Fn(InfoAction)>,
+    ) {
+        clear(&self.metadata_content);
+        let title_id = match selection {
+            Selection::Title(title_id) | Selection::Track { title_id, .. } => Some(*title_id),
+            Selection::Source => None,
+        };
+        let Some(title_id) = title_id else {
+            let fields = if let Some(suggestion) = catalog.video_metadata_suggestions.first() {
+                vec![
+                    InfoField::new(
+                        "Pending proposals",
+                        catalog.video_metadata_suggestions.len().to_string(),
+                    ),
+                    InfoField::new("Shared evidence", bullet_list(&suggestion.evidence)),
+                    InfoField::new("Shared assumptions", bullet_list(&suggestion.assumptions)),
+                ]
+            } else {
+                vec![InfoField::new(
+                    "Metadata",
+                    "Select a video title to inspect its metadata.",
+                )]
+            };
+            self.metadata_content.append(&fields_grid(&fields));
+            return;
+        };
+        let Some(title) = catalog.titles.iter().find(|title| title.id == title_id) else {
+            self.render_metadata_unavailable("The selected video title is no longer available.");
+            return;
+        };
+        if let Some(suggestion) = catalog
+            .video_metadata_suggestions
+            .iter()
+            .find(|suggestion| suggestion.title_id == title.id)
+        {
+            let mut fields = vec![
+                InfoField::new("Status", "Pending — not applied"),
+                InfoField::new("Current name", &title.name),
+                InfoField::new("Proposed name", &suggestion.name),
+                InfoField::new(
+                    "Confidence",
+                    format!("{}%", suggestion.metadata.attribution.confidence_percent),
+                ),
+                InfoField::new("Method", &suggestion.metadata.attribution.match_method),
+            ];
+            append_video_metadata_fields(&mut fields, &suggestion.metadata);
+            if !suggestion.evidence.is_empty() {
+                fields.push(InfoField::new(
+                    "Why proposed",
+                    bullet_list(&suggestion.evidence),
+                ));
+            }
+            if !suggestion.assumptions.is_empty() {
+                fields.push(InfoField::new(
+                    "Assumptions",
+                    bullet_list(&suggestion.assumptions),
+                ));
+            }
+            self.metadata_content.append(&fields_grid(&fields));
+            let apply = gtk::Button::with_label("Apply metadata to this title");
+            apply.add_css_class("suggested-action");
+            apply.set_halign(gtk::Align::Start);
+            apply.set_tooltip_text(Some(
+                "Apply this proposed episode name, output tags, and structured metadata",
+            ));
+            apply.connect_clicked(move |_| on_action(InfoAction::ApplySuggestion(title_id)));
+            self.metadata_content.append(&apply);
+        } else if let Some(metadata) = &title.video_metadata {
+            let mut fields = vec![
+                InfoField::new("Status", "Applied"),
+                InfoField::new("Name", &title.name),
+                InfoField::new("Metadata source", &metadata.attribution.provider),
+                InfoField::new(
+                    "Confidence",
+                    format!("{}%", metadata.attribution.confidence_percent),
+                ),
+                InfoField::new("Method", &metadata.attribution.match_method),
+            ];
+            append_video_metadata_fields(&mut fields, metadata);
+            self.metadata_content.append(&fields_grid(&fields));
+            if let Some(context) = episode_metadata {
+                self.append_episode_assignment(catalog, title_id, context, on_action);
+            }
+        } else if let Some(context) = episode_metadata {
+            let fields = [InfoField::new(
+                "Status",
+                "No automatic proposal — choose an episode below to assign the matched season metadata manually.",
+            )];
+            self.metadata_content.append(&fields_grid(&fields));
+            self.append_episode_assignment(catalog, title_id, context, on_action);
+        } else {
+            self.render_metadata_unavailable(
+                "No exact metadata or probable episode proposal is available for this title.",
+            );
+        }
+    }
+
+    fn append_episode_assignment(
+        &self,
+        catalog: &MediaCatalog,
+        title_id: u32,
+        context: &EpisodeMetadataContext,
+        on_action: Rc<dyn Fn(InfoAction)>,
+    ) {
+        if context.choices.is_empty() {
+            return;
+        }
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        row.add_css_class("episode-assignment-row");
+        let names = context
+            .choices
+            .iter()
+            .map(|choice| choice.name.as_str())
+            .collect::<Vec<_>>();
+        let episodes = context
+            .choices
+            .iter()
+            .map(|choice| choice.episode)
+            .collect::<Vec<_>>();
+        let chooser = gtk::DropDown::from_strings(&names);
+        chooser.set_hexpand(true);
+        chooser.set_selected(default_episode_choice(catalog, context) as u32);
+        chooser.set_tooltip_text(Some(
+            "Choose an episode from the matched season for this existing disc title",
+        ));
+        let apply = gtk::Button::with_label(
+            if catalog
+                .titles
+                .iter()
+                .find(|title| title.id == title_id)
+                .is_some_and(|title| title.video_metadata.is_some())
+            {
+                "Change episode"
+            } else {
+                "Assign episode"
+            },
+        );
+        apply.add_css_class("suggested-action");
+        let selected = chooser.clone();
+        apply.connect_clicked(move |_| {
+            if let Some(episode) = episodes.get(selected.selected() as usize) {
+                on_action(InfoAction::AssignEpisode {
+                    title_id,
+                    episode: *episode,
+                });
+            }
+        });
+        row.append(&chooser);
+        row.append(&apply);
+        self.metadata_content.append(&row);
+    }
+
+    fn render_metadata_unavailable(&self, message: &str) {
+        clear(&self.metadata_content);
+        let label = gtk::Label::new(Some(message));
+        label.set_xalign(0.0);
+        label.set_yalign(0.0);
+        label.set_wrap(true);
+        label.add_css_class("row-detail");
+        self.metadata_content.append(&label);
+    }
+
     fn append_track_artwork(
         &self,
         cover_art: Option<&CoverArt>,
@@ -448,6 +649,8 @@ impl InfoPanel {
         let entry = gtk::Entry::builder()
             .text(output_file)
             .hexpand(true)
+            .width_chars(32)
+            .tooltip_text(output_file)
             .build();
         entry.connect_changed(move |entry| {
             on_action(InfoAction::SetOutputFile {
@@ -458,6 +661,157 @@ impl InfoPanel {
         self.info_grid.attach(&label, 0, row as i32, 1, 1);
         self.info_grid.attach(&entry, 1, row as i32, 1, 1);
     }
+
+    fn append_title_name_editor(
+        &self,
+        row: usize,
+        title_id: u32,
+        name: &str,
+        on_action: Rc<dyn Fn(InfoAction)>,
+    ) {
+        let label = gtk::Label::new(Some("Name"));
+        label.set_xalign(0.0);
+        label.add_css_class("info-label");
+        let entry = wide_entry(name);
+        entry.connect_changed(move |entry| {
+            on_action(InfoAction::SetTitleName {
+                title_id,
+                name: entry.text().to_string(),
+            });
+        });
+        self.info_grid.attach(&label, 0, row as i32, 1, 1);
+        self.info_grid.attach(&entry, 1, row as i32, 1, 1);
+    }
+
+    fn append_track_name_editor(
+        &self,
+        row: usize,
+        title_id: u32,
+        stream_index: u32,
+        name: &str,
+        on_action: Rc<dyn Fn(InfoAction)>,
+    ) {
+        let label = gtk::Label::new(Some("Name"));
+        label.set_xalign(0.0);
+        label.add_css_class("info-label");
+        let entry = wide_entry(name);
+        entry.set_placeholder_text(Some("Unnamed track"));
+        entry.connect_changed(move |entry| {
+            on_action(InfoAction::SetTrackName {
+                title_id,
+                stream_index,
+                name: entry.text().to_string(),
+            });
+        });
+        self.info_grid.attach(&label, 0, row as i32, 1, 1);
+        self.info_grid.attach(&entry, 1, row as i32, 1, 1);
+    }
+}
+
+fn wide_entry(value: &str) -> gtk::Entry {
+    gtk::Entry::builder()
+        .text(value)
+        .hexpand(true)
+        .width_chars(32)
+        .tooltip_text(value)
+        .build()
+}
+
+fn default_episode_choice(catalog: &MediaCatalog, context: &EpisodeMetadataContext) -> usize {
+    let used = catalog
+        .titles
+        .iter()
+        .filter_map(|title| title.video_metadata.as_ref())
+        .filter(|metadata| metadata.season == context.metadata.season)
+        .filter_map(|metadata| metadata.episode)
+        .chain(
+            catalog
+                .video_metadata_suggestions
+                .iter()
+                .filter_map(|suggestion| suggestion.metadata.episode),
+        )
+        .collect::<BTreeSet<_>>();
+    let missing_inside_range =
+        used.iter()
+            .min()
+            .zip(used.iter().max())
+            .and_then(|(first, last)| {
+                context.choices.iter().position(|choice| {
+                    choice.episode >= *first
+                        && choice.episode <= *last
+                        && !used.contains(&choice.episode)
+                })
+            });
+    let after_last = used.iter().max().and_then(|last| {
+        context
+            .choices
+            .iter()
+            .position(|choice| choice.episode > *last && !used.contains(&choice.episode))
+    });
+    missing_inside_range
+        .or(after_last)
+        .or_else(|| {
+            context
+                .choices
+                .iter()
+                .position(|choice| !used.contains(&choice.episode))
+        })
+        .unwrap_or_default()
+}
+
+fn append_video_metadata_fields(fields: &mut Vec<InfoField>, metadata: &VideoMetadata) {
+    if let Some(content_type) = &metadata.content_type {
+        fields.push(InfoField::new("Content role", content_type));
+    }
+    if let Some(year) = metadata.year {
+        fields.push(InfoField::new("Year", year.to_string()));
+    }
+    if let Some(season) = metadata.season {
+        fields.push(InfoField::new("Season", season.to_string()));
+    }
+    if let Some(episode) = metadata.episode {
+        fields.push(InfoField::new("Episode", episode.to_string()));
+    }
+    if let Some(tmdb_id) = metadata.tmdb_id {
+        fields.push(InfoField::new("TMDB ID", tmdb_id.to_string()));
+    }
+    if let Some(tvdb_id) = metadata.tvdb_id {
+        fields.push(InfoField::new("TVDB ID", tvdb_id.to_string()));
+    }
+}
+
+fn bullet_list(items: &[String]) -> String {
+    if items.is_empty() {
+        "Not recorded".to_owned()
+    } else {
+        format!("• {}", items.join("\n• "))
+    }
+}
+
+fn fields_grid(fields: &[InfoField]) -> gtk::Grid {
+    let grid = gtk::Grid::builder()
+        .column_spacing(14)
+        .row_spacing(6)
+        .valign(gtk::Align::Start)
+        .hexpand(true)
+        .build();
+    grid.add_css_class("info-grid");
+    for (row, field) in fields.iter().enumerate() {
+        let label = gtk::Label::new(Some(&field.label));
+        label.set_xalign(0.0);
+        label.set_yalign(0.0);
+        label.add_css_class("info-label");
+        let value = gtk::Label::new(Some(&field.value));
+        value.set_xalign(0.0);
+        value.set_yalign(0.0);
+        value.set_wrap(true);
+        value.set_selectable(true);
+        value.set_hexpand(true);
+        value.add_css_class("info-value");
+        grid.attach(&label, 0, row as i32, 1, 1);
+        grid.attach(&value, 1, row as i32, 1, 1);
+    }
+    grid
 }
 
 fn cover_art_editor(cover_art: Option<&CoverArt>, on_action: Rc<dyn Fn(InfoAction)>) -> gtk::Box {

@@ -12,11 +12,28 @@ use thiserror::Error;
 use crate::{Drive, EngineEvent, RipRequest};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviousDvdMatch {
+    pub title: String,
+    pub metadata_url: Option<String>,
+    pub season: Option<u32>,
+    pub next_episode: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanOptions {
     pub auto_tag_audio: bool,
     pub auto_tag_video: bool,
     pub allow_online_access: bool,
+    pub thediscdb_enabled: bool,
+    pub tvmaze_enabled: bool,
     pub tmdb_access_token: Option<String>,
+    pub tvdb_api_key: Option<String>,
+    pub tvdb_subscriber_pin: Option<String>,
+    /// Optional public TVMaze or TheTVDB page selected by the user to bypass
+    /// ambiguous title-based video metadata searches.
+    pub video_metadata_url: Option<String>,
+    /// Used only after authored, fingerprint and provider matching has failed.
+    pub previous_dvd_match: Option<PreviousDvdMatch>,
 }
 
 impl Default for ScanOptions {
@@ -25,7 +42,13 @@ impl Default for ScanOptions {
             auto_tag_audio: true,
             auto_tag_video: true,
             allow_online_access: true,
+            thediscdb_enabled: true,
+            tvmaze_enabled: true,
             tmdb_access_token: None,
+            tvdb_api_key: None,
+            tvdb_subscriber_pin: None,
+            video_metadata_url: None,
+            previous_dvd_match: None,
         }
     }
 }

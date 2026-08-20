@@ -16,7 +16,7 @@ use media_rip_core::{
 use serde::Deserialize;
 use sha1::{Digest, Sha1};
 
-use crate::process::ProcessSupervisor;
+use crate::{diagnostics, process::ProcessSupervisor};
 
 const CD_SECTORS_PER_SECOND: u64 = 75;
 const CD_BYTES_PER_SECTOR: u64 = 2_352;
@@ -75,6 +75,15 @@ pub(crate) fn audio_cd_catalog(
             &output,
         ));
     }
+    diagnostics::text(
+        "cdparanoia",
+        &format!("complete TOC query for {}", device.display()),
+        &format!(
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    );
     let toc_text = format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
@@ -207,7 +216,13 @@ fn read_cd_text(
     if !output.status.success() {
         return Ok(CdText::default());
     }
-    Ok(parse_cd_text(&String::from_utf8_lossy(&output.stdout)))
+    let output = String::from_utf8_lossy(&output.stdout);
+    diagnostics::text(
+        "cd-info",
+        &format!("complete CD-TEXT response for {}", device.display()),
+        &output,
+    );
+    Ok(parse_cd_text(&output))
 }
 
 fn run_cancellable(
@@ -481,7 +496,8 @@ fn musicbrainz_lookup(
 }
 
 fn musicbrainz_request<T: for<'de> Deserialize<'de>>(request: ureq::Request) -> Result<T, String> {
-    request
+    let operation = request.url().to_owned();
+    let value = request
         .set(
             "User-Agent",
             concat!(
@@ -494,8 +510,9 @@ fn musicbrainz_request<T: for<'de> Deserialize<'de>>(request: ureq::Request) -> 
         .timeout(Duration::from_secs(8))
         .call()
         .map_err(|error| error.to_string())?
-        .into_json()
-        .map_err(|error| error.to_string())
+        .into_json::<serde_json::Value>()
+        .map_err(|error| error.to_string())?;
+    diagnostics::from_value("MusicBrainz", &operation, "network", value)
 }
 
 fn musicbrainz_release_fallback(

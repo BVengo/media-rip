@@ -15,9 +15,10 @@ It is not a wrapper around MakeMKV. The project never invokes, links to, or requ
 - Linux optical-drive discovery with mounted-disc labels and device information.
 - DVD title discovery from `VIDEO_TS.IFO`.
 - Blu-ray playlist discovery with disc-defined main-title marking and authored-stream filtering.
-- DVD/Blu-ray authored-metadata reading plus enabled-by-default exact TheDiscDB fingerprint
-  matching for movies, episodes, and extras. Optional TMDB enrichment adds canonical titles,
-  years, poster artwork, and output tags when the user supplies a Read Access Token.
+- DVD/Blu-ray authored-metadata reading plus independently configurable exact TheDiscDB fingerprint
+  matching for movies, episodes, and extras. TVMaze plus optional TMDB and TVDB enrichment adds canonical
+  identities, episode ordering, poster artwork, and output tags. When both are configured they are
+  queried concurrently and agreement is retained as stronger identity evidence.
 - Audio CD track discovery, enabled-by-default exact MusicBrainz matching with a validated
   CD-TEXT release-search fallback, editable output tags,
   Cover Art Archive artwork embedding, configurable matched-track names (default
@@ -71,19 +72,59 @@ limits lookups to one request per second, and does not poll in the background. D
 commercial deployments remain responsible for complying with the
 [MusicBrainz API terms and rate limits](https://musicbrainz.org/doc/MusicBrainz_API).
 
-Video-disc matching sends only a fingerprint derived from sorted disc-file sizes to TheDiscDB;
+When enabled, video-disc matching sends only a fingerprint derived from sorted disc-file sizes to TheDiscDB;
 no audio or video is uploaded. Exact matches are checked again against each scanned title's
 duration and size before names are applied. Successful responses and artwork are cached under the
-platform cache directory. TheDiscDB needs no key. TMDB enrichment is optional: create a v4 API
-Read Access Token, enter it under **Settings → Integrations → Video metadata**, and review TMDB's
-terms before enabling it. Ambiguous matches retain their authored or generic names.
+platform cache directory. TheDiscDB and TVMaze have independent settings and need no keys. Provider enrichment is optional: enter a TMDB v4
+API Read Access Token, a TVDB v4 project API key, or both under **Settings → Integrations → Video
+metadata**. A TVDB subscriber PIN is needed only for user-supported project keys. When enabled, the
+credential-free TVMaze API is queried for TV series alongside configured providers. Season-labelled
+TV discs use the same conservative probable-title review gate for every provider. Provider requests
+run concurrently; conflicting title-only results are not applied automatically. Review the
+[TMDB API terms](https://www.themoviedb.org/api-terms-of-use),
+[TVDB API licensing](https://thetvdb.com/api-information), and
+[TVMaze API licensing](https://www.tvmaze.com/api) before enabling online metadata.
+
+If an authored disc label is not a usable title and TheDiscDB has no exact record, open the disc,
+paste its public TVMaze show URL or TheTVDB series/movie URL into **Metadata link**, and choose
+**Identify**. MediaRip detects the provider from that single URL and reads the source again using
+the selected identity instead of guessing from the label. TheTVDB links use the configured TVDB
+API key; TVMaze links need no credentials.
+
+After a DVD with applied metadata is successfully saved, MediaRip remembers that identity and the
+next episode number. With **Use previous DVD match** enabled, a later DVD is retried against that
+identity only when authored metadata, TheDiscDB, and the normal provider searches find nothing.
+Manual metadata links and first-episode adjustments are included in the remembered state. Disable
+the setting under **Settings → Integrations → Video metadata** to keep each disc independent.
 
 This product uses the TMDB API but is not endorsed or certified by TMDB.
 
+[Metadata provided by TheTVDB](https://thetvdb.com/). Please consider adding missing information or
+subscribing. TVDB API access and artwork use remain subject to TVDB's licensing terms.
+
+[TV metadata provided by TVMaze](https://www.tvmaze.com/). TVMaze data is available under CC BY-SA.
+
 When a TV disc has no exact TheDiscDB record, MediaRip can use an authored season/disc label, DVD
-play-all structure, and TMDB episode order to show lower-confidence episode suggestions. They are
-never applied automatically: review each suggestion in the content list and use **Apply** or
-**Apply all** explicitly.
+play-all structure, and configured-provider episode order to show lower-confidence episode
+suggestions. TVDB's DVD order is preferred when available; TMDB and TVMaze can fill missing runtimes only for
+episodes whose names agree. Suggestions are runtime-aligned when the resulting per-episode data can
+distinguish a unique season window. The first-episode
+field can remap an ambiguous proposal to the correct consecutive range during review, and that
+correction is remembered for the exact disc fingerprint. Suggestions are never applied automatically: review each suggestion in the
+content list and use **Apply** or **Apply all** explicitly.
+
+## Completion notifications
+
+MediaRip sends a desktop system notification after a rip finishes successfully without raising the
+application window. Under **Settings → Drives & I/O → Completion**, it can also independently play
+the desktop's standard alert sound and publish a notification to an ntfy topic.
+For ntfy, enter the server URL and the same topic subscribed to by the phone app. A self-hosted
+server on the local network can use a URL such as `http://192.168.1.20:8080`; the hosted service is
+`https://ntfy.sh`. Protected topics can use an optional ntfy access token. Choose an unguessable
+topic name when using a public server.
+
+Notification delivery runs in the background and never changes a successful rip into a failed one.
+A delivery problem is instead written as a warning in the activity log.
 
 Useful project commands:
 
@@ -93,6 +134,44 @@ make test
 make run
 make release
 ```
+
+## Debug metadata logs
+
+Debug builds write detailed diagnostics to standard error by default. Each scan includes the complete
+JSON returned by ffprobe, TheDiscDB, MusicBrainz, TMDB, TVDB, and TVMaze; raw optical-drive, Audio CD
+TOC, and CD-TEXT discovery output; every authored probe candidate; and a final normalized snapshot of
+the disc, titles, chapters, tracks, tags, provider matches, and suggestions. Raw JSON is logged before
+MediaRip deserializes it, so fields the application does not currently use remain visible. Cached API
+responses are identified as `cache` or `stale-cache` in the log.
+
+Capture a debug run with:
+
+```sh
+MEDIA_RIP_LOG=debug cargo run -p media-rip 2>media-rip-debug.log
+```
+
+For manual TV-episode alignment work, set `MEDIA_RIP_EPISODE_REPORT_DIR` to write spreadsheet-ready
+CSV files after a show and season episode list have been resolved:
+
+```sh
+MEDIA_RIP_LOG=debug MEDIA_RIP_EPISODE_REPORT_DIR=logs cargo run -p media-rip
+```
+
+`make run LOG=1` enables both the debug log and the TV export feature automatically. Files are written
+only when a TV series and its episode list have been selected; movie and unresolved-video scans stay
+in the normal debug log. Each qualifying TV scan writes the original API responses to `raw-api.json`
+before typed deserialization, plus a `raw-fields.csv` view which represents every JSON leaf by its
+JSON Pointer. These are the canonical diagnostics for fields MediaRip does not currently understand;
+the remaining normalized JSON and CSV files are derived views. The derived files cover disc titles,
+selected episodes, per-provider episodes, and every title-by-episode pairing. The alignment file
+contains rejected titles, candidate-filter reasons, runtime deltas, percentage error, sequence
+offset, and the current match. The provider file highlights episodes absent from the reconciled
+selected list or differing in name or runtime.
+
+`MEDIA_RIP_LOG=info` disables the payload dumps, and a release build defaults to that quieter level.
+Debug logs can contain local paths, drive serial numbers, disc labels, and metadata search terms. API
+keys, subscriber PINs, bearer tokens, and binary artwork bytes are not logged; artwork MIME type and
+byte length are included instead.
 
 ## Disc support and encryption
 

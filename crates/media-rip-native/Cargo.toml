@@ -13,6 +13,8 @@ media-rip-core = { path = "../media-rip-core" }
 media-rip-engine = { path = "../media-rip-engine" }
 serde.workspace = true
 serde_json.workspace = true
+log.workspace = true
+ureq.workspace = true
 
 [[bin]]
 name = "media-rip"

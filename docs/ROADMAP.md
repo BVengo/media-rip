@@ -88,7 +88,7 @@ duplicate work.
 - [x] Add exact MusicBrainz Audio CD matching, a validated CD-TEXT release-search fallback,
   editable tags, and an offline CD-TEXT fallback.
 - [x] Add authored DVD/Blu-ray metadata, exact TheDiscDB disc-layout matching, cached optional
-  TMDB enrichment, conservative title validation, and visible match provenance.
+  parallel TVMaze/TMDB/TVDB enrichment, conservative title validation, and visible match provenance.
 - [ ] Add optional Audio CD checksum verification.
 
 ## Platforms and distribution

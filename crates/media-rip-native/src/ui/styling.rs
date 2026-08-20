@@ -86,6 +86,12 @@ window scrollbar.horizontal slider {
   border-bottom: 1px solid alpha(@borders, 0.55);
 }
 
+.title-expander {
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+}
+
 .select-all-row {
   min-height: 40px;
   padding: 4px 11px;
@@ -133,6 +139,17 @@ window scrollbar.horizontal slider {
   font-weight: 700;
 }
 
+.duplicate-title-badge {
+  min-height: 18px;
+  padding: 1px 8px;
+  border: 1px solid alpha(@warning_color, 0.55);
+  border-radius: 10px;
+  background-color: alpha(@warning_color, 0.14);
+  color: @warning_color;
+  font-size: 0.76em;
+  font-weight: 700;
+}
+
 .row-detail {
   color: alpha(@theme_text_color, 0.72);
   font-size: 0.92em;
@@ -152,6 +169,10 @@ window scrollbar.horizontal slider {
 
 .tags-content {
   padding: 9px;
+}
+
+.episode-assignment-row {
+  padding-top: 8px;
 }
 
 .tags-warning {

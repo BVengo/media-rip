@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::MediaCatalog;
+use super::{MediaCatalog, VideoEpisodeChoice};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LogLevel {
@@ -54,6 +54,14 @@ pub enum EngineEvent {
     ScanFinished(Box<MediaCatalog>),
     ScanFailed(String),
     ScanCancelled,
+    EpisodeSeasonRefreshed {
+        season: u32,
+        choices: Vec<VideoEpisodeChoice>,
+    },
+    EpisodeSeasonRefreshFailed {
+        season: u32,
+        error: String,
+    },
     RipStarted {
         title_count: usize,
     },

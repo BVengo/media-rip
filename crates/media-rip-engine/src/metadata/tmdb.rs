@@ -3,9 +3,11 @@ use std::{io::Read, time::Duration};
 use media_rip_core::{CoverArt, ports::CancellationToken};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use super::cache::MetadataCache;
+use super::{cache::MetadataCache, clear_title_review_winner, title_review_score};
+use crate::diagnostics;
 
 const API_ROOT: &str = "https://api.themoviedb.org/3";
+const CACHE_NAMESPACE: &str = "tmdb-raw-v1";
 const IMAGE_ROOT: &str = "https://image.tmdb.org/t/p/w500";
 const MAX_ARTWORK_BYTES: u64 = 10 * 1024 * 1024;
 
@@ -118,32 +120,58 @@ impl<'a> TmdbClient<'a> {
         self.details(result.id, media_type).map(Some)
     }
 
-    pub(super) fn search_tv_season_exact(
+    pub(super) fn search_tv_season_review(
         &self,
         query: &str,
         season: u32,
-    ) -> Result<Option<(TmdbMatch, Vec<TmdbEpisode>)>, String> {
+    ) -> Result<Option<(TmdbMatch, Vec<TmdbEpisode>, bool)>, String> {
+        let query_year = year_in(query);
         let candidates = self
-            .exact_search_results(query)?
+            .search_results(query)?
             .into_iter()
             .filter(|result| result.media_type == "tv")
+            .filter(|result| query_year.is_none_or(|year| result.year() == Some(year)))
+            .filter_map(|result| {
+                let score = result.title_review_score(&without_year(query))?;
+                Some((score, result))
+            })
             .collect::<Vec<_>>();
         let mut matches = Vec::new();
-        for candidate in candidates {
+        for (score, candidate) in candidates {
             if let Ok(episodes) = self.season(candidate.id, season)
                 && !episodes.is_empty()
             {
-                matches.push((candidate, episodes));
+                matches.push((score, candidate, episodes));
             }
         }
-        if matches.len() != 1 {
+        matches.sort_by_key(|(score, _, _)| std::cmp::Reverse(*score));
+        let scores = matches
+            .iter()
+            .map(|(score, _, _)| *score)
+            .collect::<Vec<_>>();
+        if !clear_title_review_winner(&scores) {
             return Ok(None);
         }
-        let (result, episodes) = matches.remove(0);
-        Ok(Some((self.details(result.id, MediaType::Tv)?, episodes)))
+        let (_, result, episodes) = matches.remove(0);
+        Ok(Some((
+            self.details(result.id, MediaType::Tv)?,
+            episodes,
+            scores[0] == 100,
+        )))
     }
 
     fn exact_search_results(&self, query: &str) -> Result<Vec<SearchResult>, String> {
+        let results = self.search_results(query)?;
+        let query_year = year_in(query);
+        let query_name = normalize_title(&without_year(query));
+        Ok(results
+            .into_iter()
+            .filter(|result| result.matches_normalized_title(&query_name))
+            .filter(|result| query_year.is_none_or(|year| result.year() == Some(year)))
+            .collect())
+    }
+
+    fn search_results(&self, query: &str) -> Result<Vec<SearchResult>, String> {
         let response: SearchResponse = self.get_json(
             "/search/multi",
             &[
@@ -152,24 +180,10 @@ impl<'a> TmdbClient<'a> {
                 ("language", "en-US"),
             ],
         )?;
-        let query_year = year_in(query);
-        let query_name = normalize_title(&without_year(query));
         Ok(response
             .results
             .into_iter()
             .filter(|result| matches!(result.media_type.as_str(), "movie" | "tv"))
-            .filter(|result| {
-                [
-                    result.title.as_deref(),
-                    result.name.as_deref(),
-                    result.original_title.as_deref(),
-                    result.original_name.as_deref(),
-                ]
-                .into_iter()
-                .flatten()
-                .any(|title| normalize_title(title) == query_name)
-            })
-            .filter(|result| query_year.is_none_or(|year| result.year() == Some(year)))
             .collect())
     }
 
@@ -215,7 +229,7 @@ impl<'a> TmdbClient<'a> {
         Ok(CoverArt::new(mime, data))
     }
 
-    fn get_json<T: DeserializeOwned + Serialize>(
+    fn get_json<T: DeserializeOwned>(
         &self,
         path: &str,
         query: &[(&str, &str)],
@@ -224,8 +238,11 @@ impl<'a> TmdbClient<'a> {
             "{path}?{}",
             serde_json::to_string(query).unwrap_or_default()
         );
-        if let Some(cached) = self.cache.read("tmdb", &cache_key) {
-            return Ok(cached);
+        if let Some(cached) = self
+            .cache
+            .read::<serde_json::Value>(CACHE_NAMESPACE, &cache_key)
+        {
+            return diagnostics::from_value("TMDB", &cache_key, "cache", cached);
         }
         if self.cancellation.is_cancelled() {
             return Err("TMDB lookup cancelled".to_owned());
@@ -241,24 +258,53 @@ impl<'a> TmdbClient<'a> {
         for (key, value) in query {
             request = request.query(key, value);
         }
-        let network_response = request
-            .call()
-            .map_err(|error| error.to_string())
-            .and_then(|response| response.into_json::<T>().map_err(|error| error.to_string()));
+        let network_response =
+            request
+                .call()
+                .map_err(|error| error.to_string())
+                .and_then(|response| {
+                    response
+                        .into_json::<serde_json::Value>()
+                        .map_err(|error| error.to_string())
+                });
         match network_response {
             Ok(value) => {
-                self.cache.write("tmdb", &cache_key, &value);
-                Ok(value)
+                self.cache.write(CACHE_NAMESPACE, &cache_key, &value);
+                diagnostics::from_value("TMDB", &cache_key, "network", value)
             }
-            Err(error) => self
-                .cache
-                .read_stale("tmdb", &cache_key)
-                .ok_or_else(|| error.to_string()),
+            Err(error) => {
+                let stale = self
+                    .cache
+                    .read_stale::<serde_json::Value>(CACHE_NAMESPACE, &cache_key)
+                    .ok_or_else(|| error.to_string())?;
+                diagnostics::from_value("TMDB", &cache_key, "stale-cache", stale)
+            }
         }
     }
 }
 
 impl SearchResult {
+    fn titles(&self) -> impl Iterator<Item = &str> {
+        [
+            self.title.as_deref(),
+            self.name.as_deref(),
+            self.original_title.as_deref(),
+            self.original_name.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+    }
+
+    fn matches_normalized_title(&self, query: &str) -> bool {
+        self.titles().any(|title| normalize_title(title) == query)
+    }
+
+    fn title_review_score(&self, query: &str) -> Option<u8> {
+        self.titles()
+            .filter_map(|title| title_review_score(query, title))
+            .max()
+    }
+
     fn year(&self) -> Option<u32> {
         self.release_date
             .as_deref()

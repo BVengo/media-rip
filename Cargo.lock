@@ -670,10 +670,12 @@ version = "0.1.0"
 dependencies = [
  "gdk-pixbuf",
  "gtk4",
+ "log",
  "media-rip-core",
  "media-rip-engine",
  "serde",
  "serde_json",
+ "ureq",
 ]
 
 [[package]]
@@ -690,6 +692,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "libc",
+ "log",
  "md-5",
  "media-rip-core",
  "quick-xml",

@@ -13,6 +13,7 @@ use media_rip_core::{
 use serde::Deserialize;
 
 use crate::{
+    diagnostics,
     process::ProcessSupervisor,
     source::{ProbeCandidate, ProbeInput},
 };
@@ -105,6 +106,11 @@ pub(crate) fn probe_title(
     candidate: &ProbeCandidate,
     cancellation: &CancellationToken,
 ) -> Result<Title, MediaEngineError> {
+    diagnostics::text(
+        "MediaRip",
+        "probe candidate (all authored disc information used to invoke ffprobe)",
+        &format!("{candidate:#?}"),
+    );
     let mut command = Command::new("ffprobe");
     command.args([
         "-v",
@@ -127,6 +133,7 @@ pub(crate) fn probe_title(
         }));
     }
 
+    diagnostics::tool_json("ffprobe", &candidate.source_title_id, &output.stdout);
     let probe: ProbeOutput = serde_json::from_slice(&output.stdout)
         .map_err(|error| MediaEngineError::Process(format!("invalid ffprobe metadata: {error}")))?;
     let mut title = title_from_probe(candidate, probe)?;
@@ -165,6 +172,11 @@ fn estimate_size_from_packet_sample(
     if !output.status.success() {
         return Ok(None);
     }
+    diagnostics::tool_json(
+        "ffprobe packet sample",
+        &candidate.source_title_id,
+        &output.stdout,
+    );
     let Some(sample) = serde_json::from_slice(&output.stdout).ok() else {
         return Ok(None);
     };

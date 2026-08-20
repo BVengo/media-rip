@@ -44,6 +44,7 @@ throughout the UI. Encoding belongs beside `rip/` and is selected through a core
 
 - `app/state.rs`: UI-independent session state.
 - `app/controller.rs`: translates user gestures and engine events.
+- `app/notifications.rs`: bounded, background ntfy publication after successful jobs.
 - `ui/window.rs`: top-level native window composition.
 - `ui/components/`: toolbar, source bar, content tree, Info panel, output sidebar, and messages.
 - `ui/styling.rs`: the application-level GTK CSS.
@@ -74,7 +75,7 @@ enumerate DVD titles, Blu-ray playlists, or CD tracks
 FFprobe video/file candidates or read the CD TOC/CD-TEXT
    │
    ▼
-read authored video metadata; exact TheDiscDB hash lookup; optional TMDB enrichment
+read authored video metadata; optional exact TheDiscDB hash lookup; parallel enabled TVMaze and optional TMDB/TVDB enrichment
    │
    ▼
 MediaCatalog ──► title tree + Info panel
@@ -84,10 +85,13 @@ DVD folders use the title table and program-cell sector ranges in their IFO file
 read the same metadata through `libdvdread`. Blu-ray folders enumerate `.mpls` playlists, while
 `libbluray` supplies playlist byte ranges and raw-device enumeration.
 
-Video enrichment is deliberately evidence-ordered. Authored metadata is local and exact. TheDiscDB
-is queried only by a disc-content fingerprint and its returned title mappings are independently
-checked against scanned duration and size. TMDB is then addressed by TheDiscDB's external ID, or by
-an exact normalized title as a lower-confidence fallback. Provider, method, and confidence remain
+Video enrichment is deliberately evidence-ordered. Authored metadata is local and exact. When enabled,
+TheDiscDB is queried only by a disc-content fingerprint and its returned title mappings are independently
+checked against scanned duration and size. TMDB is then addressed by TheDiscDB's external ID, while
+TVDB and TVMaze use the matched IMDb ID when available. Without an external identity, movie lookup
+remains exact; season-labelled TV discs use the same conservative title-similarity and clear-winner
+review gate for TMDB, TVDB, and TVMaze. Provider requests run concurrently. Agreement raises confidence,
+while conflicting title-only identities are rejected. Provider, method, and confidence remain
 attached to the catalog/title model so the UI can explain every automatic name. Network JSON and
 artwork are cached below the platform cache directory; cancellation and lookup failures never turn
 an otherwise readable disc into a failed scan.

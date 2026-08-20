@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -9,7 +10,15 @@ use media_rip_core::{
 };
 use serde::{Deserialize, Deserializer, Serialize};
 
-const SETTINGS_VERSION: u32 = 4;
+const SETTINGS_VERSION: u32 = 11;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RememberedDvdMatch {
+    pub title: String,
+    pub metadata_url: Option<String>,
+    pub season: Option<u32>,
+    pub next_episode: Option<u32>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -23,6 +32,7 @@ pub(crate) struct AppSettings {
     pub dvd: DvdSettings,
     pub bluray: BluraySettings,
     pub audio_cd: AudioCdSettings,
+    pub notifications: NotificationSettings,
     pub integrations: IntegrationSettings,
     pub advanced: AdvancedSettings,
 }
@@ -77,6 +87,9 @@ pub(crate) struct SelectionSettings {
     pub audio_policy: String,
     pub subtitle_policy: String,
     pub include_forced_subtitles: bool,
+    pub select_tv_episodes: bool,
+    pub select_tv_play_all: bool,
+    pub select_tv_non_episodic: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,10 +108,13 @@ pub(crate) struct DvdSettings {
     pub processing_mode: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub(crate) struct BluraySettings {
-    pub playlist_policy: String,
+    pub select_only_main_title: bool,
+    pub select_duplicate_playlists: bool,
+    #[serde(default, rename = "playlist_policy", skip_serializing)]
+    legacy_playlist_policy: Option<String>,
     pub create_protection_dumps: bool,
     pub java_executable: String,
 }
@@ -115,14 +131,33 @@ pub(crate) struct AudioCdSettings {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+pub(crate) struct NotificationSettings {
+    pub completion_sound_enabled: bool,
+    pub ntfy_enabled: bool,
+    pub ntfy_server_url: String,
+    pub ntfy_topic: String,
+    pub ntfy_access_token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct IntegrationSettings {
-    pub video_metadata_enabled: bool,
+    pub use_previous_dvd_match: bool,
+    pub last_dvd_match: Option<RememberedDvdMatch>,
+    pub thediscdb_enabled: bool,
+    pub tvmaze_enabled: bool,
     pub tmdb_access_token: String,
+    pub tvdb_api_key: String,
+    pub tvdb_subscriber_pin: String,
     pub optical_access_provider: String,
     pub expose_to_media_players: bool,
     pub streaming_enabled: bool,
     pub streaming_address: String,
     pub streaming_port: u32,
+    /// User-reviewed episode offsets keyed by the exact disc-content hash.
+    pub video_metadata_corrections: BTreeMap<String, i32>,
+    /// User-reviewed season offsets keyed by the exact disc-content hash.
+    pub video_metadata_season_corrections: BTreeMap<String, i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,6 +183,7 @@ impl Default for AppSettings {
             dvd: DvdSettings::default(),
             bluray: BluraySettings::default(),
             audio_cd: AudioCdSettings::default(),
+            notifications: NotificationSettings::default(),
             integrations: IntegrationSettings::default(),
             advanced: AdvancedSettings::default(),
         }
@@ -209,6 +245,9 @@ impl Default for SelectionSettings {
             audio_policy: "all".into(),
             subtitle_policy: "all".into(),
             include_forced_subtitles: true,
+            select_tv_episodes: true,
+            select_tv_play_all: false,
+            select_tv_non_episodic: false,
         }
     }
 }
@@ -233,16 +272,6 @@ impl Default for DvdSettings {
     }
 }
 
-impl Default for BluraySettings {
-    fn default() -> Self {
-        Self {
-            playlist_policy: "unique".into(),
-            create_protection_dumps: false,
-            java_executable: String::new(),
-        }
-    }
-}
-
 impl Default for AudioCdSettings {
     fn default() -> Self {
         Self {
@@ -255,16 +284,35 @@ impl Default for AudioCdSettings {
     }
 }
 
+impl Default for NotificationSettings {
+    fn default() -> Self {
+        Self {
+            completion_sound_enabled: false,
+            ntfy_enabled: false,
+            ntfy_server_url: "https://ntfy.sh".into(),
+            ntfy_topic: String::new(),
+            ntfy_access_token: String::new(),
+        }
+    }
+}
+
 impl Default for IntegrationSettings {
     fn default() -> Self {
         Self {
-            video_metadata_enabled: true,
+            use_previous_dvd_match: true,
+            last_dvd_match: None,
+            thediscdb_enabled: true,
+            tvmaze_enabled: true,
             tmdb_access_token: String::new(),
+            tvdb_api_key: String::new(),
+            tvdb_subscriber_pin: String::new(),
             optical_access_provider: "system".into(),
             expose_to_media_players: false,
             streaming_enabled: false,
             streaming_address: "127.0.0.1".into(),
             streaming_port: 51000,
+            video_metadata_corrections: BTreeMap::new(),
+            video_metadata_season_corrections: BTreeMap::new(),
         }
     }
 }
@@ -292,8 +340,10 @@ impl AppSettings {
         }
         let contents = fs::read_to_string(&path)
             .map_err(|error| format!("could not read {}: {error}", path.display()))?;
-        serde_json::from_str(&contents)
-            .map_err(|error| format!("could not parse {}: {error}", path.display()))
+        let mut settings: Self = serde_json::from_str(&contents)
+            .map_err(|error| format!("could not parse {}: {error}", path.display()))?;
+        settings.migrate_legacy_bluray_playlist_policy();
+        Ok(settings)
     }
 
     pub fn save(&self) -> Result<PathBuf, String> {
@@ -319,18 +369,29 @@ impl AppSettings {
         self.apply_audio_cd_file_names(catalog);
         let had_multiple_titles = catalog.titles.len() > 1;
         let source_kind = catalog.source.kind;
+        let has_authored_main_title = source_kind == media_rip_core::DiscKind::BluRay
+            && catalog.titles.iter().any(|title| title.is_main_title);
         let duplicate_representatives = duplicate_representatives(catalog);
+        let tv_title_preferences = tv_title_preferences(catalog);
         let minimum_duration_ms = u64::from(self.output.minimum_title_seconds) * 1_000;
         for title in &mut catalog.titles {
             let is_duplicate_representative = title.duplicate_key.as_ref().is_none_or(|key| {
                 duplicate_representatives.get(key) == Some(&title.source_title_id)
             });
-            let policy_includes_title = match self.bluray.playlist_policy.as_str() {
-                "main" if source_kind == media_rip_core::DiscKind::BluRay => title.is_main_title,
-                "all" => true,
-                _ => is_duplicate_representative,
+            let main_title_includes_title = !self.bluray.select_only_main_title
+                || !has_authored_main_title
+                || title.is_main_title;
+            let duplicate_selection_includes_title =
+                self.bluray.select_duplicate_playlists || is_duplicate_representative;
+            let preference_includes_title = match tv_title_preferences.get(&title.id) {
+                Some(TvTitlePreference::Episode) => self.selection.select_tv_episodes,
+                Some(TvTitlePreference::PlayAll) => self.selection.select_tv_play_all,
+                Some(TvTitlePreference::NonEpisodic) => self.selection.select_tv_non_episodic,
+                None => true,
             };
-            let include_title = policy_includes_title
+            let include_title = main_title_includes_title
+                && duplicate_selection_includes_title
+                && preference_includes_title
                 && (source_kind == media_rip_core::DiscKind::AudioCd
                     || !had_multiple_titles
                     || title.duration_ms >= minimum_duration_ms);
@@ -340,6 +401,37 @@ impl AppSettings {
             title.selected = include_title
                 && (title.tracks.is_empty() || title.tracks.iter().any(|track| track.selected));
         }
+        if source_kind == media_rip_core::DiscKind::BluRay
+            && log::log_enabled!(target: "media_rip::selection_decision", log::Level::Debug)
+        {
+            let authored_main_playlists = catalog
+                .titles
+                .iter()
+                .filter(|title| title.is_main_title)
+                .map(|title| title.source_title_id.as_str())
+                .collect::<Vec<_>>();
+            let selected_playlists = catalog
+                .titles
+                .iter()
+                .filter(|title| title.selected)
+                .map(|title| title.source_title_id.as_str())
+                .collect::<Vec<_>>();
+            log::debug!(
+                target: "media_rip::selection_decision",
+                "applied Blu-ray playlist selection: select_only_main_title={}; select_duplicate_playlists={}; authored_main_playlists={authored_main_playlists:?}; selected_playlists={selected_playlists:?}; main_title_fallback={}",
+                self.bluray.select_only_main_title,
+                self.bluray.select_duplicate_playlists,
+                self.bluray.select_only_main_title && !has_authored_main_title
+            );
+        }
+    }
+
+    fn migrate_legacy_bluray_playlist_policy(&mut self) {
+        let Some(policy) = self.bluray.legacy_playlist_policy.take() else {
+            return;
+        };
+        self.bluray.select_only_main_title = policy == "main";
+        self.bluray.select_duplicate_playlists = policy == "all";
     }
 
     fn apply_audio_cd_file_names(&self, catalog: &mut MediaCatalog) {
@@ -523,6 +615,90 @@ fn duplicate_representatives(catalog: &MediaCatalog) -> std::collections::HashMa
     representatives
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TvTitlePreference {
+    Episode,
+    PlayAll,
+    NonEpisodic,
+}
+
+fn tv_title_preferences(
+    catalog: &MediaCatalog,
+) -> std::collections::HashMap<u32, TvTitlePreference> {
+    const PLAY_ALL_TOLERANCE_MS: u64 = 3_000;
+
+    let is_tv_show = catalog.source_info.iter().any(|field| {
+        field.label.eq_ignore_ascii_case("Content")
+            && matches!(
+                field.value.trim().to_ascii_lowercase().as_str(),
+                "series" | "tv" | "tv show"
+            )
+    });
+    if !is_tv_show {
+        return std::collections::HashMap::new();
+    }
+
+    let episode_ids = catalog
+        .titles
+        .iter()
+        .filter(|title| {
+            title.video_metadata.as_ref().is_some_and(|metadata| {
+                metadata.episode.is_some()
+                    || metadata
+                        .content_type
+                        .as_deref()
+                        .is_some_and(|kind| kind.eq_ignore_ascii_case("Episode"))
+            }) || catalog
+                .video_metadata_suggestions
+                .iter()
+                .any(|suggestion| suggestion.title_id == title.id)
+        })
+        .map(|title| title.id)
+        .collect::<std::collections::HashSet<_>>();
+    if episode_ids.len() < 2 {
+        return std::collections::HashMap::new();
+    }
+
+    let mut preferences = episode_ids
+        .iter()
+        .map(|id| (*id, TvTitlePreference::Episode))
+        .collect::<std::collections::HashMap<_, _>>();
+    for (play_all_index, play_all) in catalog.titles.iter().enumerate() {
+        if episode_ids.contains(&play_all.id) {
+            continue;
+        }
+        let mut episode_count = 0;
+        let mut total_duration_ms = 0_u64;
+        for title in catalog.titles.iter().skip(play_all_index + 1) {
+            if !episode_ids.contains(&title.id) {
+                if episode_count > 0 {
+                    break;
+                }
+                continue;
+            }
+            episode_count += 1;
+            total_duration_ms = total_duration_ms.saturating_add(title.duration_ms);
+            if episode_count >= 2
+                && total_duration_ms.abs_diff(play_all.duration_ms) <= PLAY_ALL_TOLERANCE_MS
+            {
+                preferences.insert(play_all.id, TvTitlePreference::PlayAll);
+                break;
+            }
+            if total_duration_ms > play_all.duration_ms.saturating_add(PLAY_ALL_TOLERANCE_MS)
+                || episode_count == 8
+            {
+                break;
+            }
+        }
+    }
+    for title in &catalog.titles {
+        preferences
+            .entry(title.id)
+            .or_insert(TvTitlePreference::NonEpisodic);
+    }
+    preferences
+}
+
 impl SelectionSettings {
     fn selects_track(&self, track: &Track) -> bool {
         let forced = track
@@ -639,10 +815,12 @@ mod tests {
     use std::path::PathBuf;
 
     use media_rip_core::{
-        DiscKind, InfoField, MediaCatalog, MediaSource, StreamKind, Title, Track,
+        DiscKind, InfoField, MediaCatalog, MediaSource, MetadataAttribution, StreamKind, Title,
+        Track, VideoMetadata, VideoMetadataSuggestion,
     };
 
     use super::AppSettings;
+    use super::RememberedDvdMatch;
 
     #[test]
     fn settings_round_trip_through_json() {
@@ -650,6 +828,23 @@ mod tests {
         expected.output.minimum_title_seconds = 42;
         expected.selection.preferred_languages = vec!["eng".into(), "jpn".into()];
         expected.audio_cd.output_format = "wav".into();
+        expected.notifications.completion_sound_enabled = true;
+        expected.notifications.ntfy_enabled = true;
+        expected.notifications.ntfy_server_url = "http://192.168.1.20:8080".into();
+        expected.notifications.ntfy_topic = "media-rip-test".into();
+        expected.notifications.ntfy_access_token = "tk_test".into();
+        expected.integrations.tvdb_api_key = "project-key".into();
+        expected.integrations.tvdb_subscriber_pin = "subscriber-pin".into();
+        expected
+            .integrations
+            .video_metadata_corrections
+            .insert("DISC-HASH".into(), -1);
+        expected.integrations.last_dvd_match = Some(RememberedDvdMatch {
+            title: "The Show".into(),
+            metadata_url: Some("https://www.tvmaze.com/shows/42/the-show".into()),
+            season: Some(2),
+            next_episode: Some(9),
+        });
 
         let json = serde_json::to_string(&expected).unwrap();
         let actual: AppSettings = serde_json::from_str(&json).unwrap();
@@ -754,6 +949,13 @@ mod tests {
         assert!(!settings.automation.audio_cd.read_automatically);
         assert!(settings.automation.require_audio_cd_metadata);
         assert!(settings.output.audio_cd_directory.is_empty());
+        assert!(!settings.notifications.completion_sound_enabled);
+        assert!(!settings.notifications.ntfy_enabled);
+        assert_eq!(settings.notifications.ntfy_server_url, "https://ntfy.sh");
+        assert!(settings.notifications.ntfy_topic.is_empty());
+        assert!(settings.integrations.video_metadata_corrections.is_empty());
+        assert!(settings.integrations.use_previous_dvd_match);
+        assert!(settings.integrations.last_dvd_match.is_none());
     }
 
     #[test]
@@ -764,9 +966,9 @@ mod tests {
     }
 
     #[test]
-    fn all_playlist_policy_selects_every_exact_duplicate() {
+    fn duplicate_playlist_selection_selects_every_exact_duplicate() {
         let mut settings = AppSettings::default();
-        settings.bluray.playlist_policy = "all".into();
+        settings.bluray.select_duplicate_playlists = true;
         let mut catalog = catalog_with_duplicate_playlists();
 
         settings.apply_catalog_defaults(&mut catalog);
@@ -779,9 +981,8 @@ mod tests {
     }
 
     #[test]
-    fn unique_playlist_policy_shows_duplicates_but_selects_one_representative() {
-        let mut settings = AppSettings::default();
-        settings.bluray.playlist_policy = "unique".into();
+    fn default_playlist_selection_keeps_one_exact_duplicate_representative() {
+        let settings = AppSettings::default();
         let mut catalog = catalog_with_duplicate_playlists();
 
         settings.apply_catalog_defaults(&mut catalog);
@@ -807,6 +1008,50 @@ mod tests {
     }
 
     #[test]
+    fn main_title_selection_selects_only_the_authored_main_title() {
+        let mut settings = AppSettings::default();
+        settings.bluray.select_only_main_title = true;
+        let mut catalog = catalog_with_duplicate_playlists();
+        catalog.titles[1].is_main_title = true;
+
+        settings.apply_catalog_defaults(&mut catalog);
+
+        assert!(!catalog.titles[0].selected);
+        assert!(catalog.titles[1].selected);
+        assert!(!catalog.titles[2].selected);
+    }
+
+    #[test]
+    fn main_title_selection_falls_back_to_unique_playlists_without_a_main_title() {
+        let mut settings = AppSettings::default();
+        settings.bluray.select_only_main_title = true;
+        let mut catalog = catalog_with_duplicate_playlists();
+
+        settings.apply_catalog_defaults(&mut catalog);
+
+        assert!(catalog.titles[0].selected);
+        assert!(!catalog.titles[1].selected);
+        assert!(catalog.titles[2].selected);
+    }
+
+    #[test]
+    fn legacy_playlist_policy_is_migrated_to_independent_settings() {
+        let mut settings: AppSettings =
+            serde_json::from_str(r#"{ "bluray": { "playlist_policy": "main" } }"#).unwrap();
+
+        settings.migrate_legacy_bluray_playlist_policy();
+
+        assert!(settings.bluray.select_only_main_title);
+        assert!(!settings.bluray.select_duplicate_playlists);
+        assert!(settings.bluray.legacy_playlist_policy.is_none());
+        assert!(
+            !serde_json::to_string(&settings)
+                .unwrap()
+                .contains("playlist_policy")
+        );
+    }
+
+    #[test]
     fn configured_minimum_duration_controls_title_defaults() {
         let mut settings = AppSettings::default();
         settings.output.minimum_title_seconds = 8_000;
@@ -815,6 +1060,85 @@ mod tests {
         settings.apply_catalog_defaults(&mut catalog);
 
         assert!(catalog.titles.iter().all(|title| !title.selected));
+    }
+
+    #[test]
+    fn tv_defaults_select_episodes_and_deselect_matching_play_all_titles() {
+        let mut catalog = tv_catalog("Series");
+
+        AppSettings::default().apply_catalog_defaults(&mut catalog);
+
+        assert!(!catalog.titles[0].selected);
+        assert!(catalog.titles[1].selected);
+        assert!(catalog.titles[2].selected);
+        assert!(!catalog.titles[3].selected);
+        assert!(catalog.titles[0].tracks.iter().all(|track| !track.selected));
+    }
+
+    #[test]
+    fn tv_selection_preferences_can_keep_play_all_and_deselect_episodes() {
+        let mut settings = AppSettings::default();
+        settings.selection.select_tv_episodes = false;
+        settings.selection.select_tv_play_all = true;
+        let mut catalog = tv_catalog("Series");
+
+        settings.apply_catalog_defaults(&mut catalog);
+
+        assert!(catalog.titles[0].selected);
+        assert!(!catalog.titles[1].selected);
+        assert!(!catalog.titles[2].selected);
+        assert!(!catalog.titles[3].selected);
+    }
+
+    #[test]
+    fn tv_non_episodic_content_can_be_included() {
+        let mut settings = AppSettings::default();
+        settings.selection.select_tv_non_episodic = true;
+        let mut catalog = tv_catalog("Series");
+
+        settings.apply_catalog_defaults(&mut catalog);
+
+        assert!(!catalog.titles[0].selected);
+        assert!(catalog.titles[1].selected);
+        assert!(catalog.titles[2].selected);
+        assert!(catalog.titles[3].selected);
+    }
+
+    #[test]
+    fn probable_tv_episode_suggestions_also_identify_play_all_titles() {
+        let mut catalog = tv_catalog("Series");
+        catalog.video_metadata_suggestions = catalog
+            .titles
+            .iter_mut()
+            .skip(1)
+            .take(2)
+            .enumerate()
+            .map(|(index, title)| VideoMetadataSuggestion {
+                title_id: title.id,
+                name: format!("Episode {}", index + 1),
+                tags: Vec::new(),
+                metadata: title.video_metadata.take().unwrap(),
+                evidence: Vec::new(),
+                assumptions: Vec::new(),
+                episode_choices: Vec::new(),
+            })
+            .collect();
+
+        AppSettings::default().apply_catalog_defaults(&mut catalog);
+
+        assert!(!catalog.titles[0].selected);
+        assert!(catalog.titles[1].selected);
+        assert!(catalog.titles[2].selected);
+        assert!(!catalog.titles[3].selected);
+    }
+
+    #[test]
+    fn tv_selection_preferences_do_not_apply_to_movies() {
+        let mut catalog = tv_catalog("Movie");
+
+        AppSettings::default().apply_catalog_defaults(&mut catalog);
+
+        assert!(catalog.titles.iter().all(|title| title.selected));
     }
 
     #[test]
@@ -1010,6 +1334,36 @@ mod tests {
             metadata_attributions: Vec::new(),
             video_metadata_suggestions: Vec::new(),
         }
+    }
+
+    fn tv_catalog(content_type: &str) -> MediaCatalog {
+        let mut catalog = catalog_with_duplicate_playlists();
+        catalog.source_info = vec![InfoField::new("Content", content_type)];
+        catalog.titles = vec![
+            title("play-all", "play-all"),
+            title("episode-1", "episode-1"),
+            title("episode-2", "episode-2"),
+            title("extra", "extra"),
+        ];
+        let durations = [5_040_000, 2_520_000, 2_520_000, 600_000];
+        for (id, (title, duration_ms)) in catalog.titles.iter_mut().zip(durations).enumerate() {
+            title.id = id as u32;
+            title.duration_ms = duration_ms;
+            title.duplicate_key = None;
+        }
+        for (index, episode) in [1_u32, 2].into_iter().enumerate() {
+            catalog.titles[index + 1].video_metadata = Some(VideoMetadata {
+                attribution: MetadataAttribution::new("test", 100, "test"),
+                content_type: Some("Episode".into()),
+                year: None,
+                season: Some(1),
+                episode: Some(episode),
+                tmdb_id: None,
+                tvdb_id: None,
+                tvmaze_id: None,
+            });
+        }
+        catalog
     }
 
     fn title(source_title_id: &str, duplicate_key: &str) -> Title {

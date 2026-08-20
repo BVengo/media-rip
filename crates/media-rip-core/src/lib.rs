@@ -7,7 +7,7 @@ pub mod util;
 pub use model::{
     Chapter, CoverArt, DiscKind, Drive, EngineEvent, InfoField, LogLevel, MediaCatalog,
     MediaSource, MediaTag, MetadataAttribution, OutputProfile, RipProgress, RipRequest,
-    RipSelection, RipTitleResult, StreamKind, Title, Track, TrackCoverArt, VideoMetadata,
-    VideoMetadataSuggestion,
+    RipSelection, RipTitleResult, StreamKind, Title, Track, TrackCoverArt, VideoEpisodeChoice,
+    VideoMetadata, VideoMetadataSuggestion,
 };
-pub use ports::{MediaEngine, MediaEngineError, ScanOptions};
+pub use ports::{MediaEngine, MediaEngineError, PreviousDvdMatch, ScanOptions};

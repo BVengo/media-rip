@@ -10,9 +10,13 @@ use media_rip_core::{DiscKind, MediaEngineError, Title, ports::CancellationToken
 use serde::{Deserialize, Serialize};
 
 use super::cache::MetadataCache;
-use crate::source::{locate_child_case_insensitive, normalize_disc_root};
+use crate::{
+    diagnostics,
+    source::{locate_child_case_insensitive, normalize_disc_root},
+};
 
 const DISCDB_GRAPHQL_URL: &str = "https://thediscdb.com/graphql/";
+const CACHE_NAMESPACE: &str = "discdb-raw-v1";
 const HASH_LOOKUP_QUERY: &str = r#"
 query LookupByHash($hash: String!) {
   mediaItems(
@@ -79,7 +83,6 @@ struct DiscDbMedia {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct ExternalIds {
     tmdb: Option<String>,
-    #[allow(dead_code)]
     imdb: Option<String>,
 }
 
@@ -126,6 +129,7 @@ pub(super) struct DiscDbMatch {
     pub media_type: String,
     pub year: Option<u32>,
     pub tmdb_id: Option<u64>,
+    pub imdb_id: Option<String>,
     pub disc_slug: Option<String>,
     pub titles: Vec<DiscDbTitle>,
 }
@@ -137,10 +141,12 @@ pub(super) fn content_hash(path: &Path, kind: DiscKind) -> Option<String> {
         _ => return None,
     };
     if !root.is_dir() {
-        return (kind == DiscKind::Dvd)
-            .then(|| iso9660_video_ts_sizes(path))
-            .flatten()
-            .and_then(hash_sizes);
+        if kind != DiscKind::Dvd {
+            return None;
+        }
+        let files = iso9660_video_ts_files(path)?;
+        log_hash_inputs(path, kind, &files);
+        return hash_sizes(files.into_iter().map(|(_, size)| size).collect());
     }
     let (directory, extension) = match kind {
         DiscKind::BluRay => {
@@ -177,12 +183,31 @@ pub(super) fn content_hash(path: &Path, kind: DiscKind) -> Option<String> {
     if files.is_empty() {
         return None;
     }
-    hash_sizes(
-        files
-            .into_iter()
-            .map(|file| fs::metadata(file).ok().map(|metadata| metadata.len()))
-            .collect::<Option<Vec<_>>>()?,
-    )
+    let files = files
+        .into_iter()
+        .map(|file| {
+            let size = fs::metadata(&file).ok()?.len();
+            Some((file.to_string_lossy().into_owned(), size))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    log_hash_inputs(path, kind, &files);
+    hash_sizes(files.into_iter().map(|(_, size)| size).collect())
+}
+
+fn log_hash_inputs(path: &Path, kind: DiscKind, files: &[(String, u64)]) {
+    diagnostics::disc_json(
+        "MediaRip",
+        "ordered TheDiscDB content-hash inputs",
+        &serde_json::json!({
+            "source_path": path,
+            "disc_kind": kind,
+            "files": files.iter().enumerate().map(|(order, (name, size))| serde_json::json!({
+                "order": order,
+                "name": name,
+                "size_bytes": size,
+            })).collect::<Vec<_>>(),
+        }),
+    );
 }
 
 fn hash_sizes(sizes: Vec<u64>) -> Option<String> {
@@ -208,7 +233,7 @@ struct IsoEntry {
 
 /// Reads the ISO9660 bridge directory present on ordinary video DVDs. This is
 /// deliberately directory-table-only: no movie content is read or uploaded.
-fn iso9660_video_ts_sizes(path: &Path) -> Option<Vec<u64>> {
+fn iso9660_video_ts_files(path: &Path) -> Option<Vec<(String, u64)>> {
     let mut image = fs::File::open(path).ok()?;
     let mut descriptor = [0_u8; ISO_SECTOR_SIZE as usize];
     let root = (16_u64..=255).find_map(|sector| {
@@ -235,7 +260,7 @@ fn iso9660_video_ts_sizes(path: &Path) -> Option<Vec<u64>> {
     Some(
         files
             .into_iter()
-            .map(|entry| u64::from(entry.size))
+            .map(|entry| (entry.name, u64::from(entry.size)))
             .collect(),
     )
 }
@@ -302,50 +327,65 @@ pub(super) fn lookup(
     if cancellation.is_cancelled() {
         return Err(MediaEngineError::Cancelled.to_string());
     }
+    log::debug!(
+        target: "media_rip_engine::metadata_decision",
+        "TheDiscDB lookup planned: method=exact content hash; hash={content_hash}; hash_origin=ordered authored disc file sizes; title_query=none"
+    );
     let cache_key = format!("hash:{content_hash}");
-    let response = if let Some(cached) = cache.read::<GraphQlEnvelope>("discdb", &cache_key) {
-        cached
-    } else {
-        let request = serde_json::json!({
-            "query": HASH_LOOKUP_QUERY,
-            "variables": { "hash": content_hash }
-        });
-        let network_response = ureq::post(DISCDB_GRAPHQL_URL)
-            .set(
-                "User-Agent",
-                concat!("MediaRip/", env!("CARGO_PKG_VERSION")),
-            )
-            .set("Accept", "application/json")
-            .timeout(Duration::from_secs(10))
-            .send_json(request)
-            .map_err(|error| error.to_string())
-            .and_then(|response| {
-                response
-                    .into_json::<GraphQlEnvelope>()
-                    .map_err(|error| error.to_string())
+    let (response_value, response_source) =
+        if let Some(cached) = cache.read::<serde_json::Value>(CACHE_NAMESPACE, &cache_key) {
+            (cached, "cache")
+        } else {
+            let request = serde_json::json!({
+                "query": HASH_LOOKUP_QUERY,
+                "variables": { "hash": content_hash }
             });
-        match network_response {
-            Ok(response) if response.errors.is_empty() => {
-                if find_exact_match(response.data.clone(), content_hash).is_some() {
-                    cache.write("discdb", &cache_key, &response);
+            let network_response = ureq::post(DISCDB_GRAPHQL_URL)
+                .set(
+                    "User-Agent",
+                    concat!("MediaRip/", env!("CARGO_PKG_VERSION")),
+                )
+                .set("Accept", "application/json")
+                .timeout(Duration::from_secs(10))
+                .send_json(request)
+                .map_err(|error| error.to_string())
+                .and_then(|response| {
+                    response
+                        .into_json::<serde_json::Value>()
+                        .map_err(|error| error.to_string())
+                });
+            match network_response {
+                Ok(response) => (response, "network"),
+                Err(error) => {
+                    if let Some(stale) =
+                        cache.read_stale::<serde_json::Value>(CACHE_NAMESPACE, &cache_key)
+                    {
+                        (stale, "stale-cache")
+                    } else {
+                        return Err(error.to_string());
+                    }
                 }
-                response
             }
-            Ok(response) => {
-                return Err(format!(
-                    "TheDiscDB returned {} GraphQL error(s)",
-                    response.errors.len()
-                ));
-            }
-            Err(error) => {
-                if let Some(stale) = cache.read_stale::<GraphQlEnvelope>("discdb", &cache_key) {
-                    stale
-                } else {
-                    return Err(error.to_string());
-                }
-            }
-        }
-    };
+        };
+    diagnostics::json(
+        "TheDiscDB",
+        "lookup by content hash",
+        response_source,
+        &response_value,
+    );
+    let response: GraphQlEnvelope = serde_json::from_value(response_value.clone())
+        .map_err(|error| format!("invalid TheDiscDB response: {error}"))?;
+    if !response.errors.is_empty() {
+        return Err(format!(
+            "TheDiscDB returned {} GraphQL error(s)",
+            response.errors.len()
+        ));
+    }
+    if response_source == "network"
+        && find_exact_match(response.data.clone(), content_hash).is_some()
+    {
+        cache.write(CACHE_NAMESPACE, &cache_key, &response_value);
+    }
     Ok(find_exact_match(response.data, content_hash))
 }
 
@@ -359,6 +399,7 @@ fn find_exact_match(data: Option<DiscDbData>, hash: &str) -> Option<DiscDbMatch>
                         media_type: media.media_type,
                         year: media.year,
                         tmdb_id: media.externalids.tmdb.and_then(|value| value.parse().ok()),
+                        imdb_id: media.externalids.imdb,
                         disc_slug: disc.slug,
                         titles: disc.titles,
                     });
@@ -594,6 +635,7 @@ mod tests {
         let matched = find_exact_match(response.data, "abc").unwrap();
         assert_eq!(matched.title, "Band of Brothers");
         assert_eq!(matched.tmdb_id, Some(4613));
+        assert_eq!(matched.imdb_id.as_deref(), Some("tt0185906"));
         assert_eq!(matched.titles[0].size, 18_405_949_440);
     }
 }

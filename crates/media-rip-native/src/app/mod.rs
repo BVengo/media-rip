@@ -1,7 +1,8 @@
 mod controller;
+mod notifications;
 mod settings;
 mod state;
 
 pub use controller::launch;
-pub(crate) use settings::AppSettings;
-pub(crate) use state::{AppState, BusyState, Selection};
+pub(crate) use settings::{AppSettings, NotificationSettings, RememberedDvdMatch};
+pub(crate) use state::{AppState, BusyState, EpisodeMetadataContext, Selection};

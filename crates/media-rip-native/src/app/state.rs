@@ -1,6 +1,8 @@
 use std::{collections::BTreeSet, path::PathBuf};
 
-use media_rip_core::{Drive, MediaCatalog, OutputProfile, ports::CancellationToken};
+use media_rip_core::{
+    Drive, MediaCatalog, OutputProfile, VideoEpisodeChoice, VideoMetadata, ports::CancellationToken,
+};
 
 use super::AppSettings;
 
@@ -23,6 +25,15 @@ pub(crate) enum BusyState {
     Ripping,
 }
 
+/// Season metadata retained independently from the pending automatic
+/// suggestions. This lets a user assign an episode that the heuristic did not
+/// propose, including after all automatic suggestions have been applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EpisodeMetadataContext {
+    pub metadata: VideoMetadata,
+    pub choices: Vec<VideoEpisodeChoice>,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct AppState {
     pub catalog: Option<MediaCatalog>,
@@ -37,6 +48,8 @@ pub(crate) struct AppState {
     pub completed_titles_this_job: usize,
     pub close_requested: bool,
     pub auto_read_armed: bool,
+    pub episode_metadata: Option<EpisodeMetadataContext>,
+    pub pending_suggestion_season: Option<u32>,
 }
 
 impl AppState {

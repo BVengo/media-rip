@@ -39,6 +39,10 @@ pub struct VideoMetadata {
     pub season: Option<u32>,
     pub episode: Option<u32>,
     pub tmdb_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tvdb_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tvmaze_id: Option<u64>,
 }
 
 /// A lower-confidence video title proposal that is never applied automatically.
@@ -48,6 +52,25 @@ pub struct VideoMetadataSuggestion {
     pub name: String,
     pub tags: Vec<MediaTag>,
     pub metadata: VideoMetadata,
+    /// Observations which led to this proposal. These are displayed before the
+    /// user chooses whether to apply the lower-confidence metadata.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>,
+    /// Heuristic choices which cannot be proven from the disc itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assumptions: Vec<String>,
+    /// Other episodes from the resolved season. Frontends use these choices to
+    /// shift an otherwise ambiguous consecutive proposal without another
+    /// network request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub episode_choices: Vec<VideoEpisodeChoice>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VideoEpisodeChoice {
+    pub episode: u32,
+    pub name: String,
+    pub tags: Vec<MediaTag>,
 }
 
 impl MediaTag {
@@ -222,6 +245,9 @@ impl Track {
         if let Some(language) = self.language.as_deref().filter(|value| !value.is_empty()) {
             parts.push(language.to_owned());
         }
+        if let Some(name) = self.name.as_deref().filter(|value| !value.is_empty()) {
+            parts.push(name.to_owned());
+        }
         parts.extend(
             self.properties
                 .iter()
@@ -304,5 +330,26 @@ impl MediaCatalog {
             Some(TrackCoverArt::Removed) => None,
             Some(TrackCoverArt::Custom(cover_art)) => Some(cover_art),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{StreamKind, Track};
+
+    #[test]
+    fn track_summary_includes_an_edited_name() {
+        let track = Track {
+            index: 1,
+            kind: StreamKind::Audio,
+            codec: "aac".to_owned(),
+            codec_long_name: None,
+            language: Some("eng".to_owned()),
+            name: Some("Commentary".to_owned()),
+            properties: vec!["stereo".to_owned()],
+            selected: true,
+        };
+
+        assert_eq!(track.summary(), "aac  eng  Commentary  stereo");
     }
 }

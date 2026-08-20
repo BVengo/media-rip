@@ -27,10 +27,18 @@ pub(crate) struct SettingsForm {
     audio_policy: gtk::ComboBoxText,
     subtitle_policy: gtk::ComboBoxText,
     include_forced_subtitles: gtk::Switch,
+    select_tv_episodes: gtk::Switch,
+    select_tv_play_all: gtk::Switch,
+    select_tv_non_episodic: gtk::Switch,
     read_retry_count: gtk::SpinButton,
     read_buffer_mib: gtk::ComboBoxText,
     single_drive_mode: gtk::Switch,
     eject_when_finished: gtk::Switch,
+    completion_sound_enabled: gtk::Switch,
+    ntfy_enabled: gtk::Switch,
+    ntfy_server_url: gtk::Entry,
+    ntfy_topic: gtk::Entry,
+    ntfy_access_token: gtk::PasswordEntry,
     audio_cd_auto_read: gtk::Switch,
     audio_cd_auto_save: gtk::Switch,
     dvd_auto_read: gtk::Switch,
@@ -40,7 +48,8 @@ pub(crate) struct SettingsForm {
     require_audio_cd_metadata: gtk::Switch,
     dvd_structure_protection_method: gtk::ComboBoxText,
     dvd_processing_mode: gtk::ComboBoxText,
-    bluray_playlist_policy: gtk::ComboBoxText,
+    bluray_select_only_main_title: gtk::Switch,
+    bluray_select_duplicate_playlists: gtk::Switch,
     create_protection_dumps: gtk::Switch,
     java_executable: gtk::Entry,
     audio_cd_output_format: gtk::ComboBoxText,
@@ -48,8 +57,12 @@ pub(crate) struct SettingsForm {
     audio_cd_secure_extraction: gtk::Switch,
     audio_cd_use_disc_metadata: gtk::Switch,
     audio_cd_auto_tagging: gtk::Switch,
-    video_metadata_enabled: gtk::Switch,
+    thediscdb_enabled: gtk::Switch,
+    use_previous_dvd_match: gtk::Switch,
+    tvmaze_enabled: gtk::Switch,
     tmdb_access_token: gtk::PasswordEntry,
+    tvdb_api_key: gtk::PasswordEntry,
+    tvdb_subscriber_pin: gtk::PasswordEntry,
     optical_access_provider: gtk::ComboBoxText,
     expose_to_media_players: gtk::Switch,
     streaming_enabled: gtk::Switch,
@@ -170,6 +183,9 @@ impl SettingsForm {
             &settings.selection.subtitle_policy,
         );
         let include_forced_subtitles = switch(settings.selection.include_forced_subtitles);
+        let select_tv_episodes = switch(settings.selection.select_tv_episodes);
+        let select_tv_play_all = switch(settings.selection.select_tv_play_all);
+        let select_tv_non_episodic = switch(settings.selection.select_tv_non_episodic);
 
         let read_retry_count = spin(0.0, 99.0, 1.0, settings.io.read_retry_count as f64);
         let read_buffer_mib = combo(
@@ -185,6 +201,19 @@ impl SettingsForm {
         );
         let single_drive_mode = switch(settings.io.single_drive_mode);
         let eject_when_finished = switch(settings.io.eject_when_finished);
+        let completion_sound_enabled = switch(settings.notifications.completion_sound_enabled);
+        let ntfy_enabled = switch(settings.notifications.ntfy_enabled);
+        let ntfy_server_url = entry(
+            &settings.notifications.ntfy_server_url,
+            "https://ntfy.sh or http://192.168.1.20:8080",
+        );
+        let ntfy_topic = entry(&settings.notifications.ntfy_topic, "A private topic name");
+        let ntfy_access_token = gtk::PasswordEntry::builder()
+            .text(&settings.notifications.ntfy_access_token)
+            .placeholder_text("Optional access token")
+            .show_peek_icon(true)
+            .width_request(260)
+            .build();
         let audio_cd_auto_read = switch(settings.automation.audio_cd.read_automatically);
         let audio_cd_auto_save = switch(settings.automation.audio_cd.save_automatically);
         let dvd_auto_read = switch(settings.automation.dvd.read_automatically);
@@ -212,14 +241,8 @@ impl SettingsForm {
             &settings.dvd.processing_mode,
         );
 
-        let bluray_playlist_policy = combo(
-            &[
-                ("all", "Show every playlist"),
-                ("unique", "Group exact duplicates"),
-                ("main", "Prefer likely main features"),
-            ],
-            &settings.bluray.playlist_policy,
-        );
+        let bluray_select_only_main_title = switch(settings.bluray.select_only_main_title);
+        let bluray_select_duplicate_playlists = switch(settings.bluray.select_duplicate_playlists);
         let create_protection_dumps = switch(settings.bluray.create_protection_dumps);
         let java_executable = entry(
             &settings.bluray.java_executable,
@@ -245,7 +268,9 @@ impl SettingsForm {
         audio_cd_secure_extraction.set_active(true);
         audio_cd_secure_extraction.set_sensitive(false);
 
-        let video_metadata_enabled = switch(settings.integrations.video_metadata_enabled);
+        let thediscdb_enabled = switch(settings.integrations.thediscdb_enabled);
+        let use_previous_dvd_match = switch(settings.integrations.use_previous_dvd_match);
+        let tvmaze_enabled = switch(settings.integrations.tvmaze_enabled);
         let tmdb_access_token = gtk::PasswordEntry::builder()
             .text(&settings.integrations.tmdb_access_token)
             .placeholder_text("TMDB API Read Access Token (optional)")
@@ -253,6 +278,20 @@ impl SettingsForm {
             .hexpand(true)
             .build();
         tmdb_access_token.set_size_request(328, -1);
+        let tvdb_api_key = gtk::PasswordEntry::builder()
+            .text(&settings.integrations.tvdb_api_key)
+            .placeholder_text("TVDB v4 project API key (optional)")
+            .show_peek_icon(true)
+            .hexpand(true)
+            .build();
+        tvdb_api_key.set_size_request(328, -1);
+        let tvdb_subscriber_pin = gtk::PasswordEntry::builder()
+            .text(&settings.integrations.tvdb_subscriber_pin)
+            .placeholder_text("Only needed for user-supported keys")
+            .show_peek_icon(true)
+            .hexpand(true)
+            .build();
+        tvdb_subscriber_pin.set_size_request(328, -1);
 
         let optical_access_provider = combo(
             &[
@@ -418,6 +457,21 @@ impl SettingsForm {
             "Select forced tracks when they can be identified.",
             &include_forced_subtitles,
         ));
+        tracks.append(&setting_row(
+            "TV episodes",
+            "Select individual episode titles when a source is identified as a TV show.",
+            &select_tv_episodes,
+        ));
+        tracks.append(&setting_row(
+            "TV play-all titles",
+            "Select combined play-all titles when matching individual episodes are found.",
+            &select_tv_play_all,
+        ));
+        tracks.append(&setting_row(
+            "TV non-episodic content",
+            "Select extras and other unmatched titles when individual episodes are found.",
+            &select_tv_non_episodic,
+        ));
         selection.append(&tracks);
 
         let io = page(
@@ -493,6 +547,31 @@ impl SettingsForm {
             "Only eject after the complete job succeeds.",
             &eject_when_finished,
         ));
+        completion.append(&setting_row(
+            "Play a completion sound",
+            "Play the desktop's standard alert sound after a successful job.",
+            &completion_sound_enabled,
+        ));
+        completion.append(&setting_row(
+            "Send an ntfy notification",
+            "Notify a subscribed phone after a successful job.",
+            &ntfy_enabled,
+        ));
+        completion.append(&setting_row(
+            "ntfy server URL",
+            "Use https://ntfy.sh or the address of a server on your local network.",
+            &ntfy_server_url,
+        ));
+        completion.append(&setting_row(
+            "ntfy topic",
+            "Subscribe to this exact topic in the phone app. Choose an unguessable name on public servers.",
+            &ntfy_topic,
+        ));
+        completion.append(&setting_row(
+            "ntfy access token",
+            "Optional bearer token for a protected topic.",
+            &ntfy_access_token,
+        ));
         io.append(&completion);
 
         let dvd = media_page(
@@ -533,13 +612,18 @@ impl SettingsForm {
             "Playlist discovery and diagnostics for Blu-ray media.",
         );
         let playlists = section(
-            "Playlists",
-            "Complex discs may contain many near-identical playlists.",
+            "Default playlist selection",
+            "Every discovered playlist remains visible, regardless of these settings.",
         );
         playlists.append(&setting_row(
-            "Playlist policy",
-            "Grouping never deletes source data and can be expanded in the title list.",
-            &bluray_playlist_policy,
+            "Select only the authored main title",
+            "When the disc identifies a main title, select only that playlist by default. If it does not, the normal selection rules apply.",
+            &bluray_select_only_main_title,
+        ));
+        playlists.append(&setting_row(
+            "Select exact duplicate playlists",
+            "Select later playlists that contain exactly the same clip ranges. When disabled, they remain visible but start unselected.",
+            &bluray_select_duplicate_playlists,
         ));
         playlists.append(&path_setting_row(
             "Default destination",
@@ -552,7 +636,7 @@ impl SettingsForm {
         bluray.append(&playlists);
         let bluray_tools = section(
             "Protection diagnostics",
-            "MediaRip uses only legally installed, open-source system providers.",
+            "Uses system providers installed on this computer.",
         );
         bluray_tools.append(&setting_row(
             "Create protection diagnostics",
@@ -622,14 +706,34 @@ impl SettingsForm {
             "Identify authored DVD and Blu-ray contents while a disc is read.",
         );
         metadata.append(&setting_row(
-            "Look up video metadata",
-            "Use exact TheDiscDB fingerprints and cache successful matches locally.",
-            &video_metadata_enabled,
+            "TheDiscDB matching",
+            "Identify authored discs using exact content fingerprints; cache successful matches locally.",
+            &thediscdb_enabled,
+        ));
+        metadata.append(&setting_row(
+            "Use previous DVD match",
+            "If normal identification fails, try the identity and episode position from the last DVD whose metadata you applied and ripped.",
+            &use_previous_dvd_match,
+        ));
+        metadata.append(&setting_row(
+            "TVMaze enrichment",
+            "Add credential-free TV series details, episode runtimes, and artwork.",
+            &tvmaze_enabled,
         ));
         metadata.append(&setting_row(
             "TMDB Read Access Token",
             "Optional. Adds canonical movie/series details and poster artwork; obtain a v4 token from themoviedb.org.",
             &tmdb_access_token,
+        ));
+        metadata.append(&setting_row(
+            "TVDB API key",
+            "Optional. Adds a second identity source and DVD episode ordering; obtain a v4 project key from thetvdb.com.",
+            &tvdb_api_key,
+        ));
+        metadata.append(&setting_row(
+            "TVDB subscriber PIN",
+            "Optional. Required only when the TVDB project key uses their user-supported access model.",
+            &tvdb_subscriber_pin,
         ));
         integrations.append(&metadata);
         let providers = section(
@@ -663,7 +767,7 @@ impl SettingsForm {
         ));
         streaming.append(&setting_row(
             "Port",
-            "The default matches MakeMKV-compatible local clients.",
+            "Port used by compatible local clients.",
             &streaming_port,
         ));
         integrations.append(&streaming);
@@ -821,10 +925,10 @@ impl SettingsForm {
             require_metadata_for_auto_save.set_sensitive(toggle.is_active());
         });
 
-        tmdb_access_token.set_sensitive(video_metadata_enabled.is_active());
-        let tmdb_token_for_toggle = tmdb_access_token.clone();
-        video_metadata_enabled.connect_active_notify(move |toggle| {
-            tmdb_token_for_toggle.set_sensitive(toggle.is_active());
+        tvdb_subscriber_pin.set_sensitive(!tvdb_api_key.text().trim().is_empty());
+        let tvdb_pin_for_key = tvdb_subscriber_pin.clone();
+        tvdb_api_key.connect_text_notify(move |key| {
+            tvdb_pin_for_key.set_sensitive(!key.text().trim().is_empty());
         });
 
         set_streaming_controls_sensitive(
@@ -838,6 +942,24 @@ impl SettingsForm {
             set_streaming_controls_sensitive(
                 &streaming_address_for_toggle,
                 &streaming_port_for_toggle,
+                toggle.is_active(),
+            );
+        });
+
+        set_ntfy_controls_sensitive(
+            &ntfy_server_url,
+            &ntfy_topic,
+            &ntfy_access_token,
+            ntfy_enabled.is_active(),
+        );
+        let ntfy_server_for_toggle = ntfy_server_url.clone();
+        let ntfy_topic_for_toggle = ntfy_topic.clone();
+        let ntfy_token_for_toggle = ntfy_access_token.clone();
+        ntfy_enabled.connect_active_notify(move |toggle| {
+            set_ntfy_controls_sensitive(
+                &ntfy_server_for_toggle,
+                &ntfy_topic_for_toggle,
+                &ntfy_token_for_toggle,
                 toggle.is_active(),
             );
         });
@@ -893,10 +1015,18 @@ impl SettingsForm {
             audio_policy,
             subtitle_policy,
             include_forced_subtitles,
+            select_tv_episodes,
+            select_tv_play_all,
+            select_tv_non_episodic,
             read_retry_count,
             read_buffer_mib,
             single_drive_mode,
             eject_when_finished,
+            completion_sound_enabled,
+            ntfy_enabled,
+            ntfy_server_url,
+            ntfy_topic,
+            ntfy_access_token,
             audio_cd_auto_read,
             audio_cd_auto_save,
             dvd_auto_read,
@@ -906,7 +1036,8 @@ impl SettingsForm {
             require_audio_cd_metadata,
             dvd_structure_protection_method,
             dvd_processing_mode,
-            bluray_playlist_policy,
+            bluray_select_only_main_title,
+            bluray_select_duplicate_playlists,
             create_protection_dumps,
             java_executable,
             audio_cd_output_format,
@@ -914,8 +1045,12 @@ impl SettingsForm {
             audio_cd_secure_extraction,
             audio_cd_use_disc_metadata,
             audio_cd_auto_tagging,
-            video_metadata_enabled,
+            thediscdb_enabled,
+            use_previous_dvd_match,
+            tvmaze_enabled,
             tmdb_access_token,
+            tvdb_api_key,
+            tvdb_subscriber_pin,
             optical_access_provider,
             expose_to_media_players,
             streaming_enabled,
@@ -963,10 +1098,18 @@ impl SettingsForm {
         watch!(self.audio_policy, "active-id");
         watch!(self.subtitle_policy, "active-id");
         watch!(self.include_forced_subtitles, "active");
+        watch!(self.select_tv_episodes, "active");
+        watch!(self.select_tv_play_all, "active");
+        watch!(self.select_tv_non_episodic, "active");
         watch!(self.read_retry_count, "value");
         watch!(self.read_buffer_mib, "active-id");
         watch!(self.single_drive_mode, "active");
         watch!(self.eject_when_finished, "active");
+        watch!(self.completion_sound_enabled, "active");
+        watch!(self.ntfy_enabled, "active");
+        watch!(self.ntfy_server_url, "text");
+        watch!(self.ntfy_topic, "text");
+        watch!(self.ntfy_access_token, "text");
         watch!(self.audio_cd_auto_read, "active");
         watch!(self.audio_cd_auto_save, "active");
         watch!(self.dvd_auto_read, "active");
@@ -976,7 +1119,8 @@ impl SettingsForm {
         watch!(self.require_audio_cd_metadata, "active");
         watch!(self.dvd_structure_protection_method, "active-id");
         watch!(self.dvd_processing_mode, "active-id");
-        watch!(self.bluray_playlist_policy, "active-id");
+        watch!(self.bluray_select_only_main_title, "active");
+        watch!(self.bluray_select_duplicate_playlists, "active");
         watch!(self.create_protection_dumps, "active");
         watch!(self.java_executable, "text");
         watch!(self.audio_cd_output_format, "active-id");
@@ -984,8 +1128,12 @@ impl SettingsForm {
         watch!(self.audio_cd_secure_extraction, "active");
         watch!(self.audio_cd_use_disc_metadata, "active");
         watch!(self.audio_cd_auto_tagging, "active");
-        watch!(self.video_metadata_enabled, "active");
+        watch!(self.thediscdb_enabled, "active");
+        watch!(self.use_previous_dvd_match, "active");
+        watch!(self.tvmaze_enabled, "active");
         watch!(self.tmdb_access_token, "text");
+        watch!(self.tvdb_api_key, "text");
+        watch!(self.tvdb_subscriber_pin, "text");
         watch!(self.optical_access_provider, "active-id");
         watch!(self.expose_to_media_players, "active");
         watch!(self.streaming_enabled, "active");
@@ -1010,7 +1158,7 @@ impl SettingsForm {
     }
 
     pub fn settings(&self) -> AppSettings {
-        let mut settings = AppSettings::default();
+        let mut settings = self.initial_settings.borrow().clone();
         settings.general.data_directory = text(&self.data_directory);
         settings.general.debug_logging = self.debug_logging.is_active();
         settings.general.expert_controls = self.expert_controls.is_active();
@@ -1034,6 +1182,9 @@ impl SettingsForm {
         settings.selection.audio_policy = active_id(&self.audio_policy, "all");
         settings.selection.subtitle_policy = active_id(&self.subtitle_policy, "all");
         settings.selection.include_forced_subtitles = self.include_forced_subtitles.is_active();
+        settings.selection.select_tv_episodes = self.select_tv_episodes.is_active();
+        settings.selection.select_tv_play_all = self.select_tv_play_all.is_active();
+        settings.selection.select_tv_non_episodic = self.select_tv_non_episodic.is_active();
 
         settings.io.read_retry_count = spin_value(&self.read_retry_count);
         settings.io.read_buffer_mib = active_id(&self.read_buffer_mib, "0")
@@ -1041,6 +1192,12 @@ impl SettingsForm {
             .unwrap_or_default();
         settings.io.single_drive_mode = self.single_drive_mode.is_active();
         settings.io.eject_when_finished = self.eject_when_finished.is_active();
+
+        settings.notifications.completion_sound_enabled = self.completion_sound_enabled.is_active();
+        settings.notifications.ntfy_enabled = self.ntfy_enabled.is_active();
+        settings.notifications.ntfy_server_url = text(&self.ntfy_server_url);
+        settings.notifications.ntfy_topic = text(&self.ntfy_topic);
+        settings.notifications.ntfy_access_token = self.ntfy_access_token.text().trim().to_owned();
 
         settings.automation.audio_cd.read_automatically = self.audio_cd_auto_read.is_active();
         settings.automation.audio_cd.save_automatically = self.audio_cd_auto_save.is_active();
@@ -1054,7 +1211,9 @@ impl SettingsForm {
             active_id(&self.dvd_structure_protection_method, "automatic");
         settings.dvd.processing_mode = active_id(&self.dvd_processing_mode, "automatic");
 
-        settings.bluray.playlist_policy = active_id(&self.bluray_playlist_policy, "unique");
+        settings.bluray.select_only_main_title = self.bluray_select_only_main_title.is_active();
+        settings.bluray.select_duplicate_playlists =
+            self.bluray_select_duplicate_playlists.is_active();
         settings.bluray.create_protection_dumps = self.create_protection_dumps.is_active();
         settings.bluray.java_executable = text(&self.java_executable);
 
@@ -1064,8 +1223,12 @@ impl SettingsForm {
         settings.audio_cd.use_disc_metadata = self.audio_cd_use_disc_metadata.is_active();
         settings.audio_cd.auto_tagging = self.audio_cd_auto_tagging.is_active();
 
-        settings.integrations.video_metadata_enabled = self.video_metadata_enabled.is_active();
+        settings.integrations.thediscdb_enabled = self.thediscdb_enabled.is_active();
+        settings.integrations.use_previous_dvd_match = self.use_previous_dvd_match.is_active();
+        settings.integrations.tvmaze_enabled = self.tvmaze_enabled.is_active();
         settings.integrations.tmdb_access_token = self.tmdb_access_token.text().to_string();
+        settings.integrations.tvdb_api_key = self.tvdb_api_key.text().to_string();
+        settings.integrations.tvdb_subscriber_pin = self.tvdb_subscriber_pin.text().to_string();
         settings.integrations.optical_access_provider =
             active_id(&self.optical_access_provider, "system");
         settings.integrations.expose_to_media_players = self.expose_to_media_players.is_active();
@@ -1328,4 +1491,15 @@ fn spin_value(spin: &gtk::SpinButton) -> u32 {
 fn set_streaming_controls_sensitive(address: &gtk::Entry, port: &gtk::SpinButton, sensitive: bool) {
     address.set_sensitive(sensitive);
     port.set_sensitive(sensitive);
+}
+
+fn set_ntfy_controls_sensitive(
+    server_url: &gtk::Entry,
+    topic: &gtk::Entry,
+    access_token: &gtk::PasswordEntry,
+    sensitive: bool,
+) {
+    server_url.set_sensitive(sensitive);
+    topic.set_sensitive(sensitive);
+    access_token.set_sensitive(sensitive);
 }

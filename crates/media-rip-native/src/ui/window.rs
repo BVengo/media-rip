@@ -42,12 +42,12 @@ impl MainWindow {
         working_area.set_resize_start_child(true);
         working_area.set_shrink_start_child(true);
         working_area.set_resize_end_child(false);
-        working_area.set_shrink_end_child(true);
+        working_area.set_shrink_end_child(false);
         let content_panel = super::components::panel("Content", &content.stack);
         content_panel.set_size_request(420, -1);
         working_area.set_start_child(Some(&content_panel));
         working_area.set_end_child(Some(&sidebar.root));
-        working_area.set_position(730);
+        working_area.set_position(690);
 
         let messages = MessagesPanel::new();
         let main_pane = gtk::Paned::new(gtk::Orientation::Vertical);
@@ -78,10 +78,14 @@ impl MainWindow {
         progress_labels.append(&progress_title);
         progress_labels.append(&progress);
         progress_labels.append(&progress_detail);
-        let cancel = gtk::Button::builder()
-            .label("Cancel")
-            .icon_name("process-stop-symbolic")
-            .build();
+        let cancel = gtk::Button::new();
+        let cancel_content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let cancel_icon = gtk::Image::from_icon_name("media-playback-stop-symbolic");
+        cancel_icon.set_pixel_size(16);
+        cancel_icon.set_size_request(16, 16);
+        cancel_content.append(&cancel_icon);
+        cancel_content.append(&gtk::Label::new(Some("Cancel")));
+        cancel.set_child(Some(&cancel_content));
         progress_area.append(&progress_labels);
         progress_area.append(&cancel);
         root.append(&progress_area);
@@ -112,6 +116,8 @@ impl MainWindow {
         self.toolbar.open_folder.set_sensitive(!busy);
         self.toolbar.refresh.set_sensitive(!busy);
         self.toolbar.preferences.set_sensitive(!busy);
+        self.source.metadata_url.set_sensitive(!busy);
+        self.source.identify.set_sensitive(!busy);
         self.sidebar.rip.set_sensitive(!busy);
         self.sidebar.browse_output.set_sensitive(!busy);
         self.sidebar.output_profile.set_sensitive(!busy);

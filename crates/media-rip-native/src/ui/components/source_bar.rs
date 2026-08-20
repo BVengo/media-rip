@@ -6,28 +6,60 @@ pub(crate) struct SourceBar {
     pub root: gtk::Box,
     pub drives: gtk::ComboBoxText,
     pub open: gtk::Button,
+    pub metadata_url: gtk::Entry,
+    pub identify: gtk::Button,
+    metadata_row: gtk::Box,
 }
 
 impl SourceBar {
     pub fn new() -> Self {
-        let root = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
         root.add_css_class("source-strip");
+
+        let source_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
 
         let label = gtk::Label::new(Some("Source"));
         label.add_css_class("source-label");
-        root.append(&label);
+        source_row.append(&label);
 
         let drives = gtk::ComboBoxText::new();
         drives.set_hexpand(true);
         drives.set_tooltip_text(Some("Optical drives and the currently opened source"));
-        root.append(&drives);
+        source_row.append(&drives);
 
         let open = gtk::Button::builder()
             .icon_name("media-optical-symbolic")
             .tooltip_text("Open disc")
             .build();
-        root.append(&open);
-        Self { root, drives, open }
+        source_row.append(&open);
+        root.append(&source_row);
+
+        let metadata_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        metadata_row.set_visible(false);
+        let metadata_label = gtk::Label::new(Some("Metadata link"));
+        metadata_label.add_css_class("source-label");
+        let metadata_url = gtk::Entry::builder()
+            .hexpand(true)
+            .placeholder_text("TVMaze or TheTVDB series/movie URL")
+            .tooltip_text("Paste the public TVMaze or TheTVDB page for this disc when its authored name cannot be identified")
+            .build();
+        let identify = gtk::Button::with_label("Identify");
+        identify.set_tooltip_text(Some(
+            "Read this source again using the linked metadata identity",
+        ));
+        metadata_row.append(&metadata_label);
+        metadata_row.append(&metadata_url);
+        metadata_row.append(&identify);
+        root.append(&metadata_row);
+
+        Self {
+            root,
+            drives,
+            open,
+            metadata_url,
+            identify,
+            metadata_row,
+        }
     }
 
     pub fn set_drives(&self, drives: &[Drive]) {
@@ -72,6 +104,10 @@ impl SourceBar {
             &format!("{name} — {}", path.display()),
         );
         self.drives.set_active(Some(0));
+    }
+
+    pub fn set_metadata_link_visible(&self, visible: bool) {
+        self.metadata_row.set_visible(visible);
     }
 }
 

@@ -24,9 +24,7 @@ pub(crate) fn run(
         ));
     }
     if !crate::probe::tool_availability().ffmpeg {
-        return Err(MediaEngineError::MissingTool(
-            "ffmpeg (from the open-source FFmpeg project)".to_owned(),
-        ));
+        return Err(MediaEngineError::MissingTool("ffmpeg".to_owned()));
     }
     ffmpeg::validate_profile_available(request.output_profile)?;
 

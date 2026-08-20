@@ -2,6 +2,7 @@ use std::{
     cell::{Cell, RefCell},
     collections::{BTreeSet, HashMap},
     rc::Rc,
+    time::Duration,
 };
 
 use gtk::{glib, prelude::*};
@@ -14,7 +15,7 @@ use crate::app::Selection;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ContentAction {
-    CycleSelectAll,
+    SetAllChecked(bool),
     SelectTitle(u32),
     SelectTrack {
         title_id: u32,
@@ -23,6 +24,8 @@ pub(crate) enum ContentAction {
     ToggleExpanded(u32),
     ApplySuggestion(u32),
     ApplyAllSuggestions,
+    SetSuggestionSeason(u32),
+    SetSuggestionFirstEpisode(u32),
     SetTitleChecked {
         title_id: u32,
         selected: bool,
@@ -42,6 +45,7 @@ pub(crate) struct ContentTree {
     pending_scroll_restore: Rc<RefCell<Option<glib::SignalHandlerId>>>,
     expanded_rows: Rc<RefCell<HashMap<u32, ExpandedRow>>>,
     select_all: Rc<RefCell<Option<gtk::CheckButton>>>,
+    select_all_state: Rc<Cell<CheckState>>,
     updating_checks: Rc<Cell<bool>>,
     pub idle_open: gtk::Button,
     idle_image: gtk::Image,
@@ -55,9 +59,12 @@ struct ExpandedRow {
     row: gtk::Box,
     button: gtk::Button,
     selected: gtk::CheckButton,
+    check_state: Rc<Cell<CheckState>>,
+    name: gtk::Label,
     tracks: gtk::Box,
     track_buttons: HashMap<u32, gtk::CheckButton>,
     track_rows: HashMap<u32, gtk::Box>,
+    track_descriptions: HashMap<u32, gtk::Label>,
 }
 
 impl ContentTree {
@@ -106,6 +113,7 @@ impl ContentTree {
             pending_scroll_restore: Rc::new(RefCell::new(None)),
             expanded_rows: Rc::new(RefCell::new(HashMap::new())),
             select_all: Rc::new(RefCell::new(None)),
+            select_all_state: Rc::new(Cell::new(CheckState::None)),
             updating_checks: Rc::new(Cell::new(false)),
             idle_open,
             idle_image,
@@ -174,24 +182,30 @@ impl ContentTree {
         self.expanded_rows.borrow_mut().clear();
         self.select_all.borrow_mut().take();
         clear_box(&self.title_box);
-        let (selection_row, select_all) =
-            select_all_row(catalog, on_action.clone(), self.updating_checks.clone());
+        let (selection_row, select_all) = select_all_row(
+            catalog,
+            on_action.clone(),
+            self.select_all_state.clone(),
+            self.updating_checks.clone(),
+        );
         self.title_box.append(&selection_row);
         *self.select_all.borrow_mut() = Some(select_all);
         if !catalog.video_metadata_suggestions.is_empty() {
             self.title_box.append(&suggestions_row(
-                catalog.video_metadata_suggestions.len(),
+                &catalog.video_metadata_suggestions,
                 on_action.clone(),
             ));
         }
+        let duplicate_originals = duplicate_originals(&catalog.titles);
         for title in &catalog.titles {
             let section = gtk::Box::new(gtk::Orientation::Vertical, 0);
-            let (header, button, selected) = title_row(
+            let (header, button, selected, check_state, name) = title_row(
                 title,
                 catalog
                     .video_metadata_suggestions
                     .iter()
                     .find(|suggestion| suggestion.title_id == title.id),
+                duplicate_originals.get(&title.id).map(String::as_str),
                 expanded.contains(&title.id),
                 on_action.clone(),
                 self.updating_checks.clone(),
@@ -200,8 +214,9 @@ impl ContentTree {
             let tracks = gtk::Box::new(gtk::Orientation::Vertical, 0);
             let mut track_buttons = HashMap::new();
             let mut track_rows = HashMap::new();
+            let mut track_descriptions = HashMap::new();
             for track in &title.tracks {
-                let (row, selected) = track_row(
+                let (row, selected, description) = track_row(
                     title.id,
                     track,
                     on_action.clone(),
@@ -210,6 +225,7 @@ impl ContentTree {
                 tracks.append(&row);
                 track_buttons.insert(track.index, selected);
                 track_rows.insert(track.index, row);
+                track_descriptions.insert(track.index, description);
             }
             tracks.set_visible(expanded.contains(&title.id));
             section.append(&tracks);
@@ -220,9 +236,12 @@ impl ContentTree {
                     row: header,
                     button,
                     selected,
+                    check_state,
+                    name,
                     tracks,
                     track_buttons,
                     track_rows,
+                    track_descriptions,
                 },
             );
         }
@@ -263,6 +282,7 @@ impl ContentTree {
         };
         self.updating_checks.set(true);
         let check_state = title_check_state(title);
+        row.check_state.set(check_state);
         row.selected.set_active(check_state == CheckState::All);
         row.selected
             .set_inconsistent(check_state == CheckState::Some);
@@ -280,8 +300,32 @@ impl ContentTree {
             return;
         };
         self.updating_checks.set(true);
-        set_check_button_state(&button, select_all_check_state(catalog));
+        let check_state = select_all_check_state(catalog);
+        self.select_all_state.set(check_state);
+        set_check_button_state(&button, check_state);
         self.updating_checks.set(false);
+    }
+
+    pub fn sync_title_name(&self, title_id: u32, name: &str) {
+        if let Some(row) = self.expanded_rows.borrow().get(&title_id) {
+            row.name.set_text(name);
+        }
+    }
+
+    pub fn sync_track_description(
+        &self,
+        title_id: u32,
+        stream_index: u32,
+        track: &media_rip_core::Track,
+    ) {
+        if let Some(description) = self
+            .expanded_rows
+            .borrow()
+            .get(&title_id)
+            .and_then(|row| row.track_descriptions.get(&stream_index))
+        {
+            description.set_text(&track_description(track));
+        }
     }
 
     pub fn sync_all_checks(&self, catalog: &MediaCatalog) {
@@ -334,10 +378,17 @@ pub(crate) enum DiscUiState {
 fn title_row(
     title: &Title,
     suggestion: Option<&VideoMetadataSuggestion>,
+    duplicate_of: Option<&str>,
     expanded: bool,
     on_action: Rc<dyn Fn(ContentAction)>,
     updating_checks: Rc<Cell<bool>>,
-) -> (gtk::Box, gtk::Button, gtk::CheckButton) {
+) -> (
+    gtk::Box,
+    gtk::Button,
+    gtk::CheckButton,
+    Rc<Cell<CheckState>>,
+    gtk::Label,
+) {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     row.add_css_class("title-row");
 
@@ -350,25 +401,30 @@ fn title_row(
         .has_frame(false)
         .tooltip_text("Show or hide tracks")
         .build();
+    expander.add_css_class("title-expander");
+    expander.set_valign(gtk::Align::Center);
+    expander.set_size_request(28, 28);
     row.append(&expander);
     let title_id = title.id;
     let callback = on_action.clone();
     expander.connect_clicked(move |_| callback(ContentAction::ToggleExpanded(title_id)));
 
     let check_state = title_check_state(title);
+    let current_check_state = Rc::new(Cell::new(check_state));
     let selected = gtk::CheckButton::new();
     selected.set_active(check_state == CheckState::All);
     selected.set_inconsistent(check_state == CheckState::Some);
     selected.set_tooltip_text(Some(check_state.tooltip()));
     row.append(&selected);
     let callback = on_action.clone();
-    selected.connect_toggled(move |button| {
+    let state = current_check_state.clone();
+    selected.connect_toggled(move |_| {
         if updating_checks.get() {
             return;
         }
         callback(ContentAction::SetTitleChecked {
             title_id,
-            selected: button.is_active(),
+            selected: check_toggle_target(state.get()),
         });
     });
 
@@ -393,14 +449,16 @@ fn title_row(
         badge.append(&gtk::Label::new(Some("MAIN TITLE")));
         name_line.append(&badge);
     }
-    if title.duplicate_key.is_some() && !title.is_main_title {
+    if let Some(original_playlist) = duplicate_of {
         let badge = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        badge.add_css_class("main-title-badge");
+        badge.add_css_class("duplicate-title-badge");
         badge.set_valign(gtk::Align::Center);
-        badge.set_tooltip_text(Some(
-            "This playlist uses the same authored media ranges as another item",
-        ));
-        badge.append(&gtk::Label::new(Some("DUPLICATE")));
+        badge.set_tooltip_text(Some(&format!(
+            "This playlist uses exactly the same authored clip ranges as playlist {original_playlist}",
+        )));
+        badge.append(&gtk::Label::new(Some(&format!(
+            "DUPLICATE OF {original_playlist}",
+        ))));
         name_line.append(&badge);
     }
     let details = [
@@ -435,9 +493,13 @@ fn title_row(
         label.set_ellipsize(gtk::pango::EllipsizeMode::End);
         label.set_hexpand(true);
         label.add_css_class("row-detail");
+        label.set_tooltip_text(Some(&suggestion_explanation(suggestion)));
         let apply = gtk::Button::with_label("Apply");
         apply.add_css_class("flat");
-        apply.set_tooltip_text(Some("Apply this probable episode name and tags"));
+        apply.set_tooltip_text(Some(&format!(
+            "Apply this probable episode name and tags\n\n{}",
+            suggestion_explanation(suggestion)
+        )));
         let callback = on_action.clone();
         apply.connect_clicked(move |_| callback(ContentAction::ApplySuggestion(title_id)));
         suggestion_line.append(&label);
@@ -450,32 +512,175 @@ fn title_row(
     let callback = on_action.clone();
     click.connect_released(move |_, _, _, _| callback(ContentAction::SelectTitle(title_id)));
     row.add_controller(click);
-    (row, expander, selected)
+    (row, expander, selected, current_check_state, name)
 }
 
-fn suggestions_row(count: usize, on_action: Rc<dyn Fn(ContentAction)>) -> gtk::Box {
+fn duplicate_originals(titles: &[Title]) -> HashMap<u32, String> {
+    let mut first_playlist_by_key = HashMap::<&str, &str>::new();
+    let mut originals = HashMap::new();
+    for title in titles {
+        let Some(key) = title.duplicate_key.as_deref() else {
+            continue;
+        };
+        if let Some(original_playlist) = first_playlist_by_key.get(key) {
+            originals.insert(title.id, (*original_playlist).to_owned());
+        } else {
+            first_playlist_by_key.insert(key, &title.source_title_id);
+        }
+    }
+    originals
+}
+
+fn suggestions_row(
+    suggestions: &[VideoMetadataSuggestion],
+    on_action: Rc<dyn Fn(ContentAction)>,
+) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     row.add_css_class("select-all-row");
     let labels = gtk::Box::new(gtk::Orientation::Vertical, 1);
     labels.set_hexpand(true);
+    let count = suggestions.len();
     let title = gtk::Label::new(Some(&format!("{count} probable episode matches")));
     title.set_xalign(0.0);
     title.add_css_class("row-title");
-    let detail = gtk::Label::new(Some(
-        "Review the suggestions below; existing names remain unchanged until you apply them.",
-    ));
+    let proposed_range = suggested_episode_range(suggestions)
+        .map(|range| format!(" Proposed range: {range}."))
+        .unwrap_or_default();
+    let detail = gtk::Label::new(Some(&format!(
+        "Review the suggestions below; existing names remain unchanged until you apply them.{proposed_range}"
+    )));
     detail.set_xalign(0.0);
     detail.set_wrap(true);
     detail.add_css_class("row-detail");
     labels.append(&title);
     labels.append(&detail);
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    actions.set_valign(gtk::Align::Center);
+    let season_label = gtk::Label::new(Some("Season"));
+    let season = gtk::Entry::builder()
+        .text(
+            suggestions
+                .iter()
+                .find_map(|suggestion| suggestion.metadata.season)
+                .unwrap_or_default()
+                .to_string(),
+        )
+        .width_chars(3)
+        .max_width_chars(3)
+        .input_purpose(gtk::InputPurpose::Number)
+        .tooltip_text("Enter the season number for the proposed titles")
+        .build();
+    let callback = on_action.clone();
+    connect_positive_number_commit(&season, move |value| {
+        callback(ContentAction::SetSuggestionSeason(value));
+    });
+    let first_episode_label = gtk::Label::new(Some("First episode"));
+    let first_episode = gtk::Entry::builder()
+        .text(
+            suggestions
+                .iter()
+                .filter_map(|suggestion| suggestion.metadata.episode)
+                .min()
+                .unwrap_or_default()
+                .to_string(),
+        )
+        .width_chars(4)
+        .max_width_chars(4)
+        .input_purpose(gtk::InputPurpose::Number)
+        .tooltip_text("Enter the episode number for the first proposed title")
+        .build();
+    let callback = on_action.clone();
+    connect_positive_number_commit(&first_episode, move |value| {
+        callback(ContentAction::SetSuggestionFirstEpisode(value));
+    });
     let apply = gtk::Button::with_label("Apply all");
     apply.add_css_class("suggested-action");
     apply.set_valign(gtk::Align::Center);
-    apply.connect_clicked(move |_| on_action(ContentAction::ApplyAllSuggestions));
+    let season_entry = season.clone();
+    let first_episode_entry = first_episode.clone();
+    apply.connect_clicked(move |_| {
+        commit_positive_number(&season_entry, &|value| {
+            on_action(ContentAction::SetSuggestionSeason(value));
+        });
+        commit_positive_number(&first_episode_entry, &|value| {
+            on_action(ContentAction::SetSuggestionFirstEpisode(value));
+        });
+        on_action(ContentAction::ApplyAllSuggestions);
+    });
+    actions.append(&season_label);
+    actions.append(&season);
+    actions.append(&first_episode_label);
+    actions.append(&first_episode);
+    actions.append(&apply);
     row.append(&labels);
-    row.append(&apply);
+    row.append(&actions);
     row
+}
+
+fn connect_positive_number_commit(entry: &gtk::Entry, callback: impl Fn(u32) + Clone + 'static) {
+    let revision = Rc::new(Cell::new(0_u64));
+    let activate_callback = callback.clone();
+    let activate_revision = revision.clone();
+    entry.connect_activate(move |entry| {
+        activate_revision.set(activate_revision.get().wrapping_add(1));
+        commit_positive_number(entry, &activate_callback);
+    });
+    entry.connect_changed(move |entry| {
+        let pending_revision = revision.get().wrapping_add(1);
+        revision.set(pending_revision);
+        let entry = entry.clone();
+        let revision = revision.clone();
+        let callback = callback.clone();
+        glib::timeout_add_local_once(Duration::from_millis(300), move || {
+            if revision.get() == pending_revision {
+                commit_positive_number(&entry, &callback);
+            }
+        });
+    });
+}
+
+fn commit_positive_number(entry: &gtk::Entry, callback: &impl Fn(u32)) {
+    if let Ok(value) = entry.text().trim().parse::<u32>()
+        && value > 0
+    {
+        callback(value);
+    }
+}
+
+fn suggestion_explanation(suggestion: &VideoMetadataSuggestion) -> String {
+    let mut sections = Vec::new();
+    if !suggestion.evidence.is_empty() {
+        sections.push(format!("Why:\n• {}", suggestion.evidence.join("\n• ")));
+    }
+    if !suggestion.assumptions.is_empty() {
+        sections.push(format!(
+            "Assumptions:\n• {}",
+            suggestion.assumptions.join("\n• ")
+        ));
+    }
+    sections.join("\n")
+}
+
+fn suggested_episode_range(suggestions: &[VideoMetadataSuggestion]) -> Option<String> {
+    let season = suggestions.first()?.metadata.season?;
+    if suggestions
+        .iter()
+        .any(|suggestion| suggestion.metadata.season != Some(season))
+    {
+        return None;
+    }
+    let mut episodes = suggestions
+        .iter()
+        .filter_map(|suggestion| suggestion.metadata.episode);
+    let first = episodes.next()?;
+    let (minimum, maximum) = episodes.fold((first, first), |(minimum, maximum), episode| {
+        (minimum.min(episode), maximum.max(episode))
+    });
+    Some(if minimum == maximum {
+        format!("S{season:02}E{minimum:02}")
+    } else {
+        format!("S{season:02}E{minimum:02}–E{maximum:02}")
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -488,7 +693,7 @@ enum CheckState {
 impl CheckState {
     fn tooltip(self) -> &'static str {
         match self {
-            Self::None => "This title is excluded; its track choices are preserved",
+            Self::None => "This title and all its tracks are excluded",
             Self::Some => "This title is included with selected tracks",
             Self::All => "This title and all its tracks are included",
         }
@@ -526,25 +731,34 @@ fn set_check_button_state(button: &gtk::CheckButton, state: CheckState) {
     button.set_active(state == CheckState::All);
     button.set_inconsistent(state == CheckState::Some);
     button.set_tooltip_text(Some(match state {
-        CheckState::None => "Select every title while preserving its track choices",
-        CheckState::Some => "Select every title and every track",
-        CheckState::All => "Deselect every title while preserving its track choices",
+        CheckState::None => "Select every title and track",
+        CheckState::Some | CheckState::All => "Deselect every title and track",
     }));
+}
+
+fn check_toggle_target(state: CheckState) -> bool {
+    state == CheckState::None
 }
 
 fn select_all_row(
     catalog: &MediaCatalog,
     on_action: Rc<dyn Fn(ContentAction)>,
+    current_check_state: Rc<Cell<CheckState>>,
     updating_checks: Rc<Cell<bool>>,
 ) -> (gtk::Box, gtk::CheckButton) {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     row.add_css_class("select-all-row");
 
     let selected = gtk::CheckButton::new();
-    set_check_button_state(&selected, select_all_check_state(catalog));
+    current_check_state.set(select_all_check_state(catalog));
+    set_check_button_state(&selected, current_check_state.get());
+    let callback = on_action.clone();
+    let check_state = current_check_state.clone();
     selected.connect_toggled(move |_| {
         if !updating_checks.get() {
-            on_action(ContentAction::CycleSelectAll);
+            callback(ContentAction::SetAllChecked(check_toggle_target(
+                check_state.get(),
+            )));
         }
     });
     row.append(&selected);
@@ -554,13 +768,18 @@ fn select_all_row(
     let label = gtk::Label::new(Some("Select all content"));
     label.set_xalign(0.0);
     label.add_css_class("row-title");
-    let detail = gtk::Label::new(Some(
-        "Cycles through none, preferred tracks, and everything",
-    ));
+    let detail = gtk::Label::new(Some("Select or deselect every title and track at once"));
     detail.set_xalign(0.0);
     detail.add_css_class("row-detail");
     labels.append(&label);
     labels.append(&detail);
+    let click = gtk::GestureClick::new();
+    click.connect_released(move |_, _, _, _| {
+        on_action(ContentAction::SetAllChecked(check_toggle_target(
+            current_check_state.get(),
+        )));
+    });
+    labels.add_controller(click);
     row.append(&labels);
 
     (row, selected)
@@ -571,7 +790,7 @@ fn track_row(
     track: &media_rip_core::Track,
     on_action: Rc<dyn Fn(ContentAction)>,
     updating_checks: Rc<Cell<bool>>,
-) -> (gtk::Box, gtk::CheckButton) {
+) -> (gtk::Box, gtk::CheckButton, gtk::Label) {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     row.add_css_class("track-row");
 
@@ -595,11 +814,7 @@ fn track_row(
     image.set_pixel_size(18);
     row.append(&image);
 
-    let description = gtk::Label::new(Some(&format!(
-        "{}  {}",
-        track.kind.display_name(),
-        track.summary()
-    )));
+    let description = gtk::Label::new(Some(&track_description(track)));
     description.set_xalign(0.0);
     description.set_ellipsize(gtk::pango::EllipsizeMode::End);
     description.set_hexpand(true);
@@ -613,7 +828,11 @@ fn track_row(
         });
     });
     row.add_controller(click);
-    (row, selected)
+    (row, selected, description)
+}
+
+fn track_description(track: &media_rip_core::Track) -> String {
+    format!("{}  {}", track.kind.display_name(), track.summary())
 }
 
 fn clear_box(container: &gtk::Box) {
@@ -630,7 +849,17 @@ mod tests {
 
     use media_rip_core::{DiscKind, MediaCatalog, MediaSource};
 
-    use super::{CheckState, select_all_check_state, title_check_state};
+    use super::{
+        CheckState, check_toggle_target, duplicate_originals, select_all_check_state,
+        title_check_state,
+    };
+
+    #[test]
+    fn partial_checkbox_toggles_directly_to_deselected() {
+        assert!(!check_toggle_target(CheckState::Some));
+        assert!(check_toggle_target(CheckState::None));
+        assert!(!check_toggle_target(CheckState::All));
+    }
 
     #[test]
     fn title_checkbox_reports_none_some_and_all_tracks() {
@@ -660,6 +889,23 @@ mod tests {
             .iter_mut()
             .for_each(|title| title.selected = false);
         assert_eq!(select_all_check_state(&catalog), CheckState::None);
+    }
+
+    #[test]
+    fn only_later_duplicate_playlists_reference_the_first_instance() {
+        let mut catalog = catalog_with_titles(&[&[], &[], &[]]);
+        catalog.titles[0].duplicate_key = Some("same-playlist".into());
+        catalog.titles[1].duplicate_key = Some("same-playlist".into());
+        catalog.titles[2].duplicate_key = Some("unique-playlist".into());
+
+        let originals = duplicate_originals(&catalog.titles);
+
+        assert!(!originals.contains_key(&catalog.titles[0].id));
+        assert_eq!(
+            originals.get(&catalog.titles[1].id).map(String::as_str),
+            Some("00001")
+        );
+        assert!(!originals.contains_key(&catalog.titles[2].id));
     }
 
     fn catalog_with_titles(selections: &[&[bool]]) -> MediaCatalog {

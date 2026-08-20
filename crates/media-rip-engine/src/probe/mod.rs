@@ -11,7 +11,7 @@ use media_rip_core::{
     ScanOptions, ports::CancellationToken, util::format_bytes,
 };
 
-use crate::{metadata, source};
+use crate::{diagnostics, metadata, source};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToolAvailability {
@@ -54,9 +54,7 @@ pub(crate) fn scan_source(
         detected_kind
     };
     if kind != DiscKind::AudioCd && !tool_availability().ffprobe {
-        return Err(MediaEngineError::MissingTool(
-            "ffprobe (from the open-source FFmpeg project)".to_owned(),
-        ));
+        return Err(MediaEngineError::MissingTool("ffprobe".to_owned()));
     }
     let media_path = match kind {
         DiscKind::Dvd => source::normalize_disc_root(path, "VIDEO_TS"),
@@ -81,6 +79,29 @@ pub(crate) fn scan_source(
         musicbrainz_error,
         mut cover_art,
     ) = if kind == DiscKind::AudioCd {
+        log(
+            events,
+            LogLevel::Info,
+            "Reading Audio CD track information and CD-TEXT metadata.".to_owned(),
+        );
+        if options.auto_tag_audio && options.allow_online_access {
+            log(
+                events,
+                LogLevel::Info,
+                "Looking for matching album metadata in MusicBrainz…".to_owned(),
+            );
+        } else {
+            log(
+                events,
+                LogLevel::Info,
+                if options.auto_tag_audio {
+                    "Online album metadata lookup skipped because online access is disabled."
+                } else {
+                    "Online album metadata lookup is disabled; using CD-TEXT when available."
+                }
+                .to_owned(),
+            );
+        }
         let catalog = source::audio_cd_catalog(
             &media_path,
             options.auto_tag_audio && options.allow_online_access,
@@ -200,6 +221,22 @@ pub(crate) fn scan_source(
         .filter(|name| !name.trim().is_empty())
         .unwrap_or_else(|| source::source_stem(&media_path));
     let mut video_enrichment = if matches!(kind, DiscKind::Dvd | DiscKind::BluRay) {
+        log(
+            events,
+            LogLevel::Info,
+            match (options.auto_tag_video, options.allow_online_access) {
+                (true, true) => {
+                    "Discovering video metadata from authored disc data and enabled online providers…"
+                }
+                (true, false) => {
+                    "Online video metadata lookup skipped because online access is disabled; checking authored disc metadata…"
+                }
+                (false, _) => {
+                    "Online video metadata lookup is disabled; checking authored disc metadata…"
+                }
+            }
+            .to_owned(),
+        );
         let enrichment = metadata::enrich_video(
             &media_path,
             kind,
@@ -214,6 +251,58 @@ pub(crate) fn scan_source(
         for warning in &enrichment.warnings {
             log(events, LogLevel::Warning, warning.clone());
         }
+        if options.auto_tag_video && options.allow_online_access && !options.thediscdb_enabled {
+            log(
+                events,
+                LogLevel::Info,
+                "TheDiscDB lookup disabled in settings.".to_owned(),
+            );
+        } else if let Some(status) = &enrichment.disc_match_status {
+            log(events, LogLevel::Info, format!("{status}."));
+        }
+        let tvmaze_link = options
+            .video_metadata_url
+            .as_deref()
+            .is_some_and(|url| crate::metadata::video_metadata_link_provider(url) == Ok("TVMaze"));
+        if options.auto_tag_video
+            && options.allow_online_access
+            && !options.tvmaze_enabled
+            && !tvmaze_link
+        {
+            log(
+                events,
+                LogLevel::Info,
+                "TVMaze enrichment disabled in settings.".to_owned(),
+            );
+        } else if let Some(status) = &enrichment.tvmaze_match_status {
+            log(events, LogLevel::Info, format!("{status}."));
+        }
+        if options.auto_tag_video
+            && options.allow_online_access
+            && options
+                .tmdb_access_token
+                .as_deref()
+                .is_none_or(|token| token.trim().is_empty())
+        {
+            log(
+                events,
+                LogLevel::Info,
+                "TMDB enrichment skipped because no access token is configured.".to_owned(),
+            );
+        }
+        if options.auto_tag_video
+            && options.allow_online_access
+            && options
+                .tvdb_api_key
+                .as_deref()
+                .is_none_or(|key| key.trim().is_empty())
+        {
+            log(
+                events,
+                LogLevel::Info,
+                "TVDB enrichment skipped because no API key is configured.".to_owned(),
+            );
+        }
         if !enrichment.attributions.is_empty() {
             log(
                 events,
@@ -227,6 +316,23 @@ pub(crate) fn scan_source(
                         .collect::<Vec<_>>()
                         .join(" + ")
                 ),
+            );
+        }
+        if !enrichment.suggestions.is_empty() {
+            log(
+                events,
+                LogLevel::Info,
+                format!(
+                    "Found {} probable episode metadata suggestion(s) for review; none were applied automatically.",
+                    enrichment.suggestions.len()
+                ),
+            );
+        } else if enrichment.attributions.is_empty() {
+            log(
+                events,
+                LogLevel::Info,
+                "Metadata discovery completed without a match; keeping the discovered title names."
+                    .to_owned(),
             );
         }
         if cover_art.is_none() {
@@ -354,7 +460,10 @@ pub(crate) fn scan_source(
             ));
         }
         if cover_art.is_some() {
-            source_info.push(InfoField::new("Artwork", "Embedded disc metadata or TMDB"));
+            source_info.push(InfoField::new(
+                "Artwork",
+                "Embedded disc metadata or an online metadata provider",
+            ));
         }
     }
     if let Some(artist) = disc_artist {
@@ -369,7 +478,7 @@ pub(crate) fn scan_source(
         ),
     );
 
-    Ok(MediaCatalog {
+    let catalog = MediaCatalog {
         source: MediaSource {
             id: media_path.to_string_lossy().into_owned(),
             name: source_name,
@@ -390,7 +499,9 @@ pub(crate) fn scan_source(
         video_metadata_suggestions: video_enrichment
             .map(|enrichment| enrichment.suggestions)
             .unwrap_or_default(),
-    })
+    };
+    diagnostics::catalog(&catalog);
+    Ok(catalog)
 }
 
 fn source_information(
@@ -470,7 +581,13 @@ mod live_tests {
                 auto_tag_audio: false,
                 auto_tag_video: false,
                 allow_online_access: false,
+                thediscdb_enabled: false,
+                tvmaze_enabled: false,
                 tmdb_access_token: None,
+                tvdb_api_key: None,
+                tvdb_subscriber_pin: None,
+                video_metadata_url: None,
+                previous_dvd_match: None,
             },
             &events,
             &CancellationToken::default(),

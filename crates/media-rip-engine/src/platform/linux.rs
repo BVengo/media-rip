@@ -1,7 +1,11 @@
-use std::{path::PathBuf, process::Command};
+use std::{path::PathBuf, process::Command, sync::Mutex};
 
 use media_rip_core::{DiscKind, Drive, MediaEngineError};
 use serde::Deserialize;
+
+use crate::diagnostics;
+
+static LAST_LOGGED_DRIVES: Mutex<Option<Vec<Drive>>> = Mutex::new(None);
 
 #[derive(Debug, Deserialize)]
 struct Lsblk {
@@ -36,6 +40,9 @@ pub fn discover_optical_drives() -> Result<Vec<Drive>, MediaEngineError> {
         .args([
             "--json",
             "--bytes",
+            "--nodeps",
+            "--include",
+            "11",
             "--output",
             "NAME,PATH,TYPE,MODEL,VENDOR,REV,SERIAL,LABEL,FSTYPE,SIZE,MOUNTPOINT",
         ])
@@ -51,12 +58,13 @@ pub fn discover_optical_drives() -> Result<Vec<Drive>, MediaEngineError> {
     let devices: Lsblk = serde_json::from_slice(&output.stdout)
         .map_err(|error| MediaEngineError::Process(format!("invalid lsblk output: {error}")))?;
 
-    let mut drives = devices
+    let mut discovered = devices
         .blockdevices
         .into_iter()
         .filter(|device| device.device_type == "rom")
         .map(|device| {
             let udev_properties = udev_properties(&device.path);
+            let device_path = device.path.clone();
             let media_kind = device
                 .mountpoint
                 .as_deref()
@@ -81,7 +89,7 @@ pub fn discover_optical_drives() -> Result<Vec<Drive>, MediaEngineError> {
                     properties.lines().any(|line| line == "ID_CDROM_MEDIA=1")
                 });
 
-            Drive {
+            let drive = Drive {
                 device_path: device.path,
                 mount_path: device.mountpoint,
                 display_name,
@@ -94,12 +102,84 @@ pub fn discover_optical_drives() -> Result<Vec<Drive>, MediaEngineError> {
                 media_kind,
                 media_label: clean(device.label),
                 capacity_bytes: device.size.filter(|size| *size > 0),
-            }
+            };
+            (drive, (device_path, udev_properties))
         })
         .collect::<Vec<_>>();
 
-    drives.sort_by(|left, right| left.device_path.cmp(&right.device_path));
+    discovered.sort_by(|left, right| left.0.device_path.cmp(&right.0.device_path));
+    let (drives, udev_snapshots): (Vec<_>, Vec<_>) = discovered.into_iter().unzip();
+    log_drive_snapshot(&drives, &output.stdout, &udev_snapshots);
+
     Ok(drives)
+}
+
+fn log_drive_snapshot(
+    drives: &[Drive],
+    lsblk_output: &[u8],
+    udev_snapshots: &[(PathBuf, Option<String>)],
+) {
+    let changed = LAST_LOGGED_DRIVES
+        .lock()
+        .map(|mut previous| replace_if_changed(&mut previous, drives))
+        .unwrap_or(true);
+    if !changed {
+        log::trace!(
+            target: "media_rip_engine::drive_monitor",
+            "optical drive poll completed; normalized state unchanged, raw payload suppressed"
+        );
+        return;
+    }
+
+    log::debug!(
+        target: "media_rip_engine::drive_monitor",
+        "optical drive state changed: {}",
+        drive_summary(drives)
+    );
+    diagnostics::tool_json("lsblk", "optical drive state change", lsblk_output);
+    for (path, properties) in udev_snapshots {
+        if let Some(properties) = properties {
+            diagnostics::text(
+                "udevadm",
+                &format!(
+                    "device properties after state change for {}",
+                    path.display()
+                ),
+                properties,
+            );
+        }
+    }
+}
+
+fn replace_if_changed(previous: &mut Option<Vec<Drive>>, drives: &[Drive]) -> bool {
+    if previous.as_deref() == Some(drives) {
+        return false;
+    }
+    *previous = Some(drives.to_vec());
+    true
+}
+
+fn drive_summary(drives: &[Drive]) -> String {
+    if drives.is_empty() {
+        return "no optical drives detected".to_owned();
+    }
+    drives
+        .iter()
+        .map(|drive| {
+            format!(
+                "{} present={} kind={} label={:?} mount={}",
+                drive.device_path.display(),
+                drive.media_present,
+                drive.media_kind.display_name(),
+                drive.media_label,
+                drive
+                    .mount_path
+                    .as_deref()
+                    .map_or_else(|| "none".to_owned(), |path| path.display().to_string())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn udev_properties(path: &std::path::Path) -> Option<String> {
@@ -168,6 +248,14 @@ fn join_nonempty<'a>(parts: impl IntoIterator<Item = Option<&'a str>>) -> String
 mod tests {
     use super::*;
 
+    fn test_drive(label: Option<&str>) -> Drive {
+        Drive {
+            media_present: label.is_some(),
+            media_label: label.map(str::to_owned),
+            ..Drive::empty("/dev/sr0", "Test drive")
+        }
+    }
+
     #[test]
     fn identifies_common_inserted_disc_types_from_udev() {
         assert_eq!(
@@ -190,5 +278,17 @@ mod tests {
             media_kind_from_udev("ID_CDROM_MEDIA=1\n"),
             DiscKind::Unknown
         );
+    }
+
+    #[test]
+    fn raw_drive_diagnostics_are_selected_only_when_normalized_state_changes() {
+        let empty = vec![test_drive(None)];
+        let inserted = vec![test_drive(Some("SUPERNATURAL_S4_D5"))];
+        let mut previous = None;
+
+        assert!(replace_if_changed(&mut previous, &empty));
+        assert!(!replace_if_changed(&mut previous, &empty));
+        assert!(replace_if_changed(&mut previous, &inserted));
+        assert!(!replace_if_changed(&mut previous, &inserted));
     }
 }

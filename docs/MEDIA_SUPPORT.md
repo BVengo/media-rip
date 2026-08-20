@@ -5,7 +5,7 @@
 | Ordinary media file | Yes | Yes | Any input that the installed FFmpeg supports |
 | Mounted DVD / `VIDEO_TS` folder | Yes | Yes | Enumerates titles from `VIDEO_TS.IFO` |
 | Raw DVD device | Yes | Yes | Enumerates the title table through `libdvdread` |
-| Mounted Blu-ray / `BDMV` folder | Yes | Yes | Main titles are marked; exact duplicate playlists can be grouped |
+| Mounted Blu-ray / `BDMV` folder | Yes | Yes | Main titles are marked; later exact duplicate playlists identify the first matching playlist and are unselected by default |
 | Raw Blu-ray device | Yes | Yes | Main-title, playlist, chapter, and authored-stream metadata comes from `libbluray` |
 | ISO image | Limited | Limited | Ordinary FFmpeg probing only in this release |
 | Audio CD | Yes | Yes | One file per track; secure re-reading with cdparanoia and local CD-TEXT tagging |
@@ -43,19 +43,34 @@ disc name, authored title names, and local artwork. Mounted discs and disc folde
 TheDiscDB-compatible MD5 fingerprint made from sorted file sizes. Mounted folders and unmounted
 DVD devices with an ISO9660 bridge directory are supported. An exact TheDiscDB hash match can
 name main features, episodes, and extras, but every title mapping must also pass duration/size
-validation. A configured TMDB Read Access Token enriches exact identities with canonical title,
-year, type, and poster artwork; a title-only TMDB result is applied to a movie item only when its
-runtime uniquely identifies one scanned title. Raw Blu-ray devices and DVDs without an
+validation. TheDiscDB and credential-free TVMaze can each be disabled independently; configured TMDB and TVDB credentials enrich exact identities
+with canonical title, year, type, provider IDs, episode data, and poster artwork. The providers are queried concurrently; season-labelled TV searches use a shared conservative probable-title review gate, and matching
+results raise identity confidence; conflicting title-only results are retained as warnings rather
+than applied. A title-only provider result is applied to a movie item only when its runtime uniquely
+identifies one scanned title. Raw Blu-ray devices and DVDs without an
 ISO9660 bridge directory cannot currently be fingerprinted, and community database coverage varies
 by release and region.
 
+An open video disc can be identified explicitly with one public TVMaze show URL or TheTVDB
+series/movie URL. MediaRip validates the provider host, extracts the provider ID or slug, and
+rescans with that exact user-selected identity. A TVDB API key is still required for TheTVDB URLs;
+TVMaze URLs remain credential-free.
+
 For TV DVDs without an exact disc record, an authored label such as `SHOW_S2_D3` can be combined
-with the disc's play-all/title grouping and TMDB season order. These matches remain visibly marked
+with the disc's play-all/title grouping and online season order. TVDB DVD order is preferred when
+available; TMDB and TVMaze fill missing per-episode runtimes only where episode names agree. These matches remain visibly marked
 as probable and separate from title metadata until the user applies one or all of them. Alternate
 authored title groups are retained as separate suggestions instead of being silently discarded.
 Split-volume labels such as `SHOW_S2_VOL2_D3` are retained as distinct evidence: MediaRip estimates
 the total disc count from the season size and episode runtime, then reports any inferred overall
 disc number in the source information panel rather than presenting it as authored fact.
+When the configured providers supply individual episode runtimes, MediaRip scores every consecutive season window
+against the complete authored title group. The comparison normalizes a small consistent timing
+difference (including PAL speed-up) and only replaces the position estimate when the best window is
+clearly separated from the runner-up. Rounded or identical runtimes remain explicitly ambiguous.
+The review row accepts the first episode number for remapping the complete consecutive proposal without another network request;
+accepted shifts are remembered by exact disc-content hash and reapplied when that release is scanned
+again. Long episodes up to two hours can participate when provider season data supports their length.
 
 Audio CD tables of contents are read with `cdparanoia`; embedded CD-TEXT can be read locally with
 `cd-info` and no CDDB network request, or disabled in Settings. Each selected track is securely
