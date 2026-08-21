@@ -39,28 +39,50 @@ impl MainWindow {
         let sidebar = Sidebar::new();
         let working_area = gtk::Paned::new(gtk::Orientation::Horizontal);
         working_area.set_wide_handle(true);
+        working_area.set_margin_top(8);
+        working_area.set_margin_start(8);
+        working_area.set_margin_end(8);
         working_area.set_resize_start_child(true);
         working_area.set_shrink_start_child(true);
-        working_area.set_resize_end_child(false);
+        working_area.set_resize_end_child(true);
         working_area.set_shrink_end_child(false);
         let content_panel = super::components::panel("Content", &content.stack);
         content_panel.set_size_request(420, -1);
         working_area.set_start_child(Some(&content_panel));
         working_area.set_end_child(Some(&sidebar.root));
-        working_area.set_position(690);
+        working_area.set_position(552);
 
         let messages = MessagesPanel::new();
         let main_pane = gtk::Paned::new(gtk::Orientation::Vertical);
         main_pane.set_wide_handle(true);
         main_pane.set_resize_start_child(true);
         main_pane.set_shrink_start_child(false);
-        main_pane.set_resize_end_child(false);
+        main_pane.set_resize_end_child(true);
         main_pane.set_shrink_end_child(false);
         main_pane.set_start_child(Some(&working_area));
         main_pane.set_end_child(Some(&messages.root));
-        main_pane.set_position(280);
+        main_pane.set_position(385);
         main_pane.set_vexpand(true);
         root.append(&main_pane);
+
+        // GtkWidget's allocated width and height are not notifying properties.
+        // Recalculate the pane positions after each actual surface allocation.
+        let working_area_for_layout = working_area.clone();
+        let main_pane_for_layout = main_pane.clone();
+        window.connect_realize(move |window| {
+            let Some(surface) = window.surface() else {
+                return;
+            };
+            schedule_pane_layout(
+                working_area_for_layout.clone(),
+                main_pane_for_layout.clone(),
+            );
+            let working_area = working_area_for_layout.clone();
+            let main_pane = main_pane_for_layout.clone();
+            surface.connect_layout(move |_, _, _| {
+                schedule_pane_layout(working_area.clone(), main_pane.clone());
+            });
+        });
 
         let progress_area = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         progress_area.add_css_class("progress-area");
@@ -133,4 +155,18 @@ impl MainWindow {
         }
         self.status.set_text(message);
     }
+}
+
+fn schedule_pane_layout(working_area: gtk::Paned, main_pane: gtk::Paned) {
+    gtk::glib::idle_add_local_once(move || {
+        let width = working_area.width();
+        if width > 0 {
+            working_area.set_position(width / 2);
+        }
+
+        let height = main_pane.height();
+        if height > 0 {
+            main_pane.set_position((height as f64 * 0.70) as i32);
+        }
+    });
 }

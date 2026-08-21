@@ -90,19 +90,16 @@ impl SettingsDialog {
         dialog.add_css_class("settings-dialog");
         dialog.add_button(&translate("Cancel"), gtk::ResponseType::Cancel);
         dialog.add_button(&translate("Apply"), gtk::ResponseType::Accept);
+        crate::ui::space_dialog_actions(
+            &dialog,
+            &[gtk::ResponseType::Cancel, gtk::ResponseType::Accept],
+        );
         dialog.set_default_response(gtk::ResponseType::Accept);
-        let cancel_button = dialog
-            .widget_for_response(gtk::ResponseType::Cancel)
-            .and_then(|widget| widget.downcast::<gtk::Button>().ok())
-            .expect("dialog cancel response should be a button");
-        cancel_button.add_css_class("settings-dialog-action");
         let apply_button = dialog
             .widget_for_response(gtk::ResponseType::Accept)
             .and_then(|widget| widget.downcast::<gtk::Button>().ok())
             .expect("dialog accept response should be a button");
         apply_button.add_css_class("suggested-action");
-        apply_button.add_css_class("settings-dialog-action");
-        apply_button.add_css_class("settings-dialog-primary-action");
         apply_button.set_sensitive(false);
 
         let (root, form) = SettingsForm::build(&dialog, settings, apply_button);
@@ -880,6 +877,9 @@ impl SettingsForm {
                 navigation.append(&navigation_group("SYSTEM"));
             }
 
+            // Preserve a readable form width on large displays. The navigation
+            // remains anchored while each settings page is centred in its pane.
+            page.set_halign(gtk::Align::Center);
             let scroller = gtk::ScrolledWindow::builder()
                 .hscrollbar_policy(gtk::PolicyType::Never)
                 .vscrollbar_policy(gtk::PolicyType::Automatic)
@@ -1296,8 +1296,7 @@ fn setting_row(title: &str, subtitle: &str, control: &impl IsA<gtk::Widget>) -> 
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 18);
     row.add_css_class("settings-row");
     let labels = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    labels.set_hexpand(true);
-    labels.set_size_request(0, -1);
+    labels.set_size_request(280, -1);
     let title = gtk::Label::new(Some(&translate(title)));
     title.set_xalign(0.0);
     title.set_wrap(true);
@@ -1312,8 +1311,15 @@ fn setting_row(title: &str, subtitle: &str, control: &impl IsA<gtk::Widget>) -> 
     labels.append(&title);
     labels.append(&subtitle);
     row.append(&labels);
+
+    // Keep controls beside their labels instead of pushing them to the far edge
+    // when a settings window is maximised.
+    let control_column = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    control_column.set_size_request(328, -1);
+    control_column.set_halign(gtk::Align::Start);
     control.set_valign(gtk::Align::Center);
-    row.append(control);
+    control_column.append(control);
+    row.append(&control_column);
     row
 }
 

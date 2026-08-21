@@ -21,7 +21,6 @@ impl Sidebar {
     pub fn new() -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
         root.set_size_request(400, -1);
-        root.set_margin_end(8);
 
         let info = InfoPanel::new();
 

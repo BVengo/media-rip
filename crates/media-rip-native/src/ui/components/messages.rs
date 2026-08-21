@@ -28,6 +28,9 @@ impl MessagesPanel {
             .child(&view)
             .build();
         let root = super::panel("Messages", &scroll);
+        root.set_margin_start(8);
+        root.set_margin_end(8);
+        root.set_margin_bottom(8);
         Self { root, view, buffer }
     }
 

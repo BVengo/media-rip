@@ -1,3 +1,4 @@
+mod about;
 mod controller;
 mod notifications;
 mod settings;

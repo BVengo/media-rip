@@ -20,6 +20,15 @@ window scrollbar.horizontal slider {
   border-bottom: 1px solid @borders;
 }
 
+popover.menu contents {
+  padding: 2px;
+}
+
+popover.menu modelbutton {
+  min-height: 0;
+  padding: 6px 10px;
+}
+
 .main-toolbar {
   min-height: 45px;
   padding: 3px 7px;
@@ -287,14 +296,6 @@ window scrollbar.horizontal slider {
   min-height: 550px;
   background-color: @theme_base_color;
   color: @theme_text_color;
-}
-
-.settings-dialog-action {
-  margin-bottom: 12px;
-}
-
-.settings-dialog-primary-action {
-  margin-right: 12px;
 }
 
 .settings-sidebar {

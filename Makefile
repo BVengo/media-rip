@@ -1,4 +1,4 @@
-.PHONY: check test run release fmt lint
+.PHONY: check test run release fmt lint notices
 
 # 'help' uses inline ## for descriptions, and ##@ for sections
 help: ## Show the available targets.
@@ -14,6 +14,9 @@ endif
 
 release:
 	cargo build --release -p media-rip
+
+notices: ## Regenerate third-party Rust dependency notices with cargo-about.
+	cargo about generate --config about.toml --workspace --locked --fail --output-file THIRD_PARTY_NOTICES.txt packaging/third-party-notices.hbs
 
 check: ## Check for any errors
 	cargo check --workspace

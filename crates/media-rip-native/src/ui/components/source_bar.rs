@@ -17,6 +17,8 @@ impl SourceBar {
         root.add_css_class("source-strip");
 
         let source_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        source_row.set_halign(gtk::Align::Start);
+        source_row.set_size_request(820, -1);
 
         let label = gtk::Label::new(Some("Source"));
         label.add_css_class("source-label");
@@ -35,6 +37,8 @@ impl SourceBar {
         root.append(&source_row);
 
         let metadata_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        metadata_row.set_halign(gtk::Align::Start);
+        metadata_row.set_size_request(820, -1);
         metadata_row.set_visible(false);
         let metadata_label = gtk::Label::new(Some("Metadata link"));
         metadata_label.add_css_class("source-label");

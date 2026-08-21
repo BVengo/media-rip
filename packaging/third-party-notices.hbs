@@ -1,0 +1,40 @@
+MediaRip third-party software notices
+=====================================
+
+This file lists the copyright and licence terms for Rust packages incorporated
+into the MediaRip Linux executable. MediaRip's own licence is in LICENSE.
+
+System dependencies
+-------------------
+
+MediaRip dynamically links to GTK 4 (LGPL-2.1-or-later), GdkPixbuf
+(LGPL-2.1-or-later), libdvdread (GPL-2.0-or-later), and libbluray
+(LGPL-2.1-only). It invokes separately installed FFmpeg/FFprobe, cdparanoia,
+cd-info, lsblk, udevadm, and eject programs. These components are not bundled
+in the MediaRip repository or executable. Distributors that bundle them must
+include the licence and corresponding-source material required by the exact
+versions and builds they distribute. FFmpeg's effective licence depends on
+its build configuration.
+
+Trademark asset
+---------------
+
+The TMDB logo in crates/media-rip-native/assets/tmdb.svg is an approved logo
+provided by The Movie Database. It remains subject to TMDB's branding terms
+and is not offered under MediaRip's GPL licence. TMDB does not endorse or
+certify MediaRip.
+
+{{#each licenses}}
+{{#if used_by.[0].crate.source}}
+-------------------------------------------------------------------------------
+{{name}}
+
+Used by:
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}{{#if crate.repository}} ({{crate.repository}}){{/if}}
+{{/each}}
+
+{{{text}}}
+
+{{/if}}
+{{/each}}

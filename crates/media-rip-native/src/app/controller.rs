@@ -1923,16 +1923,7 @@ impl Controller {
     }
 
     fn show_about(&self) {
-        let dialog = gtk::AboutDialog::builder()
-            .transient_for(&self.ui.window)
-            .modal(true)
-            .program_name("MediaRip")
-            .version(env!("CARGO_PKG_VERSION"))
-            .comments("An optical media ripper and transcoder.")
-            .license_type(gtk::License::Gpl30)
-            .build();
-        dialog.set_authors(&["MediaRip contributors"]);
-        dialog.present();
+        super::about::present(&self.ui.window);
     }
 
     fn show_error(&self, title: &str, detail: &str) {
@@ -1952,6 +1943,7 @@ impl Controller {
             .text(title)
             .secondary_text(detail)
             .build();
+        crate::ui::space_dialog_actions(&dialog, &[gtk::ResponseType::Ok]);
         dialog.connect_response(|dialog, _| dialog.close());
         dialog.present();
     }
@@ -2350,6 +2342,7 @@ fn update_season_tags(tags: &mut [media_rip_core::MediaTag], season: u32) {
     }
 }
 
+#[cfg(test)]
 fn set_suggestion_season(
     catalog: &mut media_rip_core::MediaCatalog,
     requested_season: u32,
