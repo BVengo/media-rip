@@ -2005,6 +2005,52 @@ fn inferred_episode_range(
     })
 }
 
+fn matching_stream_layout(titles: &[Title], group: &[usize]) -> bool {
+    let signature = |title: &Title| {
+        let mut tracks = title
+            .tracks
+            .iter()
+            .filter(|track| {
+                matches!(
+                    track.kind,
+                    media_rip_core::StreamKind::Audio | media_rip_core::StreamKind::Subtitle
+                )
+            })
+            .map(|track| {
+                let stable_properties = track
+                    .properties
+                    .iter()
+                    // Per-stream durations differ between otherwise identical
+                    // episode layouts and are already compared separately.
+                    .filter(|property| !property.contains(':'))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                (
+                    match track.kind {
+                        media_rip_core::StreamKind::Audio => "audio",
+                        media_rip_core::StreamKind::Subtitle => "subtitle",
+                        _ => unreachable!(),
+                    },
+                    track.codec.clone(),
+                    track.language.clone(),
+                    stable_properties,
+                )
+            })
+            .collect::<Vec<_>>();
+        tracks.sort_unstable();
+        tracks
+    };
+
+    let Some(first) = group.first().map(|index| signature(&titles[*index])) else {
+        return false;
+    };
+    !first.is_empty()
+        && group
+            .iter()
+            .skip(1)
+            .all(|index| signature(&titles[*index]) == first)
+}
+
 fn probable_episode_suggestions(
     titles: &[Title],
     series: &VideoMatch,
@@ -2052,6 +2098,7 @@ fn probable_episode_suggestions(
             }
         }
     }
+    let has_authored_play_all_group = !groups.is_empty();
     if groups.is_empty() {
         let candidates = titles
             .iter()
@@ -2072,9 +2119,19 @@ fn probable_episode_suggestions(
     let Some(median_runtime) = runtimes.get(runtimes.len() / 2).copied() else {
         return ProbableSuggestions::default();
     };
-    let episodes_per_disc = (180 * 60_000 / median_runtime).clamp(2, 8) as u32;
     let episode_count = episodes.len() as u32;
     let group_size = groups.first().map_or(0, Vec::len) as u32;
+    let fallback_episodes_per_disc = (180 * 60_000 / median_runtime).clamp(2, 8) as u32;
+    let episodes_per_disc = if has_authored_play_all_group {
+        // A short authored group may be the partially filled final disc. It
+        // proves how many titles are on this disc, but not the package's usual
+        // disc capacity. A larger group disproves the generic estimate.
+        group_size.max(fallback_episodes_per_disc)
+    } else {
+        fallback_episodes_per_disc
+    };
+    let uses_capacity_fallback =
+        !has_authored_play_all_group || group_size < fallback_episodes_per_disc;
     let Some(mut range) =
         inferred_episode_range(episode_count, episodes_per_disc, group_size, hint)
     else {
@@ -2088,18 +2145,27 @@ fn probable_episode_suggestions(
             ..Default::default()
         };
     };
+    if has_authored_play_all_group {
+        range.count = group_size.min(episode_count.saturating_sub(range.first.saturating_sub(1)));
+    }
     let positional_first = range.first;
     let alignment = groups
         .first()
         .and_then(|group| runtime_alignment(titles, group, episodes, positional_first));
     if let Some(alignment) = alignment {
         range.first = alignment.first;
-        range.count = range
-            .count
-            .min(episode_count.saturating_sub(range.first).saturating_add(1));
+        let available = episode_count.saturating_sub(range.first).saturating_add(1);
+        range.count = if has_authored_play_all_group {
+            group_size.min(available)
+        } else {
+            range.count.min(available)
+        };
     }
     let volume_aware = hint.volume.is_some();
-    let confidence = match (groups.len(), volume_aware, alignment.is_some()) {
+    let stream_layout_matches = groups
+        .first()
+        .is_some_and(|group| matching_stream_layout(titles, group));
+    let base_confidence = match (groups.len(), volume_aware, alignment.is_some()) {
         // Volume labels do not encode the total number of volumes, so these
         // must remain visibly less confident than a disc-only sequence.
         (1, true, true) => 76,
@@ -2111,6 +2177,7 @@ fn probable_episode_suggestions(
         (_, true, false) => 54,
         (_, false, false) => 58,
     };
+    let confidence = base_confidence + u8::from(stream_layout_matches) * 6;
     let provider_label = series.providers.join(" + ");
     let method = match (groups.len(), volume_aware, alignment.is_some()) {
         (1, true, true) => {
@@ -2156,13 +2223,35 @@ fn probable_episode_suggestions(
             "Detected {} probable authored episode group(s); the first contains {group_size} title(s)",
             groups.len()
         ),
-        format!(
-            "Median candidate runtime is about {} minutes, producing an estimate of {} episode(s) per disc and {} disc(s) for the season",
+    ];
+    if has_authored_play_all_group {
+        evidence.push(format!(
+            "The authored play-all group contains {group_size} complete episode title(s); this direct disc evidence is used instead of a generic capacity estimate"
+        ));
+        if uses_capacity_fallback {
+            evidence.push(format!(
+                "Because this may be a partially filled final disc, a 180-minute fallback is used only to estimate the package position and {} total disc(s); it does not cap this disc's {group_size} titles",
+                range.estimated_total_discs
+            ));
+        } else {
+            evidence.push(format!(
+                "Using the observed group size produces an estimate of {} disc(s) for the season",
+                range.estimated_total_discs
+            ));
+        }
+    } else {
+        evidence.push(format!(
+            "Median candidate runtime is about {} minutes; without an authored play-all group, a 180-minute fallback estimates {} episode(s) per disc and {} disc(s) for the season",
             median_runtime / 60_000,
             episodes_per_disc,
             range.estimated_total_discs
-        ),
-    ];
+        ));
+    }
+    if stream_layout_matches {
+        evidence.push(format!(
+            "All {group_size} candidate titles have the same audio/subtitle codec, language, and channel layout"
+        ));
+    }
     if let Some(alignment) = alignment {
         evidence.push(format!(
             "Compared {0} DVD title runtimes with every consecutive {0}-episode {provider_label} window; S{1:02}E{2:02} was the unique best fit (mean adjusted error about {3} seconds, timing scale {4:.1}%)",
@@ -2203,10 +2292,12 @@ fn probable_episode_suggestions(
     }
     let mut assumptions = vec![
         format!("Episode-like titles follow the authored playback order and {provider_label} episode order"),
-        "A video DVD holds about 180 minutes of episode content".to_owned(),
         "Episodes are distributed as evenly as possible, with earlier groups receiving any remainder"
             .to_owned(),
     ];
+    if uses_capacity_fallback {
+        assumptions.push("A video DVD holds about 180 minutes of episode content".to_owned());
+    }
     if let (Some(volume), Some(discs_in_volume)) = (hint.volume, range.estimated_discs_in_volume) {
         assumptions.insert(
             0,
@@ -2891,6 +2982,111 @@ mod tests {
             titles
                 .iter_mut()
                 .all(|title| title.video_metadata.is_none())
+        );
+    }
+
+    #[test]
+    fn authored_five_episode_group_overrides_generic_dvd_capacity() {
+        use media_rip_core::{StreamKind, Track};
+
+        let episode_durations = [2_430_840, 2_435_240, 2_433_640, 2_435_840, 2_439_440];
+        let mut titles = Vec::new();
+        let mut play_all = title("Play all", false);
+        play_all.duration_ms = episode_durations.iter().sum();
+        titles.push(play_all);
+        for (index, duration) in episode_durations.into_iter().enumerate() {
+            let mut episode = title(&format!("Title {}", index + 2), false);
+            episode.id = index as u32 + 1;
+            episode.duration_ms = duration;
+            episode.chapters = vec![
+                Chapter {
+                    index: 1,
+                    start_ms: 0,
+                    end_ms: duration / 2,
+                    name: None,
+                },
+                Chapter {
+                    index: 2,
+                    start_ms: duration / 2,
+                    end_ms: duration,
+                    name: None,
+                },
+            ];
+            episode.tracks = vec![
+                Track {
+                    index: 1,
+                    kind: StreamKind::Audio,
+                    codec: "AC3".to_owned(),
+                    codec_long_name: None,
+                    language: Some("eng".to_owned()),
+                    name: None,
+                    properties: vec!["5.1(side)".to_owned(), "40:31".to_owned()],
+                    selected: true,
+                },
+                Track {
+                    index: 2,
+                    kind: StreamKind::Subtitle,
+                    codec: "DVD_SUBTITLE".to_owned(),
+                    codec_long_name: None,
+                    language: Some("eng".to_owned()),
+                    name: None,
+                    properties: Vec::new(),
+                    selected: true,
+                },
+            ];
+            titles.push(episode);
+        }
+        let series = VideoMatch {
+            providers: vec!["TMDB"],
+            media_type: MediaType::Tv,
+            title: "Gossip Girl".into(),
+            year: Some(2007),
+            runtime_minutes: Some(42),
+            tmdb_id: Some(13_983),
+            tvdb_id: None,
+            tvmaze_id: None,
+        };
+        let episodes = (1..=22)
+            .map(|episode_number| VideoEpisode {
+                episode_number,
+                name: format!("Episode {episode_number}"),
+                runtime: Some(42),
+            })
+            .collect::<Vec<_>>();
+
+        let probable = probable_episode_suggestions(
+            &titles,
+            &series,
+            &episodes,
+            DiscHint {
+                season: 4,
+                volume: None,
+                disc: 1,
+            },
+        );
+
+        assert_eq!(probable.suggestions.len(), 5);
+        assert_eq!(
+            probable
+                .suggestions
+                .iter()
+                .map(|suggestion| suggestion.metadata.episode)
+                .collect::<Vec<_>>(),
+            [Some(1), Some(2), Some(3), Some(4), Some(5)]
+        );
+        let first = &probable.suggestions[0];
+        assert_eq!(first.metadata.attribution.confidence_percent, 74);
+        assert!(
+            first
+                .evidence
+                .iter()
+                .any(|evidence| evidence.contains("same audio/subtitle"))
+        );
+        assert!(
+            first
+                .assumptions
+                .iter()
+                .all(|assumption| !assumption.contains("180 minutes"))
         );
     }
 

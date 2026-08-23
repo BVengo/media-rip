@@ -61,9 +61,13 @@ with the disc's play-all/title grouping and online season order. TVDB DVD order 
 available; TMDB and TVMaze fill missing per-episode runtimes only where episode names agree. These matches remain visibly marked
 as probable and separate from title metadata until the user applies one or all of them. Alternate
 authored title groups are retained as separate suggestions instead of being silently discarded.
-Split-volume labels such as `SHOW_S2_VOL2_D3` are retained as distinct evidence: MediaRip estimates
-the total disc count from the season size and episode runtime, then reports any inferred overall
-disc number in the source information panel rather than presenting it as authored fact.
+Split-volume labels such as `SHOW_S2_VOL2_D3` are retained as distinct evidence. An authored
+play-all group determines how many episodes are present on that disc and is never capped by the
+generic 180-minute DVD estimate. That estimate remains a package-position fallback when no authored
+group exists or the current group may be a partially filled final disc. MediaRip reports any
+inferred overall disc number in the source information panel rather than presenting it as authored
+fact. Matching audio/subtitle codec, language, and channel layouts add supporting evidence without
+being required on every release.
 When the configured providers supply individual episode runtimes, MediaRip scores every consecutive season window
 against the complete authored title group. The comparison normalizes a small consistent timing
 difference (including PAL speed-up) and only replaces the position estimate when the best window is

@@ -473,8 +473,8 @@ impl InfoPanel {
                 InfoField::new("Current name", &title.name),
                 InfoField::new("Proposed name", &suggestion.name),
                 InfoField::new(
-                    "Confidence",
-                    format!("{}%", suggestion.metadata.attribution.confidence_percent),
+                    "Match score",
+                    format!("{}/100", suggestion.metadata.attribution.confidence_percent),
                 ),
                 InfoField::new("Method", &suggestion.metadata.attribution.match_method),
             ];
@@ -506,8 +506,8 @@ impl InfoPanel {
                 InfoField::new("Name", &title.name),
                 InfoField::new("Metadata source", &metadata.attribution.provider),
                 InfoField::new(
-                    "Confidence",
-                    format!("{}%", metadata.attribution.confidence_percent),
+                    "Match score",
+                    format!("{}/100", metadata.attribution.confidence_percent),
                 ),
                 InfoField::new("Method", &metadata.attribution.match_method),
             ];

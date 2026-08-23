@@ -486,7 +486,7 @@ fn title_row(
         let suggestion_line = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         let confidence = suggestion.metadata.attribution.confidence_percent;
         let label = gtk::Label::new(Some(&format!(
-            "Suggested: {} ({confidence}% probable)",
+            "Suggested: {} (match score {confidence}/100)",
             suggestion.name
         )));
         label.set_xalign(0.0);
