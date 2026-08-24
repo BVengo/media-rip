@@ -1,4 +1,7 @@
-use std::{collections::BTreeSet, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use media_rip_core::{
     Drive, MediaCatalog, OutputProfile, VideoEpisodeChoice, VideoMetadata, ports::CancellationToken,
@@ -34,6 +37,14 @@ pub(crate) struct EpisodeMetadataContext {
     pub choices: Vec<VideoEpisodeChoice>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct VideoMetadataBackup {
+    pub name: String,
+    pub output_file: String,
+    pub tags: Vec<media_rip_core::MediaTag>,
+    pub metadata: Option<VideoMetadata>,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct AppState {
     pub catalog: Option<MediaCatalog>,
@@ -50,6 +61,7 @@ pub(crate) struct AppState {
     pub auto_read_armed: bool,
     pub episode_metadata: Option<EpisodeMetadataContext>,
     pub pending_suggestion_season: Option<u32>,
+    pub video_metadata_backups: BTreeMap<u32, VideoMetadataBackup>,
 }
 
 impl AppState {

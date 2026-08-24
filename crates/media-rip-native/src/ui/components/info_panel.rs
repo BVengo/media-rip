@@ -16,6 +16,10 @@ pub(crate) enum InfoAction {
         title_id: u32,
         episode: u32,
     },
+    SetEpisodeSeason(u32),
+    RemoveVideoMetadata {
+        title_id: u32,
+    },
     SetTitleName {
         title_id: u32,
         name: String,
@@ -514,8 +518,17 @@ impl InfoPanel {
             append_video_metadata_fields(&mut fields, metadata);
             self.metadata_content.append(&fields_grid(&fields));
             if let Some(context) = episode_metadata {
-                self.append_episode_assignment(catalog, title_id, context, on_action);
+                self.append_episode_assignment(catalog, title_id, context, on_action.clone());
             }
+            let remove = gtk::Button::with_label("Remove metadata");
+            remove.set_halign(gtk::Align::Start);
+            remove.set_tooltip_text(Some(
+                "Undo the applied metadata and restore the previous name, tags, and output file",
+            ));
+            remove.connect_clicked(move |_| {
+                on_action(InfoAction::RemoveVideoMetadata { title_id });
+            });
+            self.metadata_content.append(&remove);
         } else if let Some(context) = episode_metadata {
             let fields = [InfoField::new(
                 "Status",
@@ -540,6 +553,29 @@ impl InfoPanel {
         if context.choices.is_empty() {
             return;
         }
+        let season_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        season_row.add_css_class("episode-assignment-row");
+        season_row.append(&gtk::Label::new(Some("Season")));
+        let season = gtk::Entry::builder()
+            .text(context.metadata.season.unwrap_or_default().to_string())
+            .width_chars(4)
+            .max_width_chars(4)
+            .input_purpose(gtk::InputPurpose::Number)
+            .build();
+        let load = gtk::Button::with_label("Load season");
+        let selected_season = season.clone();
+        let callback = on_action.clone();
+        load.connect_clicked(move |_| {
+            if let Ok(season) = selected_season.text().trim().parse::<u32>()
+                && season > 0
+            {
+                callback(InfoAction::SetEpisodeSeason(season));
+            }
+        });
+        season_row.append(&season);
+        season_row.append(&load);
+        self.metadata_content.append(&season_row);
+
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         row.add_css_class("episode-assignment-row");
         let names = context

@@ -664,7 +664,7 @@ pub(crate) fn enrich_video(
         .as_ref()
         .and_then(|matched| matched.metadata_url.as_deref())
         .and_then(|url| parse_video_metadata_link(url).ok());
-    let previous_hint = options.previous_dvd_match.as_ref().and_then(|matched| {
+    let mut previous_hint = options.previous_dvd_match.as_ref().and_then(|matched| {
         Some(DiscHint {
             season: matched.season?,
             volume: None,
@@ -691,6 +691,45 @@ pub(crate) fn enrich_video(
         );
         previous_fallback_used =
             !provider_lookups_empty(&tmdb_lookup, &tvdb_lookup, &tvmaze_lookup);
+    }
+    let mut previous_season_rolled_over = false;
+    if previous_fallback_used
+        && let Some(previous) = options.previous_dvd_match.as_ref()
+        && let (Some(season), Some(next_episode)) = (previous.season, previous.next_episode)
+    {
+        let last_episode = [&tmdb_lookup, &tvdb_lookup, &tvmaze_lookup]
+            .into_iter()
+            .filter_map(|lookup| lookup.as_ref().ok().and_then(Option::as_ref))
+            .flat_map(|lookup| &lookup.episodes)
+            .map(|episode| episode.episode_number)
+            .max();
+        if last_episode.is_some_and(|last| next_episode > last)
+            && let Some(next_season) = season.checked_add(1)
+        {
+            let next_hint = DiscHint {
+                season: next_season,
+                volume: None,
+                disc: 1,
+            };
+            log::debug!(
+                target: "media_rip_engine::metadata_decision",
+                "previous DVD completed season {season} at episode {last_episode:?}; trying season {next_season}"
+            );
+            let next_lookups = parallel_provider_lookups(
+                options,
+                &cache,
+                cancellation,
+                &previous.title,
+                Some(next_hint),
+                None,
+                previous_link.as_ref(),
+            );
+            if !provider_lookups_empty(&next_lookups.0, &next_lookups.1, &next_lookups.2) {
+                (tmdb_lookup, tvdb_lookup, tvmaze_lookup) = next_lookups;
+                previous_hint = Some(next_hint);
+                previous_season_rolled_over = true;
+            }
+        }
     }
     let provider_lookup_report = [
         provider_lookup_report(
@@ -802,6 +841,7 @@ pub(crate) fn enrich_video(
                 result.suggestions = probable.suggestions;
                 result.disc_identity = probable.disc_identity;
                 if previous_fallback_used
+                    && !previous_season_rolled_over
                     && let Some(first) = options
                         .previous_dvd_match
                         .as_ref()
@@ -2145,9 +2185,10 @@ fn probable_episode_suggestions(
             ..Default::default()
         };
     };
-    if has_authored_play_all_group {
-        range.count = group_size.min(episode_count.saturating_sub(range.first.saturating_sub(1)));
-    }
+    // The number of episode-like titles observed on this disc is direct
+    // evidence. Capacity and package partition estimates determine position,
+    // but must never discard an otherwise valid title from the proposal set.
+    range.count = group_size.min(episode_count.saturating_sub(range.first.saturating_sub(1)));
     let positional_first = range.first;
     let alignment = groups
         .first()
@@ -2155,11 +2196,7 @@ fn probable_episode_suggestions(
     if let Some(alignment) = alignment {
         range.first = alignment.first;
         let available = episode_count.saturating_sub(range.first).saturating_add(1);
-        range.count = if has_authored_play_all_group {
-            group_size.min(available)
-        } else {
-            range.count.min(available)
-        };
+        range.count = group_size.min(available);
     }
     let volume_aware = hint.volume.is_some();
     let stream_layout_matches = groups
@@ -3087,6 +3124,76 @@ mod tests {
                 .assumptions
                 .iter()
                 .all(|assumption| !assumption.contains("180 minutes"))
+        );
+    }
+
+    #[test]
+    fn six_observed_episode_titles_are_not_capped_by_capacity_estimate() {
+        let mut titles = (0..6)
+            .map(|index| {
+                let duration = 42 * 60_000 + index * 1_000;
+                let mut episode = title(&format!("Title {}", index + 1), false);
+                episode.id = index as u32;
+                episode.duration_ms = duration;
+                episode.chapters = vec![
+                    Chapter {
+                        index: 1,
+                        start_ms: 0,
+                        end_ms: duration / 2,
+                        name: None,
+                    },
+                    Chapter {
+                        index: 2,
+                        start_ms: duration / 2,
+                        end_ms: duration,
+                        name: None,
+                    },
+                ];
+                episode
+            })
+            .collect::<Vec<_>>();
+        let series = VideoMatch {
+            providers: vec!["TMDB"],
+            media_type: MediaType::Tv,
+            title: "Example Show".into(),
+            year: Some(2020),
+            runtime_minutes: Some(42),
+            tmdb_id: Some(1),
+            tvdb_id: None,
+            tvmaze_id: None,
+        };
+        let episodes = (1..=24)
+            .map(|episode_number| VideoEpisode {
+                episode_number,
+                name: format!("Episode {episode_number}"),
+                runtime: None,
+            })
+            .collect::<Vec<_>>();
+
+        let probable = probable_episode_suggestions(
+            &titles,
+            &series,
+            &episodes,
+            DiscHint {
+                season: 1,
+                volume: None,
+                disc: 1,
+            },
+        );
+
+        assert_eq!(probable.suggestions.len(), 6);
+        assert_eq!(
+            probable
+                .suggestions
+                .iter()
+                .filter_map(|suggestion| suggestion.metadata.episode)
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5, 6]
+        );
+        assert!(
+            titles
+                .iter_mut()
+                .all(|title| title.video_metadata.is_none())
         );
     }
 

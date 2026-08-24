@@ -700,7 +700,7 @@ fn tv_title_preferences(
 }
 
 impl SelectionSettings {
-    fn selects_track(&self, track: &Track) -> bool {
+    pub(crate) fn selects_track(&self, track: &Track) -> bool {
         let forced = track
             .properties
             .iter()
