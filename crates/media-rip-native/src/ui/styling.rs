@@ -42,11 +42,142 @@ popover.menu modelbutton {
   padding: 2px;
 }
 
-.source-strip {
-  padding: 5px 9px;
-  background-color: @theme_bg_color;
-  color: @theme_fg_color;
+.workflow-bar {
+  padding: 0;
+  background-color: alpha(@theme_bg_color, 0.7);
   border-bottom: 1px solid @borders;
+}
+
+.workflow-button {
+  min-width: 0;
+  min-height: 40px;
+  padding: 3px 12px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.workflow-button:hover {
+  background-color: alpha(@theme_selected_bg_color, 0.10);
+}
+
+.workflow-button.active {
+  background-color: alpha(@theme_selected_bg_color, 0.16);
+  box-shadow: inset 0 -3px @theme_selected_bg_color;
+}
+
+.workflow-stage {
+  padding: 0 4px;
+}
+
+.workflow-number {
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  border-radius: 999px;
+  color: @theme_selected_fg_color;
+  background-color: @theme_selected_bg_color;
+  font-weight: 700;
+}
+
+.workflow-page {
+  padding: 10px;
+  background-color: @theme_base_color;
+  color: @theme_text_color;
+}
+
+.source-picker {
+  min-width: 620px;
+  padding: 24px;
+}
+
+.source-select {
+  min-height: 42px;
+}
+
+.source-select button {
+  min-height: 40px;
+  padding: 4px 12px;
+  background-color: @theme_base_color;
+  color: @theme_text_color;
+}
+
+.source-identify-button {
+  min-height: 82px;
+  padding: 10px 18px;
+}
+
+.source-identify-title {
+  font-size: 1.12em;
+  font-weight: 700;
+}
+
+.source-identify-detail {
+  color: alpha(currentColor, 0.78);
+  font-size: 0.92em;
+}
+
+.identification-row {
+  padding-top: 12px;
+  border-top: 1px solid alpha(@borders, 0.7);
+}
+
+.metadata-workspace,
+.output-review {
+  min-height: 180px;
+}
+
+.metadata-controls,
+.metadata-actions {
+  min-height: 44px;
+  padding: 6px 10px;
+  background-color: @theme_bg_color;
+}
+
+.metadata-controls {
+  border-bottom: 1px solid @borders;
+}
+
+.metadata-actions {
+  border-top: 1px solid @borders;
+}
+
+.metadata-scroll {
+  margin-right: 4px;
+}
+
+.inline-empty-state {
+  min-height: 150px;
+  padding: 20px;
+}
+
+.workflow-card-title {
+  font-size: 1.15em;
+  font-weight: 700;
+}
+
+.output-layout {
+  background-color: @theme_base_color;
+  border: 1px solid @borders;
+  border-radius: 6px;
+}
+
+.output-config {
+  background-color: @theme_bg_color;
+  border-radius: 0 5px 5px 0;
+}
+
+.output-layout > separator {
+  min-width: 1px;
+  background-color: @borders;
+}
+
+.output-actions {
+  padding: 12px;
+  border-top: 1px solid @borders;
+  background-color: @theme_bg_color;
+  border-radius: 0 0 5px 0;
 }
 
 .source-label {
@@ -72,6 +203,7 @@ popover.menu modelbutton {
   color: @theme_fg_color;
   background-color: @theme_bg_color;
   border-bottom: 1px solid @borders;
+  border-radius: 4px 4px 0 0;
 }
 
 .panel-tabs {
@@ -79,6 +211,7 @@ popover.menu modelbutton {
   padding: 2px 5px;
   background-color: @theme_bg_color;
   border-bottom: 1px solid @borders;
+  border-radius: 4px 4px 0 0;
 }
 
 .panel-tabs button {
@@ -268,11 +401,100 @@ popover.menu modelbutton {
   color: @theme_text_color;
 }
 
+.activity-panel {
+  margin-bottom: 4px;
+  border: 1px solid @borders;
+  border-radius: 5px;
+}
+
+.activity-toggle {
+  min-height: 30px;
+  margin: 4px;
+  padding: 3px 9px;
+  font-weight: 600;
+}
+
 .progress-area {
-  padding: 7px 10px;
+  padding: 5px 10px;
   background-color: @theme_bg_color;
   color: @theme_fg_color;
   border-top: 1px solid @borders;
+}
+
+.preflight-title {
+  font-size: 1.25em;
+  font-weight: 700;
+}
+
+.preflight-warning {
+  padding: 8px 10px;
+  color: @warning_color;
+  background-color: alpha(@warning_color, 0.09);
+  border: 1px solid alpha(@warning_color, 0.35);
+  border-radius: 5px;
+}
+
+.preflight-files {
+  border: 1px solid @borders;
+  border-radius: 6px;
+  background-color: @theme_base_color;
+}
+
+.preflight-file-row {
+  padding: 8px 10px;
+  border-bottom: 1px solid alpha(@borders, 0.55);
+}
+
+.preflight-file-row:last-child {
+  border-bottom: 0;
+}
+
+.preflight-file-row:first-child {
+  border-radius: 5px 5px 0 0;
+}
+
+.preflight-file-row:last-child {
+  border-radius: 0 0 5px 5px;
+}
+
+.preflight-file-row:only-child {
+  border-radius: 5px;
+}
+
+.output-review {
+  padding: 12px;
+  background-color: @theme_base_color;
+  border-radius: 5px 0 0 5px;
+}
+
+.output-job {
+  padding: 10px 12px;
+  border: 1px solid @borders;
+  border-radius: 6px;
+  background-color: @theme_bg_color;
+}
+
+.output-job-status {
+  font-weight: 700;
+}
+
+.output-file-status {
+  color: alpha(@theme_text_color, 0.78);
+  font-size: 0.92em;
+}
+
+.output-file-complete {
+  background-color: alpha(@success_color, 0.08);
+}
+
+.output-cancel {
+  min-height: 28px;
+  padding: 2px 10px;
+}
+
+.metadata-review-row {
+  padding: 9px 10px;
+  border-bottom: 1px solid alpha(@borders, 0.55);
 }
 
 .status-bar {
@@ -381,6 +603,7 @@ popover.menu modelbutton {
   padding: 13px 16px 11px;
   border-bottom: 1px solid alpha(@borders, 0.75);
   background-color: alpha(@theme_selected_bg_color, 0.055);
+  border-radius: 8px 8px 0 0;
 }
 
 .settings-section-title {
@@ -406,6 +629,7 @@ popover.menu modelbutton {
 
 .settings-row:last-child {
   border-bottom: 0;
+  border-radius: 0 0 8px 8px;
 }
 
 .settings-note,

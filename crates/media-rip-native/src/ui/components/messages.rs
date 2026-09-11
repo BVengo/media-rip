@@ -4,6 +4,8 @@ use gtk::prelude::*;
 pub(crate) struct MessagesPanel {
     pub root: gtk::Box,
     pub view: gtk::TextView,
+    toggle: gtk::ToggleButton,
+    revealer: gtk::Revealer,
     buffer: gtk::TextBuffer,
 }
 
@@ -22,16 +24,38 @@ impl MessagesPanel {
             .build();
         view.add_css_class("message-view");
         let scroll = gtk::ScrolledWindow::builder()
-            .min_content_height(88)
+            .min_content_height(120)
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vscrollbar_policy(gtk::PolicyType::Automatic)
             .child(&view)
             .build();
-        let root = super::panel("Messages", &scroll);
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        root.add_css_class("activity-panel");
+        let toggle = gtk::ToggleButton::with_label("Logs");
+        toggle.set_active(false);
+        toggle.set_halign(gtk::Align::Start);
+        toggle.add_css_class("activity-toggle");
+        toggle.set_tooltip_text(Some("Show or hide activity and diagnostic messages"));
+        root.append(&toggle);
+        let revealer = gtk::Revealer::builder()
+            .transition_type(gtk::RevealerTransitionType::SlideDown)
+            .reveal_child(false)
+            .child(&scroll)
+            .build();
+        let controlled_revealer = revealer.clone();
+        toggle.connect_toggled(move |button| {
+            controlled_revealer.set_reveal_child(button.is_active());
+        });
+        root.append(&revealer);
         root.set_margin_start(8);
         root.set_margin_end(8);
-        root.set_margin_bottom(8);
-        Self { root, view, buffer }
+        Self {
+            root,
+            view,
+            toggle,
+            revealer,
+            buffer,
+        }
     }
 
     pub fn append(&self, message: &str) {
@@ -46,5 +70,10 @@ impl MessagesPanel {
 
     pub fn clear(&self) {
         self.buffer.set_text("");
+    }
+
+    pub fn set_revealed(&self, revealed: bool) {
+        self.toggle.set_active(revealed);
+        self.revealer.set_reveal_child(revealed);
     }
 }

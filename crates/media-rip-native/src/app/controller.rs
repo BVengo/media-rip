@@ -13,7 +13,7 @@ use std::{
 use gtk::{gio, glib, prelude::*};
 use media_rip_core::{
     CoverArt, DiscKind, Drive, EngineEvent, LogLevel, MediaEngine, OutputProfile, PreviousDvdMatch,
-    RipRequest, ScanOptions, TrackCoverArt,
+    RipRequest, ScanOptions, TrackCoverArt, VideoMetadataSuggestion,
     ports::CancellationToken,
     util::{ensure_extension, format_bytes, format_duration, format_rate, sanitize_file_name},
 };
@@ -26,7 +26,10 @@ use crate::{
         AppSettings, AppState, BusyState, EpisodeMetadataContext, RememberedDvdMatch, Selection,
         VideoMetadataBackup, notifications::publish_ntfy, settings::format_audio_cd_file_name,
     },
-    ui::{ContentAction, DiscUiState, InfoAction, MainWindow, SettingsDialog, install_styles},
+    ui::{
+        ContentAction, DiscUiState, IdentificationDialog, InfoAction, MainWindow, SettingsDialog,
+        WorkflowStep, install_styles,
+    },
 };
 
 const DRIVE_WATCH_INTERVAL: Duration = Duration::from_secs(2);
@@ -62,6 +65,7 @@ pub fn launch(application: &gtk::Application, initial_source: Option<PathBuf>) {
     };
 
     controller.bind_controls();
+    controller.ui.set_workflow_step(WorkflowStep::Identify);
     controller.install_shortcuts(application);
     controller.bind_window_lifecycle();
     controller.start_event_pump(receiver);
@@ -84,6 +88,17 @@ pub fn launch(application: &gtk::Application, initial_source: Option<PathBuf>) {
 
 impl Controller {
     fn bind_controls(&self) {
+        for (button, step) in [
+            (&self.ui.workflow_identify_button, WorkflowStep::Identify),
+            (&self.ui.workflow_select_button, WorkflowStep::Select),
+            (&self.ui.workflow_metadata_button, WorkflowStep::Metadata),
+            (&self.ui.workflow_output_button, WorkflowStep::Output),
+        ] {
+            let this = self.clone();
+            button.connect_clicked(move |_| {
+                this.ui.set_workflow_step(step);
+            });
+        }
         {
             let this = self.clone();
             self.ui
@@ -124,14 +139,7 @@ impl Controller {
             self.ui
                 .source
                 .identify
-                .connect_clicked(move |_| this.identify_from_metadata_link());
-        }
-        {
-            let this = self.clone();
-            self.ui
-                .source
-                .metadata_url
-                .connect_activate(move |_| this.identify_from_metadata_link());
+                .connect_clicked(move |_| this.show_identification_dialog());
         }
         {
             let this = self.clone();
@@ -487,10 +495,10 @@ impl Controller {
             _ => DiscUiState::Absent,
         };
         let enabled = ready && !busy;
-        self.ui.content.set_disc_state(ui_state, enabled);
+        self.ui.content.set_disc_state(ui_state.clone(), enabled);
+        self.ui.source.set_disc_state(ui_state, enabled);
         self.ui.toolbar.open_disc.set_icon_name(icon);
         self.ui.toolbar.open_disc.set_sensitive(enabled);
-        self.ui.source.open.set_icon_name(icon);
         let open_tooltip = if ready {
             drive
                 .as_ref()
@@ -610,10 +618,36 @@ impl Controller {
                 };
                 catalog.source.path.clone()
             };
+        let backup = self.state.borrow().catalog.clone().map(Box::new);
+        self.state.borrow_mut().reidentification_backup = backup;
         self.ui.messages.append(&format!(
-            "Reading the source again using the selected {provider} metadata link."
+            "Refreshing metadata using the selected {provider} identity."
         ));
         self.start_scan_with_origin(path, true);
+    }
+
+    fn show_identification_dialog(&self) {
+        if self.state.borrow().is_busy() {
+            return;
+        }
+        let current_query = self.ui.source.metadata_url.text().to_string();
+        let identification = IdentificationDialog::new(&self.ui.window, &current_query);
+        identification.query.grab_focus();
+        let dialog = identification.dialog.clone();
+        let this = self.clone();
+        dialog.connect_response(move |dialog, response| {
+            if response == gtk::ResponseType::Accept {
+                this.ui
+                    .source
+                    .metadata_url
+                    .set_text(identification.query.text().trim());
+                dialog.close();
+                this.identify_from_metadata_link();
+            } else {
+                dialog.close();
+            }
+        });
+        dialog.present();
     }
 
     fn start_scan_with_origin(&self, path: PathBuf, user_initiated: bool) {
@@ -630,6 +664,7 @@ impl Controller {
             }
         }
         self.ui.set_busy(true);
+        self.ui.output_review.clear_job();
         self.update_disc_controls();
         self.ui.sidebar.profile_panel.set_visible(false);
         self.ui.progress.set_fraction(0.0);
@@ -680,8 +715,29 @@ impl Controller {
     }
 
     fn start_rip(&self) {
-        if self.state.borrow().is_busy() {
+        let Some(request) = self.prepare_rip_request() else {
             return;
+        };
+        self.begin_rip(request);
+    }
+
+    fn start_automatic_rip(&self) {
+        if let Some(request) = self.prepare_rip_request() {
+            self.begin_rip(request);
+        }
+    }
+
+    fn prepare_rip_request(&self) -> Option<RipRequest> {
+        if self.state.borrow().is_busy() {
+            return None;
+        }
+        if !self.state.borrow().metadata_step_complete {
+            self.show_message(
+                "Finish metadata first",
+                "Review the proposed metadata or choose Skip metadata before reviewing the rip.",
+                gtk::MessageType::Info,
+            );
+            return None;
         }
         let output_text = self.ui.sidebar.output_entry.text().trim().to_owned();
         if output_text.is_empty() {
@@ -689,12 +745,10 @@ impl Controller {
                 "Output folder required",
                 "Choose where the selected output files should be saved.",
             );
-            return;
+            return None;
         }
         let output_directory = PathBuf::from(output_text);
-        let Some(catalog) = self.state.borrow().catalog.clone() else {
-            return;
-        };
+        let catalog = self.state.borrow().catalog.clone()?;
         let output_profile = self.state.borrow().output_profile;
         let request =
             RipRequest::from_catalog_with_profile(catalog, output_directory, false, output_profile);
@@ -703,7 +757,7 @@ impl Controller {
                 "Nothing selected",
                 "Select at least one title and one of its tracks.",
             );
-            return;
+            return None;
         }
         if request
             .selections
@@ -714,9 +768,16 @@ impl Controller {
                 "Title has no selected tracks",
                 "Expand each selected item and select at least one track.",
             );
-            return;
+            return None;
         }
 
+        Some(request)
+    }
+
+    fn begin_rip(&self, request: RipRequest) {
+        if self.state.borrow().is_busy() {
+            return;
+        }
         let token = CancellationToken::default();
         {
             let mut state = self.state.borrow_mut();
@@ -731,7 +792,8 @@ impl Controller {
         self.ui.progress.set_text(Some("0%"));
         self.ui.progress_title.set_text("Preparing selected items");
         self.ui.progress_detail.set_text("");
-        self.ui.set_status("Saving selected items…", None);
+        self.ui.output_review.start_job(&request);
+        self.ui.set_status("Ready", None);
 
         let engine = self.engine.clone();
         let (events, receiver) = mpsc::channel();
@@ -743,7 +805,13 @@ impl Controller {
         if let Some(cancellation) = &self.state.borrow().cancellation {
             cancellation.cancel();
             self.ui.cancel.set_sensitive(false);
-            self.ui.set_status("Cancelling…", None);
+            let ripping = self.state.borrow().busy == BusyState::Ripping;
+            if ripping {
+                self.ui.output_review.set_cancelling();
+                self.ui.set_status("Ready", None);
+            } else {
+                self.ui.set_status("Cancelling…", None);
+            }
             self.ui.messages.append("Cancellation requested.");
         }
     }
@@ -817,7 +885,7 @@ impl Controller {
             EngineEvent::ScanProgress {
                 current_title,
                 title_count,
-                source_title_id,
+                source_title_id: _,
             } => {
                 self.ui.progress.set_fraction(
                     current_title.saturating_sub(1) as f64 / title_count.max(1) as f64,
@@ -825,12 +893,13 @@ impl Controller {
                 self.ui
                     .progress
                     .set_text(Some(&format!("Title {current_title} of {title_count}")));
-                self.ui
-                    .progress_title
-                    .set_text(&format!("Reading title {source_title_id}"));
+                self.ui.progress_title.set_text("Reading source content");
+                self.ui.progress_detail.set_text("");
             }
             EngineEvent::ScanFinished(catalog) => {
                 let mut catalog = *catalog;
+                let reidentification_backup =
+                    self.state.borrow_mut().reidentification_backup.take();
                 if let Some(offset) = catalog_disc_hash(&catalog).and_then(|hash| {
                     self.state
                         .borrow()
@@ -853,7 +922,9 @@ impl Controller {
                 }) {
                     shift_video_suggestion_seasons(&mut catalog, offset);
                 }
-                let output_profile = if catalog.source.kind == media_rip_core::DiscKind::AudioCd {
+                let output_profile = if reidentification_backup.is_some() {
+                    self.state.borrow().output_profile
+                } else if catalog.source.kind == media_rip_core::DiscKind::AudioCd {
                     match self.state.borrow().settings.audio_cd.output_format.as_str() {
                         "wav" => OutputProfile::AudioWav,
                         "opus" => OutputProfile::AudioOpus,
@@ -872,19 +943,28 @@ impl Controller {
                     title.output_file =
                         ensure_extension(&title.output_file, output_profile.extension());
                 }
+                if let Some(previous) = reidentification_backup.as_deref() {
+                    preserve_choices_and_stage_reidentification(&mut catalog, previous);
+                }
                 let audio_only = catalog.titles.iter().all(|title| {
                     title
                         .tracks
                         .iter()
                         .all(|track| track.kind != media_rip_core::StreamKind::Video)
                 });
-                let output = default_output_directory(
-                    &catalog.source.name,
-                    catalog.source.kind,
-                    audio_only,
-                    &self.state.borrow().settings,
+                let output = reidentification_backup.as_ref().map_or_else(
+                    || {
+                        default_output_directory(
+                            &catalog.source.name,
+                            catalog.source.kind,
+                            audio_only,
+                            &self.state.borrow().settings,
+                        )
+                    },
+                    |_| self.state.borrow().output_directory.clone(),
                 );
-                let should_auto_save = catalog.source.drive.is_some()
+                let should_auto_save = reidentification_backup.is_none()
+                    && catalog.source.drive.is_some()
                     && self
                         .state
                         .borrow()
@@ -901,18 +981,23 @@ impl Controller {
                         .require_audio_cd_metadata;
                 let metadata_available = audio_cd_metadata_available(&catalog);
                 let episode_metadata = episode_metadata_context(&catalog);
+                let metadata_step_complete = catalog.video_metadata_suggestions.is_empty();
                 {
                     let mut state = self.state.borrow_mut();
-                    state.expanded_titles.clear();
-                    if let Some(title) = catalog.titles.first() {
-                        state.selection = Selection::Title(title.id);
-                    } else {
-                        state.selection = Selection::Source;
+                    if reidentification_backup.is_none() {
+                        state.expanded_titles.clear();
+                        if let Some(title) = catalog.titles.first() {
+                            state.selection = Selection::Title(title.id);
+                        } else {
+                            state.selection = Selection::Source;
+                        }
+                        state.video_metadata_backups.clear();
                     }
                     state.output_directory = output.clone();
                     state.output_profile = output_profile;
                     state.episode_metadata = episode_metadata;
-                    state.video_metadata_backups.clear();
+                    state.metadata_step_complete = metadata_step_complete;
+                    state.metadata_skipped = false;
                     state.catalog = Some(catalog);
                 }
                 if self.finish_busy() {
@@ -943,6 +1028,7 @@ impl Controller {
                 self.ui
                     .set_status("Source opened successfully.", Some("status-success"));
                 self.render();
+                self.ui.set_workflow_step(WorkflowStep::Select);
                 if should_auto_save && metadata_required && !metadata_available {
                     self.ui.messages.append(
                         "Automatic save skipped because the Audio CD has no album metadata.",
@@ -951,12 +1037,19 @@ impl Controller {
                         "Audio CD opened; automatic save is waiting for metadata.",
                         None,
                     );
+                } else if should_auto_save && !metadata_step_complete {
+                    self.ui.messages.append(
+                        "Automatic save is waiting for the proposed metadata to be reviewed or skipped.",
+                    );
+                    self.ui
+                        .set_status("Review or skip metadata to continue.", None);
                 } else if should_auto_save {
                     self.ui.messages.append("Starting automatic save.");
-                    self.start_rip();
+                    self.start_automatic_rip();
                 }
             }
             EngineEvent::ScanFailed(error) => {
+                self.state.borrow_mut().reidentification_backup = None;
                 if self.finish_busy() {
                     return;
                 }
@@ -964,6 +1057,7 @@ impl Controller {
                 self.render();
             }
             EngineEvent::ScanCancelled => {
+                self.state.borrow_mut().reidentification_backup = None;
                 if self.finish_busy() {
                     return;
                 }
@@ -1048,6 +1142,7 @@ impl Controller {
                     .append(&format!("Saving {title_count} selected item(s)."));
             }
             EngineEvent::RipProgress(progress) => {
+                self.ui.output_review.update_progress(&progress);
                 self.ui.progress.set_fraction(progress.fraction);
                 self.ui
                     .progress
@@ -1078,6 +1173,7 @@ impl Controller {
                 self.ui.progress_detail.set_text(&details.join("  •  "));
             }
             EngineEvent::TitleFinished(result) => {
+                self.ui.output_review.finish_file(&result);
                 let size = result
                     .bytes_written
                     .map(|bytes| format!(" ({})", format_bytes(bytes)))
@@ -1104,11 +1200,11 @@ impl Controller {
                 }
                 let message = format!("{saved_titles} item(s) saved to {}.", destination.display());
                 self.ui.messages.append(&message);
-                self.ui
-                    .set_status("All selected items were saved.", Some("status-success"));
+                self.ui.set_status("Ready", None);
                 self.send_system_notification("Copy complete", &message);
                 self.send_completion_notifications(saved_titles, &destination, &message);
                 self.render();
+                self.ui.output_review.finish_job(saved_titles, &destination);
                 if self.state.borrow().settings.io.eject_when_finished {
                     self.eject_selected_disc();
                 }
@@ -1121,6 +1217,10 @@ impl Controller {
                 let detail = resumable_failure_detail(&error, completed);
                 self.show_error("Could not save selected items", &detail);
                 self.render();
+                self.ui.output_review.interrupt_job(
+                    &format!("Rip failed after {completed} completed file(s)"),
+                    true,
+                );
             }
             EngineEvent::RipCancelled => {
                 let completed = self.state.borrow().completed_titles_this_job;
@@ -1137,6 +1237,7 @@ impl Controller {
                 self.ui.messages.append(&message);
                 self.ui.set_status("Cancelled.", None);
                 self.render();
+                self.ui.output_review.interrupt_job(&message, false);
             }
         }
     }
@@ -1255,10 +1356,8 @@ impl Controller {
     }
 
     fn handle_content_action(&self, action: ContentAction) {
-        if matches!(
-            action,
-            ContentAction::ApplySuggestion(_) | ContentAction::ApplyAllSuggestions
-        ) && self.state.borrow().pending_suggestion_season.is_some()
+        if matches!(action, ContentAction::ApplySuggestions(_))
+            && self.state.borrow().pending_suggestion_season.is_some()
         {
             self.ui.messages.append(
                 "Episode names are still loading for the selected season; apply them once loading finishes.",
@@ -1269,17 +1368,26 @@ impl Controller {
         let content_changed = matches!(
             action,
             ContentAction::SetAllChecked(_)
-                | ContentAction::ApplySuggestion(_)
-                | ContentAction::ApplyAllSuggestions
+                | ContentAction::ApplySuggestions(_)
+                | ContentAction::SkipMetadata
                 | ContentAction::SetSuggestionSeason(_)
                 | ContentAction::SetSuggestionFirstEpisode(_)
+                | ContentAction::SetTitleChecked { .. }
+                | ContentAction::SetTrackChecked { .. }
+        );
+        let metadata_selection_changed = matches!(
+            action,
+            ContentAction::SetAllChecked(_)
                 | ContentAction::SetTitleChecked { .. }
                 | ContentAction::SetTrackChecked { .. }
         );
         let mut all_checks_changed = false;
         let mut expanded_change = None;
         let mut suggestions_applied = 0;
+        let mut metadata_decision_completed = false;
+        let mut metadata_was_skipped = false;
         let mut suggestions_shifted = None;
+        let mut suggestion_error = None;
         let mut save_metadata_correction = false;
         {
             let mut state = self.state.borrow_mut();
@@ -1310,26 +1418,7 @@ impl Controller {
                     };
                     expanded_change = Some((id, expanded));
                 }
-                ContentAction::ApplySuggestion(title_id) => {
-                    remember_video_metadata_state(&mut state, title_id);
-                    if let Some(catalog) = state.catalog.as_mut()
-                        && apply_video_suggestion(catalog, title_id, output_extension)
-                    {
-                        suggestions_applied = 1;
-                    }
-                }
-                ContentAction::ApplyAllSuggestions => {
-                    let title_ids = state
-                        .catalog
-                        .as_ref()
-                        .map(|catalog| {
-                            catalog
-                                .video_metadata_suggestions
-                                .iter()
-                                .map(|suggestion| suggestion.title_id)
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default();
+                ContentAction::ApplySuggestions(title_ids) => {
                     for title_id in &title_ids {
                         remember_video_metadata_state(&mut state, *title_id);
                     }
@@ -1341,22 +1430,41 @@ impl Controller {
                                 output_extension,
                             ));
                         }
+                        catalog.video_metadata_suggestions.clear();
+                        update_probable_suggestion_count(catalog);
                     }
+                    state.metadata_step_complete = true;
+                    state.metadata_skipped = false;
+                    metadata_decision_completed = true;
+                }
+                ContentAction::SkipMetadata => {
+                    if let Some(catalog) = state.catalog.as_mut() {
+                        catalog.video_metadata_suggestions.clear();
+                        update_probable_suggestion_count(catalog);
+                    }
+                    state.metadata_step_complete = true;
+                    state.metadata_skipped = true;
+                    metadata_decision_completed = true;
+                    metadata_was_skipped = true;
                 }
                 ContentAction::SetSuggestionFirstEpisode(requested_first) => {
-                    if let Some(catalog) = state.catalog.as_mut()
-                        && let Some(offset) = set_suggestion_first_episode(catalog, requested_first)
-                    {
-                        suggestions_shifted = Some(offset);
-                        if let Some(hash) = catalog_disc_hash(catalog).map(str::to_owned) {
-                            let correction = state
-                                .settings
-                                .integrations
-                                .video_metadata_corrections
-                                .entry(hash)
-                                .or_default();
-                            *correction = correction.saturating_add(offset);
-                            save_metadata_correction = true;
+                    if let Some(catalog) = state.catalog.as_mut() {
+                        match set_suggestion_first_episode(catalog, requested_first) {
+                            Ok(Some(shift)) => {
+                                suggestions_shifted = Some(shift);
+                                if let Some(hash) = catalog_disc_hash(catalog).map(str::to_owned) {
+                                    let correction = state
+                                        .settings
+                                        .integrations
+                                        .video_metadata_corrections
+                                        .entry(hash)
+                                        .or_default();
+                                    *correction = correction.saturating_add(shift.offset);
+                                    save_metadata_correction = true;
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(error) => suggestion_error = Some(error),
                         }
                     }
                 }
@@ -1462,33 +1570,63 @@ impl Controller {
             self.ui.content.set_expanded(title_id, expanded);
             return;
         }
-        if suggestions_applied > 0 {
-            self.ui.messages.append(&format!(
-                "Applied {suggestions_applied} probable episode metadata suggestion(s)."
-            ));
-            self.ui.set_status(
-                "Probable episode metadata applied; review names before ripping.",
-                Some("status-success"),
-            );
+        if metadata_decision_completed {
+            if metadata_was_skipped {
+                self.ui
+                    .messages
+                    .append("Metadata suggestions skipped; current names were kept.");
+                self.ui.set_status(
+                    "Metadata skipped; output review is now available.",
+                    Some("status-success"),
+                );
+            } else {
+                self.ui.messages.append(&format!(
+                    "Applied {suggestions_applied} metadata suggestion(s); unchecked suggestions were skipped."
+                ));
+                self.ui.set_status(
+                    "Metadata review complete; output review is now available.",
+                    Some("status-success"),
+                );
+            }
             self.render();
+            self.ui.set_workflow_step(WorkflowStep::Output);
             return;
         }
-        if let Some(offset) = suggestions_shifted {
+        if let Some(error) = suggestion_error {
+            self.ui.messages.append(&format!(
+                "[warning] Could not adjust the proposed episode range: {error}"
+            ));
+            self.ui.set_status(&error, Some("status-error"));
+            return;
+        }
+        if let Some(shift) = suggestions_shifted {
             if save_metadata_correction && let Err(error) = self.state.borrow().settings.save() {
                 self.ui.messages.append(&format!(
                     "[warning] Could not remember the metadata correction: {error}"
                 ));
             }
-            self.ui.messages.append(&if offset < 0 {
-                format!(
-                    "Shifted probable episode metadata {} episode(s) earlier.",
-                    offset.unsigned_abs()
-                )
+            let direction = if shift.offset < 0 {
+                format!("{} episode(s) earlier", shift.offset.unsigned_abs())
             } else {
-                format!("Shifted probable episode metadata {offset} episode(s) later.")
-            });
+                format!("{} episode(s) later", shift.offset)
+            };
+            let overflow = if shift.unmatched == 0 {
+                String::new()
+            } else {
+                format!(
+                    " {} overflow disc title(s) were left unmatched.",
+                    shift.unmatched
+                )
+            };
+            self.ui.messages.append(&format!(
+                "Shifted probable episode metadata {direction}; proposed range is E{}-E{}.{}",
+                shift.first, shift.last, overflow
+            ));
             self.ui.set_status(
-                "Episode metadata proposals adjusted; review names before applying.",
+                &format!(
+                    "Proposed range updated to E{}-E{}.{}",
+                    shift.first, shift.last, overflow
+                ),
                 Some("status-success"),
             );
             self.render();
@@ -1517,6 +1655,9 @@ impl Controller {
                 }
             }
             drop(state);
+            if metadata_selection_changed {
+                self.render_metadata();
+            }
             self.render_info();
             self.update_rip_sensitivity();
         } else {
@@ -1526,10 +1667,6 @@ impl Controller {
     }
 
     fn handle_info_action(&self, action: InfoAction) {
-        if let InfoAction::ApplySuggestion(title_id) = &action {
-            self.handle_content_action(ContentAction::ApplySuggestion(*title_id));
-            return;
-        }
         if let InfoAction::ChooseCoverArt { title_id } = &action {
             self.choose_cover_art(*title_id);
             return;
@@ -1542,9 +1679,10 @@ impl Controller {
         let file_name_template = state.settings.audio_cd.file_name_template.clone();
         let output_extension = state.output_profile.extension();
         let episode_metadata = state.episode_metadata.clone();
-        let selection_settings = state.settings.selection.clone();
-        if let InfoAction::AssignEpisode { title_id, .. } = &action {
-            remember_video_metadata_state(&mut state, *title_id);
+        if let Some(title_id) = info_action_title_id(&action)
+            && !matches!(action, InfoAction::RemoveVideoMetadata { .. })
+        {
+            remember_video_metadata_state(&mut state, title_id);
         }
         let removed_metadata_backup = if let InfoAction::RemoveVideoMetadata { title_id } = &action
         {
@@ -1561,14 +1699,7 @@ impl Controller {
         let rerender = match action {
             InfoAction::AssignEpisode { title_id, episode } => {
                 if let Some(context) = episode_metadata.as_ref()
-                    && assign_video_episode(
-                        catalog,
-                        context,
-                        title_id,
-                        episode,
-                        output_extension,
-                        &selection_settings,
-                    )
+                    && assign_video_episode(catalog, context, title_id, episode, output_extension)
                 {
                     assigned_episode = Some(episode);
                 }
@@ -1652,9 +1783,12 @@ impl Controller {
                 true
             }
             InfoAction::ChooseCoverArt { .. } => unreachable!(),
-            InfoAction::ApplySuggestion(_) => unreachable!(),
             InfoAction::SetEpisodeSeason(_) => unreachable!(),
         };
+        if assigned_episode.is_some() && catalog.video_metadata_suggestions.is_empty() {
+            state.metadata_step_complete = true;
+            state.metadata_skipped = false;
+        }
         drop(state);
         if let Some((title_id, name)) = renamed_title {
             self.ui.content.sync_title_name(title_id, &name);
@@ -1689,12 +1823,11 @@ impl Controller {
             if context.metadata.season == Some(requested_season) {
                 return;
             }
-            let show = context
-                .choices
-                .first()
-                .and_then(|choice| choice.name.split(" - S").next())
-                .unwrap_or_default()
-                .to_owned();
+            let show = state
+                .catalog
+                .as_ref()
+                .map(|catalog| catalog.source.name.clone())
+                .unwrap_or_default();
             let settings = &state.settings.integrations;
             let options = EpisodeSeasonOptions {
                 show,
@@ -1786,43 +1919,126 @@ impl Controller {
             Rc::new(move |action| this.handle_info_action(action)) as Rc<dyn Fn(InfoAction)>
         };
         let state = self.state.borrow();
+        let selected_title_id = match state.selection {
+            Selection::Title(title_id) | Selection::Track { title_id, .. } => Some(title_id),
+            Selection::Source => None,
+        };
+        let can_undo_metadata = selected_title_id
+            .is_some_and(|title_id| state.video_metadata_backups.contains_key(&title_id));
         self.ui.sidebar.info.render(
             state.catalog.as_ref(),
             &state.selection,
             state.episode_metadata.as_ref(),
+            can_undo_metadata,
             callback,
         );
     }
 
+    fn render_metadata(&self) {
+        let content_callback = {
+            let this = self.clone();
+            Rc::new(move |action| this.handle_content_action(action)) as Rc<dyn Fn(ContentAction)>
+        };
+        let info_callback = {
+            let this = self.clone();
+            Rc::new(move |action| this.handle_info_action(action)) as Rc<dyn Fn(InfoAction)>
+        };
+        let state = self.state.borrow();
+        self.ui.metadata.render(
+            state.catalog.as_ref(),
+            state.episode_metadata.as_ref(),
+            content_callback,
+            info_callback,
+        );
+    }
+
     fn render(&self) {
-        let callback = {
+        let content_callback = {
             let this = self.clone();
             Rc::new(move |action| this.handle_content_action(action)) as Rc<dyn Fn(ContentAction)>
         };
         let state = self.state.borrow();
+        update_workflow_controls(&self.ui, &state);
         self.ui
             .source
             .set_metadata_link_visible(state.catalog.as_ref().is_some_and(|catalog| {
                 matches!(catalog.source.kind, DiscKind::Dvd | DiscKind::BluRay)
             }));
+        if let Some(catalog) = state.catalog.as_ref() {
+            let pending = catalog.video_metadata_suggestions.len();
+            let url = catalog
+                .source_info
+                .iter()
+                .find(|field| field.label == "Metadata URL")
+                .map(|field| field.value.as_str());
+            let applied = catalog
+                .titles
+                .iter()
+                .filter(|title| title.video_metadata.is_some())
+                .count();
+            let identity_provider = url.and_then(|url| {
+                if url.contains("tvmaze.com") {
+                    Some("TVMaze")
+                } else if url.contains("themoviedb.org") {
+                    Some("TMDB")
+                } else {
+                    None
+                }
+            });
+            let attribution = identity_provider
+                .and_then(|provider| {
+                    catalog
+                        .metadata_attributions
+                        .iter()
+                        .find(|attribution| attribution.provider == provider)
+                })
+                .or_else(|| catalog.metadata_attributions.first());
+            let status = if let Some(attribution) = attribution {
+                let year = catalog
+                    .source_info
+                    .iter()
+                    .find(|field| field.label == "Year")
+                    .map(|field| format!(" ({})", field.value))
+                    .unwrap_or_default();
+                let pending = (pending > 0)
+                    .then(|| format!(" · {pending} proposed episode assignment(s)"))
+                    .unwrap_or_default();
+                format!(
+                    "Matched \"{}\"{year} via {} · score {}/100{pending}",
+                    catalog.source.name, attribution.provider, attribution.confidence_percent
+                )
+            } else if pending > 0 {
+                format!("{pending} proposed episode assignment(s) to review")
+            } else if applied > 0 {
+                format!("Metadata applied to {applied} item(s)")
+            } else {
+                "No metadata match".to_owned()
+            };
+            self.ui.source.set_identity_status(&status, url);
+        }
         self.ui
             .sidebar
             .profile_panel
             .set_visible(state.catalog.is_some() && state.busy != BusyState::Scanning);
         if let Some(catalog) = &state.catalog {
-            self.ui
-                .content
-                .render(catalog, &state.expanded_titles, &state.selection, callback);
+            self.ui.content.render(
+                catalog,
+                &state.expanded_titles,
+                &state.selection,
+                content_callback.clone(),
+            );
         } else {
             self.ui.content.clear();
         }
         drop(state);
+        self.render_metadata();
         self.render_info();
         self.update_rip_sensitivity();
     }
 
     fn update_rip_sensitivity(&self) {
         let state = self.state.borrow();
+        update_workflow_controls(&self.ui, &state);
         let selected_titles = state
             .catalog
             .as_ref()
@@ -1875,11 +2091,40 @@ impl Controller {
                 .selection_summary
                 .set_text("No items selected");
         }
-        let has_output = !self.ui.sidebar.output_entry.text().trim().is_empty();
+        let output_text = self.ui.sidebar.output_entry.text().to_string();
+        let has_output = !output_text.trim().is_empty();
+        let request = (selected && has_output && state.metadata_step_complete)
+            .then(|| {
+                state.catalog.clone().map(|catalog| {
+                    RipRequest::from_catalog_with_profile(
+                        catalog,
+                        PathBuf::from(output_text.trim()),
+                        false,
+                        state.output_profile,
+                    )
+                })
+            })
+            .flatten();
+        let output_valid = self.ui.output_review.render(request.as_ref());
+        self.ui.sidebar.rip.set_sensitive(
+            !state.is_busy()
+                && selected
+                && has_output
+                && state.metadata_step_complete
+                && output_valid,
+        );
         self.ui
             .sidebar
             .rip
-            .set_sensitive(!state.is_busy() && selected && has_output);
+            .set_visible(state.catalog.is_some() && state.metadata_step_complete);
+        self.ui
+            .sidebar
+            .rip
+            .set_tooltip_text(Some(if state.metadata_step_complete {
+                "Start the reviewed output job"
+            } else {
+                "Review or skip the proposed metadata before continuing"
+            }));
     }
 
     fn change_output_profile(&self) {
@@ -1913,7 +2158,7 @@ impl Controller {
             .sidebar
             .rip_label
             .set_text(if profile.is_audio_only() {
-                "Rip audio"
+                "Start audio rip"
             } else {
                 "Start rip"
             });
@@ -2026,6 +2271,7 @@ impl Controller {
             .messages
             .append(&format!("[error] {title}: {detail}"));
         self.ui.set_status(title, Some("status-error"));
+        self.ui.messages.set_revealed(true);
         self.show_message(title, detail, gtk::MessageType::Error);
     }
 
@@ -2042,6 +2288,17 @@ impl Controller {
         dialog.connect_response(|dialog, _| dialog.close());
         dialog.present();
     }
+}
+
+fn update_workflow_controls(ui: &MainWindow, state: &AppState) {
+    let has_catalog = state.catalog.is_some();
+    ui.workflow_identify_button.set_sensitive(!state.is_busy());
+    ui.workflow_select_button
+        .set_sensitive(has_catalog && !state.is_busy());
+    ui.workflow_metadata_button
+        .set_sensitive(has_catalog && !state.is_busy());
+    ui.workflow_output_button
+        .set_sensitive(has_catalog && state.metadata_step_complete && !state.is_busy());
 }
 
 fn drive_is_ready(drive: &Drive) -> bool {
@@ -2235,13 +2492,90 @@ fn apply_video_suggestion(
     true
 }
 
+fn preserve_choices_and_stage_reidentification(
+    catalog: &mut media_rip_core::MediaCatalog,
+    previous: &media_rip_core::MediaCatalog,
+) {
+    let mut staged = Vec::new();
+    for title in &mut catalog.titles {
+        let Some(old_title) = previous
+            .titles
+            .iter()
+            .find(|candidate| candidate.source_title_id == title.source_title_id)
+        else {
+            continue;
+        };
+
+        title.selected = old_title.selected;
+        for track in &mut title.tracks {
+            if let Some(old_track) = old_title
+                .tracks
+                .iter()
+                .find(|candidate| candidate.index == track.index)
+            {
+                track.selected = old_track.selected;
+                track.name = old_track.name.clone();
+            }
+        }
+
+        if let Some(proposed_metadata) = title.video_metadata.take()
+            && (old_title.video_metadata.as_ref() != Some(&proposed_metadata)
+                || old_title.name != title.name)
+        {
+            staged.push(VideoMetadataSuggestion {
+                title_id: title.id,
+                name: title.name.clone(),
+                tags: title.tags.clone(),
+                metadata: proposed_metadata,
+                evidence: vec!["Matched from the identification you requested".to_owned()],
+                assumptions: vec![
+                    "The disc title mapping is unchanged from the current source scan".to_owned(),
+                ],
+                episode_choices: Vec::new(),
+            });
+        }
+
+        title.name = old_title.name.clone();
+        title.output_file = old_title.output_file.clone();
+        title.tags = old_title.tags.clone();
+        title.video_metadata = old_title.video_metadata.clone();
+    }
+    for suggestion in staged {
+        if let Some(existing) = catalog
+            .video_metadata_suggestions
+            .iter_mut()
+            .find(|candidate| candidate.title_id == suggestion.title_id)
+        {
+            *existing = suggestion;
+        } else {
+            catalog.video_metadata_suggestions.push(suggestion);
+        }
+    }
+    update_probable_suggestion_count(catalog);
+}
+
+fn info_action_title_id(action: &InfoAction) -> Option<u32> {
+    match action {
+        InfoAction::AssignEpisode { title_id, .. }
+        | InfoAction::RemoveVideoMetadata { title_id }
+        | InfoAction::SetTitleName { title_id, .. }
+        | InfoAction::SetTrackName { title_id, .. }
+        | InfoAction::SetTag { title_id, .. }
+        | InfoAction::AddTag { title_id, .. }
+        | InfoAction::SetOutputFile { title_id, .. } => Some(*title_id),
+        InfoAction::ChooseCoverArt { title_id } | InfoAction::RemoveCoverArt { title_id } => {
+            *title_id
+        }
+        InfoAction::SetEpisodeSeason(_) => None,
+    }
+}
+
 fn assign_video_episode(
     catalog: &mut media_rip_core::MediaCatalog,
     context: &EpisodeMetadataContext,
     title_id: u32,
     episode: u32,
     output_extension: &str,
-    selection_settings: &crate::app::settings::SelectionSettings,
 ) -> bool {
     let Some(choice) = context
         .choices
@@ -2278,11 +2612,6 @@ fn assign_video_episode(
     title.name = choice.name;
     title.output_file = output_file;
     title.video_metadata = Some(metadata);
-    title.selected = true;
-    for track in &mut title.tracks {
-        track.selected = selection_settings.selects_track(track);
-    }
-    title.selected = title.tracks.is_empty() || title.tracks.iter().any(|track| track.selected);
     for suggested_tag in choice.tags {
         if let Some(tag) = title
             .tags
@@ -2319,6 +2648,7 @@ fn remember_video_metadata_state(state: &mut AppState, title_id: u32) {
             output_file: title.output_file.clone(),
             tags: title.tags.clone(),
             metadata: title.video_metadata.clone(),
+            tracks: title.tracks.clone(),
         },
     );
 }
@@ -2336,6 +2666,7 @@ fn restore_video_metadata(
         title.output_file = backup.output_file;
         title.tags = backup.tags;
         title.video_metadata = backup.metadata;
+        title.tracks = backup.tracks;
     } else {
         title.video_metadata = None;
     }
@@ -2362,6 +2693,9 @@ fn update_probable_suggestion_count(catalog: &mut media_rip_core::MediaCatalog) 
 fn episode_metadata_context(
     catalog: &media_rip_core::MediaCatalog,
 ) -> Option<EpisodeMetadataContext> {
+    if let Some(context) = &catalog.video_episode_context {
+        return Some(context.clone());
+    }
     let suggestion = catalog
         .video_metadata_suggestions
         .iter()
@@ -2375,43 +2709,90 @@ fn episode_metadata_context(
 }
 
 fn shift_video_suggestions(catalog: &mut media_rip_core::MediaCatalog, offset: i32) -> bool {
-    let choices = catalog
+    shift_video_suggestions_with_result(catalog, offset).is_ok_and(|result| result.is_some())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SuggestionShift {
+    offset: i32,
+    unmatched: usize,
+    first: u32,
+    last: u32,
+}
+
+fn shift_video_suggestions_with_result(
+    catalog: &mut media_rip_core::MediaCatalog,
+    offset: i32,
+) -> Result<Option<SuggestionShift>, String> {
+    if offset == 0 {
+        return Ok(None);
+    }
+    let updates = catalog
         .video_metadata_suggestions
         .iter()
         .map(|suggestion| {
-            let episode = suggestion.metadata.episode?.checked_add_signed(offset)?;
-            let choice = suggestion
+            let episode = suggestion
+                .metadata
+                .episode
+                .and_then(|episode| episode.checked_add_signed(offset))?;
+            suggestion
                 .episode_choices
                 .iter()
-                .find(|choice| choice.episode == episode)?;
-            Some((episode, choice.name.clone(), choice.tags.clone()))
+                .find(|choice| choice.episode == episode)
+                .map(|choice| (episode, choice.name.clone(), choice.tags.clone()))
         })
-        .collect::<Option<Vec<_>>>();
-    let Some(choices) = choices else {
-        return false;
-    };
-    for (suggestion, (episode, name, tags)) in
-        catalog.video_metadata_suggestions.iter_mut().zip(choices)
-    {
+        .collect::<Vec<_>>();
+    let unmatched = updates.iter().filter(|update| update.is_none()).count();
+    if unmatched == updates.len() {
+        return Err(
+            "That starting episode leaves no available season episodes for these disc titles."
+                .to_owned(),
+        );
+    }
+    let mut shifted = Vec::with_capacity(updates.len() - unmatched);
+    for (mut suggestion, update) in catalog.video_metadata_suggestions.drain(..).zip(updates) {
+        let Some((episode, name, tags)) = update else {
+            continue;
+        };
         suggestion.metadata.episode = Some(episode);
         suggestion.name = name;
         suggestion.tags = tags;
+        shifted.push(suggestion);
     }
-    true
+    let first = shifted
+        .iter()
+        .filter_map(|suggestion| suggestion.metadata.episode)
+        .min()
+        .expect("at least one shifted suggestion remains");
+    let last = shifted
+        .iter()
+        .filter_map(|suggestion| suggestion.metadata.episode)
+        .max()
+        .expect("at least one shifted suggestion remains");
+    catalog.video_metadata_suggestions = shifted;
+    update_probable_suggestion_count(catalog);
+    Ok(Some(SuggestionShift {
+        offset,
+        unmatched,
+        first,
+        last,
+    }))
 }
 
 fn set_suggestion_first_episode(
     catalog: &mut media_rip_core::MediaCatalog,
     requested_first: u32,
-) -> Option<i32> {
+) -> Result<Option<SuggestionShift>, String> {
     let current_first = catalog
         .video_metadata_suggestions
         .iter()
         .filter_map(|suggestion| suggestion.metadata.episode)
-        .min()?;
+        .min()
+        .ok_or_else(|| "No episode suggestions are available to shift.".to_owned())?;
     let difference = i64::from(requested_first) - i64::from(current_first);
-    let offset = i32::try_from(difference).ok()?;
-    (offset != 0 && shift_video_suggestions(catalog, offset)).then_some(offset)
+    let offset = i32::try_from(difference)
+        .map_err(|_| "The requested episode number is outside the supported range.".to_owned())?;
+    shift_video_suggestions_with_result(catalog, offset)
 }
 
 fn shift_video_suggestion_seasons(catalog: &mut media_rip_core::MediaCatalog, offset: i32) -> bool {
@@ -2710,11 +3091,92 @@ mod tests {
             track_cover_art: Default::default(),
             metadata_attributions: Vec::new(),
             video_metadata_suggestions: Vec::new(),
+            video_episode_context: None,
         };
 
         assert!(!audio_cd_metadata_available(&catalog));
         catalog.source_info[0].value = "CD-TEXT".to_owned();
         assert!(audio_cd_metadata_available(&catalog));
+    }
+
+    #[test]
+    fn reidentification_preserves_user_choices_and_stages_metadata() {
+        use media_rip_core::{
+            MediaCatalog, MediaSource, MediaTag, MetadataAttribution, StreamKind, Title, Track,
+            VideoMetadata,
+        };
+
+        let metadata = |provider: &str| VideoMetadata {
+            attribution: MetadataAttribution::new(provider, 95, "test match"),
+            content_type: Some("Episode".to_owned()),
+            year: Some(2020),
+            season: Some(1),
+            episode: Some(1),
+            tmdb_id: None,
+            tvdb_id: None,
+            tvmaze_id: None,
+        };
+        let make_catalog = |name: &str, provider: &str, selected: bool| MediaCatalog {
+            source: MediaSource {
+                id: "disc".to_owned(),
+                name: "Disc".to_owned(),
+                path: PathBuf::from("disc"),
+                kind: DiscKind::Dvd,
+                drive: None,
+                capacity_bytes: None,
+                encrypted: None,
+            },
+            titles: vec![Title {
+                id: 1,
+                source_title_id: "1".to_owned(),
+                disc_title_number: Some(1),
+                name: name.to_owned(),
+                is_main_title: false,
+                duration_ms: 1_000,
+                size_bytes: None,
+                size_is_estimate: false,
+                chapters: Vec::new(),
+                tracks: vec![Track {
+                    index: 2,
+                    kind: StreamKind::Audio,
+                    codec: "aac".to_owned(),
+                    codec_long_name: None,
+                    language: Some("eng".to_owned()),
+                    name: Some("User track name".to_owned()),
+                    properties: Vec::new(),
+                    selected,
+                }],
+                segment_count: None,
+                segment_map: None,
+                duplicate_key: None,
+                tags: vec![MediaTag::new("title", name)],
+                video_metadata: Some(metadata(provider)),
+                output_file: format!("{name}.mkv"),
+                selected,
+            }],
+            source_info: Vec::new(),
+            cover_art: None,
+            track_cover_art: Default::default(),
+            metadata_attributions: Vec::new(),
+            video_metadata_suggestions: Vec::new(),
+            video_episode_context: None,
+        };
+        let previous = make_catalog("User name", "Old", false);
+        let mut refreshed = make_catalog("Proposed name", "New", true);
+
+        preserve_choices_and_stage_reidentification(&mut refreshed, &previous);
+
+        let title = &refreshed.titles[0];
+        assert!(!title.selected);
+        assert!(!title.tracks[0].selected);
+        assert_eq!(title.name, "User name");
+        assert_eq!(title.output_file, "User name.mkv");
+        assert_eq!(title.video_metadata, previous.titles[0].video_metadata);
+        assert_eq!(refreshed.video_metadata_suggestions.len(), 1);
+        assert_eq!(
+            refreshed.video_metadata_suggestions[0].name,
+            "Proposed name"
+        );
     }
 
     #[test]
@@ -2816,6 +3278,7 @@ mod tests {
             track_cover_art: Default::default(),
             metadata_attributions: Vec::new(),
             video_metadata_suggestions: Vec::new(),
+            video_episode_context: None,
         };
 
         assert!(mark_title_completed(&mut catalog, 7));
@@ -2872,6 +3335,7 @@ mod tests {
             track_cover_art: Default::default(),
             metadata_attributions: Vec::new(),
             video_metadata_suggestions: Vec::new(),
+            video_episode_context: None,
         };
 
         set_catalog_selection(&mut catalog, true);
@@ -2939,7 +3403,26 @@ mod tests {
                 assumptions: Vec::new(),
                 episode_choices: vec![choice(4), choice(11), choice(12), choice(13)],
             }],
+            video_episode_context: None,
         };
+
+        let mut overflow_catalog = catalog.clone();
+        let mut overflow = overflow_catalog.video_metadata_suggestions[0].clone();
+        overflow.title_id = 2;
+        overflow.metadata.episode = Some(13);
+        overflow.name = choice(13).name;
+        overflow.tags = choice(13).tags;
+        overflow_catalog.video_metadata_suggestions.push(overflow);
+        assert_eq!(
+            set_suggestion_first_episode(&mut overflow_catalog, 13),
+            Ok(Some(SuggestionShift {
+                offset: 1,
+                unmatched: 1,
+                first: 13,
+                last: 13,
+            }))
+        );
+        assert_eq!(overflow_catalog.video_metadata_suggestions.len(), 1);
 
         assert!(shift_video_suggestions(&mut catalog, -1));
         let suggestion = &catalog.video_metadata_suggestions[0];
@@ -2948,7 +3431,15 @@ mod tests {
         assert_eq!(suggestion.tags[0].value, "11");
         assert!(!shift_video_suggestions(&mut catalog, -1));
 
-        assert_eq!(set_suggestion_first_episode(&mut catalog, 4), Some(-7));
+        assert_eq!(
+            set_suggestion_first_episode(&mut catalog, 4),
+            Ok(Some(SuggestionShift {
+                offset: -7,
+                unmatched: 0,
+                first: 4,
+                last: 4,
+            }))
+        );
         let suggestion = &catalog.video_metadata_suggestions[0];
         assert_eq!(suggestion.metadata.episode, Some(4));
         assert_eq!(suggestion.name, "Show - S02E04 - Episode 4");
@@ -3050,23 +3541,31 @@ mod tests {
                 assumptions: Vec::new(),
                 episode_choices: vec![choice(12), choice(13)],
             }],
+            video_episode_context: None,
         };
         let context = episode_metadata_context(&catalog).unwrap();
 
         assert!(apply_video_suggestion(&mut catalog, 0, "mkv"));
         assert!(catalog.video_metadata_suggestions.is_empty());
-        let selection = crate::app::settings::SelectionSettings::default();
-        assert!(assign_video_episode(
-            &mut catalog,
-            &context,
-            1,
-            13,
-            "mkv",
-            &selection,
-        ));
+        let selection_before = catalog.titles[1].selected;
+        let tracks_before = catalog.titles[1]
+            .tracks
+            .iter()
+            .map(|track| track.selected)
+            .collect::<Vec<_>>();
+        assert!(assign_video_episode(&mut catalog, &context, 1, 13, "mkv"));
 
         let added = &catalog.titles[1];
         assert_eq!(added.name, "Show - S02E13 - Episode 13");
+        assert_eq!(added.selected, selection_before);
+        assert_eq!(
+            added
+                .tracks
+                .iter()
+                .map(|track| track.selected)
+                .collect::<Vec<_>>(),
+            tracks_before
+        );
         assert_eq!(added.video_metadata.as_ref().unwrap().episode, Some(13));
         assert_eq!(
             added
@@ -3131,6 +3630,7 @@ mod tests {
             track_cover_art: Default::default(),
             metadata_attributions: Vec::new(),
             video_metadata_suggestions: Vec::new(),
+            video_episode_context: None,
         };
 
         set_tag(

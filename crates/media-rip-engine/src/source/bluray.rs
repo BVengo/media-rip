@@ -167,19 +167,22 @@ fn bluray_disc_titles(root: &Path) -> Vec<BlurayPlaylistMetadata> {
     let Ok(root) = CString::new(root.as_os_str().as_encoded_bytes()) else {
         return Vec::new();
     };
+    let Some(library) = BlurayLibrary::load() else {
+        return Vec::new();
+    };
 
     // SAFETY: Each libbluray-owned title-info object is read only while its
     // checked disc handle is open, then freed before that handle is closed.
     unsafe {
-        let bluray = bd_open(root.as_ptr(), ptr::null());
+        let bluray = (library.bd_open)(root.as_ptr(), ptr::null());
         if bluray.is_null() {
             return Vec::new();
         }
-        let title_count = bd_get_titles(bluray, 0, 0);
-        let main_title = bd_get_main_title(bluray);
+        let title_count = (library.bd_get_titles)(bluray, 0, 0);
+        let main_title = (library.bd_get_main_title)(bluray);
         let mut titles = Vec::with_capacity(title_count as usize);
         for index in 0..title_count {
-            let info = bd_get_title_info(bluray, index, 0);
+            let info = (library.bd_get_title_info)(bluray, index, 0);
             if info.is_null() {
                 continue;
             }
@@ -189,8 +192,8 @@ fn bluray_disc_titles(root: &Path) -> Vec<BlurayPlaylistMetadata> {
             let duplicate_key = duplicate_key_from_title_info(title_info);
             let stream_languages = stream_languages_from_title_info(title_info);
             let authored_stream_pids = authored_stream_pids_from_title_info(title_info);
-            let size = (bd_select_title(bluray, index) == 1)
-                .then(|| bd_get_title_size(bluray))
+            let size = ((library.bd_select_title)(bluray, index) == 1)
+                .then(|| (library.bd_get_title_size)(bluray))
                 .filter(|size| *size > 0);
             titles.push(BlurayPlaylistMetadata {
                 playlist,
@@ -202,9 +205,9 @@ fn bluray_disc_titles(root: &Path) -> Vec<BlurayPlaylistMetadata> {
                 authored_stream_pids,
                 is_main_title: main_title >= 0 && index == main_title as u32,
             });
-            bd_free_title_info(info);
+            (library.bd_free_title_info)(info);
         }
-        bd_close(bluray);
+        (library.bd_close)(bluray);
         titles
     }
 }
@@ -227,11 +230,20 @@ fn bluray_playlist_metadata(root: &Path, playlists: &[u32]) -> Vec<BlurayPlaylis
             })
             .collect();
     };
+    let Some(library) = BlurayLibrary::load() else {
+        return playlists
+            .iter()
+            .map(|playlist| BlurayPlaylistMetadata {
+                playlist: *playlist,
+                ..Default::default()
+            })
+            .collect();
+    };
 
     // SAFETY: libbluray owns the opaque handle. It is checked before use and
     // closed after all playlist queries; no pointers escape this block.
     unsafe {
-        let bluray = bd_open(root.as_ptr(), ptr::null());
+        let bluray = (library.bd_open)(root.as_ptr(), ptr::null());
         if bluray.is_null() {
             return playlists
                 .iter()
@@ -241,15 +253,15 @@ fn bluray_playlist_metadata(root: &Path, playlists: &[u32]) -> Vec<BlurayPlaylis
                 })
                 .collect();
         }
-        let main_playlist = main_playlist(bluray);
-        let title_numbers = title_numbers_by_playlist(bluray);
+        let main_playlist = main_playlist(&library, bluray);
+        let title_numbers = title_numbers_by_playlist(&library, bluray);
         let metadata = playlists
             .iter()
             .map(|playlist| {
-                let size = (bd_select_playlist(bluray, *playlist) == 1)
-                    .then(|| bd_get_title_size(bluray))
+                let size = ((library.bd_select_playlist)(bluray, *playlist) == 1)
+                    .then(|| (library.bd_get_title_size)(bluray))
                     .filter(|size| *size > 0);
-                let info = bd_get_playlist_info(bluray, *playlist, 0);
+                let info = (library.bd_get_playlist_info)(bluray, *playlist, 0);
                 if info.is_null() {
                     return BlurayPlaylistMetadata {
                         playlist: *playlist,
@@ -269,11 +281,11 @@ fn bluray_playlist_metadata(root: &Path, playlists: &[u32]) -> Vec<BlurayPlaylis
                     authored_stream_pids: authored_stream_pids_from_title_info(title_info),
                     is_main_title: main_playlist == Some(*playlist),
                 };
-                bd_free_title_info(info);
+                (library.bd_free_title_info)(info);
                 result
             })
             .collect();
-        bd_close(bluray);
+        (library.bd_close)(bluray);
         metadata
     }
 }
@@ -303,6 +315,7 @@ struct BlurayTitleInfo {
     chapters: *const BlurayTitleChapter,
     _marks: *const std::ffi::c_void,
     _mvc_base_view_r_flag: u8,
+    _sdr_conversion_notification_flag: u8,
 }
 
 #[cfg(target_os = "linux")]
@@ -317,12 +330,14 @@ struct BlurayClipInfo {
     ig_stream_count: u8,
     sec_audio_stream_count: u8,
     sec_video_stream_count: u8,
+    _dv_stream_count: u8,
     video_streams: *const BlurayStreamInfo,
     audio_streams: *const BlurayStreamInfo,
     pg_streams: *const BlurayStreamInfo,
     ig_streams: *const BlurayStreamInfo,
     sec_audio_streams: *const BlurayStreamInfo,
     sec_video_streams: *const BlurayStreamInfo,
+    _dv_streams: *const BlurayStreamInfo,
     _start_time: u64,
     in_time: u64,
     out_time: u64,
@@ -340,6 +355,10 @@ struct BlurayStreamInfo {
     pid: u16,
     _aspect: u8,
     _subpath_id: u8,
+    _dynamic_range_type: u8,
+    _color_space: u8,
+    _cr_flag: u8,
+    _hdr_plus_flag: u8,
 }
 
 #[cfg(target_os = "linux")]
@@ -350,72 +369,109 @@ struct BlurayTitleChapter {
     duration: u64,
     _offset: u64,
     _clip_ref: std::ffi::c_uint,
+    _chapter_name: *const std::ffi::c_char,
 }
 
 #[cfg(target_os = "linux")]
-#[link(name = "bluray")]
-unsafe extern "C" {
-    #[link_name = "bd_open"]
-    fn bd_open(
-        device_path: *const std::ffi::c_char,
-        keyfile_path: *const std::ffi::c_char,
-    ) -> *mut std::ffi::c_void;
-    #[link_name = "bd_close"]
-    fn bd_close(bluray: *mut std::ffi::c_void);
-    #[link_name = "bd_select_playlist"]
-    fn bd_select_playlist(bluray: *mut std::ffi::c_void, playlist: u32) -> i32;
-    #[link_name = "bd_get_titles"]
-    fn bd_get_titles(bluray: *mut std::ffi::c_void, flags: u8, minimum_seconds: u32) -> u32;
-    #[link_name = "bd_get_main_title"]
-    fn bd_get_main_title(bluray: *mut std::ffi::c_void) -> i32;
-    #[link_name = "bd_get_title_info"]
-    fn bd_get_title_info(
-        bluray: *mut std::ffi::c_void,
-        title_index: u32,
-        angle: u32,
-    ) -> *mut std::ffi::c_void;
-    #[link_name = "bd_get_playlist_info"]
-    fn bd_get_playlist_info(
-        bluray: *mut std::ffi::c_void,
-        playlist: u32,
-        angle: u32,
-    ) -> *mut std::ffi::c_void;
-    #[link_name = "bd_free_title_info"]
-    fn bd_free_title_info(title_info: *mut std::ffi::c_void);
-    #[link_name = "bd_select_title"]
-    fn bd_select_title(bluray: *mut std::ffi::c_void, title_index: u32) -> i32;
-    #[link_name = "bd_get_title_size"]
-    fn bd_get_title_size(bluray: *mut std::ffi::c_void) -> u64;
+struct BlurayLibrary {
+    handle: *mut std::ffi::c_void,
+    bd_open: unsafe extern "C" fn(
+        *const std::ffi::c_char,
+        *const std::ffi::c_char,
+    ) -> *mut std::ffi::c_void,
+    bd_close: unsafe extern "C" fn(*mut std::ffi::c_void),
+    bd_select_playlist: unsafe extern "C" fn(*mut std::ffi::c_void, u32) -> i32,
+    bd_get_titles: unsafe extern "C" fn(*mut std::ffi::c_void, u8, u32) -> u32,
+    bd_get_main_title: unsafe extern "C" fn(*mut std::ffi::c_void) -> i32,
+    bd_get_title_info:
+        unsafe extern "C" fn(*mut std::ffi::c_void, u32, u32) -> *mut std::ffi::c_void,
+    bd_get_playlist_info:
+        unsafe extern "C" fn(*mut std::ffi::c_void, u32, u32) -> *mut std::ffi::c_void,
+    bd_free_title_info: unsafe extern "C" fn(*mut std::ffi::c_void),
+    bd_select_title: unsafe extern "C" fn(*mut std::ffi::c_void, u32) -> i32,
+    bd_get_title_size: unsafe extern "C" fn(*mut std::ffi::c_void) -> u64,
 }
 
 #[cfg(target_os = "linux")]
-unsafe fn main_playlist(bluray: *mut std::ffi::c_void) -> Option<u32> {
-    let title_count = unsafe { bd_get_titles(bluray, 0, 0) };
-    let main_title = unsafe { bd_get_main_title(bluray) };
+impl BlurayLibrary {
+    fn load() -> Option<Self> {
+        unsafe {
+            let handle = [c"libbluray.so.4", c"libbluray.so"]
+                .into_iter()
+                .find_map(|name| {
+                    let handle = libc::dlopen(name.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
+                    (!handle.is_null()).then_some(handle)
+                })?;
+
+            let library = (|| {
+                Some(Self {
+                    handle,
+                    bd_open: load_symbol(handle, c"bd_open")?,
+                    bd_close: load_symbol(handle, c"bd_close")?,
+                    bd_select_playlist: load_symbol(handle, c"bd_select_playlist")?,
+                    bd_get_titles: load_symbol(handle, c"bd_get_titles")?,
+                    bd_get_main_title: load_symbol(handle, c"bd_get_main_title")?,
+                    bd_get_title_info: load_symbol(handle, c"bd_get_title_info")?,
+                    bd_get_playlist_info: load_symbol(handle, c"bd_get_playlist_info")?,
+                    bd_free_title_info: load_symbol(handle, c"bd_free_title_info")?,
+                    bd_select_title: load_symbol(handle, c"bd_select_title")?,
+                    bd_get_title_size: load_symbol(handle, c"bd_get_title_size")?,
+                })
+            })();
+            if library.is_none() {
+                libc::dlclose(handle);
+            }
+            library
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for BlurayLibrary {
+    fn drop(&mut self) {
+        unsafe {
+            libc::dlclose(self.handle);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn load_symbol<T: Copy>(handle: *mut std::ffi::c_void, name: &std::ffi::CStr) -> Option<T> {
+    let symbol = unsafe { libc::dlsym(handle, name.as_ptr()) };
+    (!symbol.is_null()).then(|| unsafe { std::mem::transmute_copy(&symbol) })
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn main_playlist(library: &BlurayLibrary, bluray: *mut std::ffi::c_void) -> Option<u32> {
+    let title_count = unsafe { (library.bd_get_titles)(bluray, 0, 0) };
+    let main_title = unsafe { (library.bd_get_main_title)(bluray) };
     if main_title < 0 || main_title as u32 >= title_count {
         return None;
     }
-    let info = unsafe { bd_get_title_info(bluray, main_title as u32, 0) };
+    let info = unsafe { (library.bd_get_title_info)(bluray, main_title as u32, 0) };
     if info.is_null() {
         return None;
     }
     let playlist = unsafe { (*info.cast::<BlurayTitleInfo>()).playlist };
-    unsafe { bd_free_title_info(info) };
+    unsafe { (library.bd_free_title_info)(info) };
     Some(playlist)
 }
 
 #[cfg(target_os = "linux")]
-unsafe fn title_numbers_by_playlist(bluray: *mut std::ffi::c_void) -> HashMap<u32, u32> {
-    let title_count = unsafe { bd_get_titles(bluray, 0, 0) };
+unsafe fn title_numbers_by_playlist(
+    library: &BlurayLibrary,
+    bluray: *mut std::ffi::c_void,
+) -> HashMap<u32, u32> {
+    let title_count = unsafe { (library.bd_get_titles)(bluray, 0, 0) };
     let mut numbers = HashMap::new();
     for index in 0..title_count {
-        let info = unsafe { bd_get_title_info(bluray, index, 0) };
+        let info = unsafe { (library.bd_get_title_info)(bluray, index, 0) };
         if info.is_null() {
             continue;
         }
         let playlist = unsafe { (*info.cast::<BlurayTitleInfo>()).playlist };
         numbers.entry(playlist).or_insert(index.saturating_add(1));
-        unsafe { bd_free_title_info(info) };
+        unsafe { (library.bd_free_title_info)(info) };
     }
     numbers
 }

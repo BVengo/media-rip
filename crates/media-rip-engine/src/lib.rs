@@ -15,3 +15,10 @@ pub use engine::OpenMediaEngine;
 pub use metadata::{EpisodeSeasonOptions, refresh_episode_season, video_metadata_link_provider};
 pub use platform::discover_optical_drives;
 pub use probe::{ToolAvailability, tool_availability};
+
+/// Validate a rip without creating directories or starting media processes.
+pub fn validate_rip_request(
+    request: &media_rip_core::RipRequest,
+) -> Result<(), media_rip_core::MediaEngineError> {
+    rip::validate_request(request)
+}

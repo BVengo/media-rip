@@ -11,7 +11,6 @@ use crate::app::{EpisodeMetadataContext, Selection};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InfoAction {
-    ApplySuggestion(u32),
     AssignEpisode {
         title_id: u32,
         episode: u32,
@@ -55,7 +54,6 @@ pub(crate) enum InfoAction {
 
 #[derive(Debug, Clone)]
 pub(crate) struct InfoPanel {
-    pub root: gtk::Box,
     stack: gtk::Stack,
     tags_page: gtk::StackPage,
     metadata_page: gtk::StackPage,
@@ -135,13 +133,7 @@ impl InfoPanel {
         }
         switcher.add_css_class("panel-tabs");
 
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        root.add_css_class("panel");
-        root.append(&switcher);
-        root.append(&stack);
-
         let panel = Self {
-            root,
             stack,
             tags_page,
             metadata_page,
@@ -159,15 +151,12 @@ impl InfoPanel {
         panel
     }
 
-    pub fn add_tab(&self, name: &str, title: &str, child: &impl IsA<gtk::Widget>) {
-        self.stack.add_titled(child, Some(name), title);
-    }
-
     pub fn render(
         &self,
         catalog: Option<&MediaCatalog>,
         selection: &Selection,
         episode_metadata: Option<&EpisodeMetadataContext>,
+        can_undo_metadata: bool,
         on_action: Rc<dyn Fn(InfoAction)>,
     ) {
         let tags_available =
@@ -191,7 +180,13 @@ impl InfoPanel {
             self.render_metadata_unavailable("Open a video disc to inspect metadata proposals.");
             return;
         };
-        self.render_metadata(catalog, selection, episode_metadata, on_action.clone());
+        self.render_metadata(
+            catalog,
+            selection,
+            episode_metadata,
+            can_undo_metadata,
+            on_action.clone(),
+        );
 
         match selection {
             Selection::Source => {
@@ -398,7 +393,7 @@ impl InfoPanel {
                     all_tracks: false,
                 });
             });
-            let save = gtk::Button::with_label("Save for all");
+            let save = gtk::Button::with_label("Apply to all album tracks");
             save.set_tooltip_text(Some(
                 "Replace this tag on every track with the current value",
             ));
@@ -437,6 +432,7 @@ impl InfoPanel {
         catalog: &MediaCatalog,
         selection: &Selection,
         episode_metadata: Option<&EpisodeMetadataContext>,
+        can_undo_metadata: bool,
         on_action: Rc<dyn Fn(InfoAction)>,
     ) {
         clear(&self.metadata_content);
@@ -496,14 +492,13 @@ impl InfoPanel {
                 ));
             }
             self.metadata_content.append(&fields_grid(&fields));
-            let apply = gtk::Button::with_label("Apply metadata to this title");
-            apply.add_css_class("suggested-action");
-            apply.set_halign(gtk::Align::Start);
-            apply.set_tooltip_text(Some(
-                "Apply this proposed episode name, output tags, and structured metadata",
+            let guidance = gtk::Label::new(Some(
+                "Use Review metadata above the content list to compare and apply pending changes.",
             ));
-            apply.connect_clicked(move |_| on_action(InfoAction::ApplySuggestion(title_id)));
-            self.metadata_content.append(&apply);
+            guidance.set_xalign(0.0);
+            guidance.set_wrap(true);
+            guidance.add_css_class("row-detail");
+            self.metadata_content.append(&guidance);
         } else if let Some(metadata) = &title.video_metadata {
             let mut fields = vec![
                 InfoField::new("Status", "Applied"),
@@ -518,12 +513,20 @@ impl InfoPanel {
             append_video_metadata_fields(&mut fields, metadata);
             self.metadata_content.append(&fields_grid(&fields));
             if let Some(context) = episode_metadata {
+                let heading = gtk::Label::new(Some("Change the applied episode"));
+                heading.set_xalign(0.0);
+                heading.add_css_class("config-label");
+                self.metadata_content.append(&heading);
                 self.append_episode_assignment(catalog, title_id, context, on_action.clone());
             }
-            let remove = gtk::Button::with_label("Remove metadata");
+            let remove = gtk::Button::with_label(if can_undo_metadata {
+                "Undo metadata and naming changes"
+            } else {
+                "Remove metadata"
+            });
             remove.set_halign(gtk::Align::Start);
             remove.set_tooltip_text(Some(
-                "Undo the applied metadata and restore the previous name, tags, and output file",
+                "Restore the previous name, filename, tags, track names and metadata",
             ));
             remove.connect_clicked(move |_| {
                 on_action(InfoAction::RemoveVideoMetadata { title_id });
@@ -1014,7 +1017,7 @@ fn add_tag_row(title_id: u32, tag_keys: &[String], on_action: Rc<dyn Fn(InfoActi
         });
     });
     actions.append(&add);
-    let add_all = gtk::Button::with_label("Add for all");
+    let add_all = gtk::Button::with_label("Add to all album tracks");
     add_all.set_tooltip_text(Some("Add or replace this tag on every track"));
     add_all.connect_clicked(move |_| {
         on_action(InfoAction::AddTag {

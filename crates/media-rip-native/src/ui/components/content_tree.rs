@@ -2,12 +2,11 @@ use std::{
     cell::{Cell, RefCell},
     collections::{BTreeSet, HashMap},
     rc::Rc,
-    time::Duration,
 };
 
 use gtk::{glib, prelude::*};
 use media_rip_core::{
-    DiscKind, MediaCatalog, Title, VideoMetadataSuggestion,
+    DiscKind, MediaCatalog, Title,
     util::{format_bytes, format_duration},
 };
 
@@ -22,8 +21,8 @@ pub(crate) enum ContentAction {
         stream_index: u32,
     },
     ToggleExpanded(u32),
-    ApplySuggestion(u32),
-    ApplyAllSuggestions,
+    ApplySuggestions(Vec<u32>),
+    SkipMetadata,
     SetSuggestionSeason(u32),
     SetSuggestionFirstEpisode(u32),
     SetTitleChecked {
@@ -190,21 +189,11 @@ impl ContentTree {
         );
         self.title_box.append(&selection_row);
         *self.select_all.borrow_mut() = Some(select_all);
-        if !catalog.video_metadata_suggestions.is_empty() {
-            self.title_box.append(&suggestions_row(
-                &catalog.video_metadata_suggestions,
-                on_action.clone(),
-            ));
-        }
         let duplicate_originals = duplicate_originals(&catalog.titles);
         for title in &catalog.titles {
             let section = gtk::Box::new(gtk::Orientation::Vertical, 0);
             let (header, button, selected, check_state, name) = title_row(
                 title,
-                catalog
-                    .video_metadata_suggestions
-                    .iter()
-                    .find(|suggestion| suggestion.title_id == title.id),
                 duplicate_originals.get(&title.id).map(String::as_str),
                 expanded.contains(&title.id),
                 on_action.clone(),
@@ -377,7 +366,6 @@ pub(crate) enum DiscUiState {
 
 fn title_row(
     title: &Title,
-    suggestion: Option<&VideoMetadataSuggestion>,
     duplicate_of: Option<&str>,
     expanded: bool,
     on_action: Rc<dyn Fn(ContentAction)>,
@@ -482,30 +470,6 @@ fn title_row(
     detail.add_css_class("row-detail");
     labels.append(&name_line);
     labels.append(&detail);
-    if let Some(suggestion) = suggestion {
-        let suggestion_line = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        let confidence = suggestion.metadata.attribution.confidence_percent;
-        let label = gtk::Label::new(Some(&format!(
-            "Suggested: {} (match score {confidence}/100)",
-            suggestion.name
-        )));
-        label.set_xalign(0.0);
-        label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        label.set_hexpand(true);
-        label.add_css_class("row-detail");
-        label.set_tooltip_text(Some(&suggestion_explanation(suggestion)));
-        let apply = gtk::Button::with_label("Apply");
-        apply.add_css_class("flat");
-        apply.set_tooltip_text(Some(&format!(
-            "Apply this probable episode name and tags\n\n{}",
-            suggestion_explanation(suggestion)
-        )));
-        let callback = on_action.clone();
-        apply.connect_clicked(move |_| callback(ContentAction::ApplySuggestion(title_id)));
-        suggestion_line.append(&label);
-        suggestion_line.append(&apply);
-        labels.append(&suggestion_line);
-    }
     row.append(&labels);
 
     let click = gtk::GestureClick::new();
@@ -529,158 +493,6 @@ fn duplicate_originals(titles: &[Title]) -> HashMap<u32, String> {
         }
     }
     originals
-}
-
-fn suggestions_row(
-    suggestions: &[VideoMetadataSuggestion],
-    on_action: Rc<dyn Fn(ContentAction)>,
-) -> gtk::Box {
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    row.add_css_class("select-all-row");
-    let labels = gtk::Box::new(gtk::Orientation::Vertical, 1);
-    labels.set_hexpand(true);
-    let count = suggestions.len();
-    let title = gtk::Label::new(Some(&format!("{count} probable episode matches")));
-    title.set_xalign(0.0);
-    title.add_css_class("row-title");
-    let proposed_range = suggested_episode_range(suggestions)
-        .map(|range| format!(" Proposed range: {range}."))
-        .unwrap_or_default();
-    let detail = gtk::Label::new(Some(&format!(
-        "Review the suggestions below; existing names remain unchanged until you apply them.{proposed_range}"
-    )));
-    detail.set_xalign(0.0);
-    detail.set_wrap(true);
-    detail.add_css_class("row-detail");
-    labels.append(&title);
-    labels.append(&detail);
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    actions.set_valign(gtk::Align::Center);
-    let season_label = gtk::Label::new(Some("Season"));
-    let season = gtk::Entry::builder()
-        .text(
-            suggestions
-                .iter()
-                .find_map(|suggestion| suggestion.metadata.season)
-                .unwrap_or_default()
-                .to_string(),
-        )
-        .width_chars(3)
-        .max_width_chars(3)
-        .input_purpose(gtk::InputPurpose::Number)
-        .tooltip_text("Enter the season number for the proposed titles")
-        .build();
-    let callback = on_action.clone();
-    connect_positive_number_commit(&season, move |value| {
-        callback(ContentAction::SetSuggestionSeason(value));
-    });
-    let first_episode_label = gtk::Label::new(Some("First episode"));
-    let first_episode = gtk::Entry::builder()
-        .text(
-            suggestions
-                .iter()
-                .filter_map(|suggestion| suggestion.metadata.episode)
-                .min()
-                .unwrap_or_default()
-                .to_string(),
-        )
-        .width_chars(4)
-        .max_width_chars(4)
-        .input_purpose(gtk::InputPurpose::Number)
-        .tooltip_text("Enter the episode number for the first proposed title")
-        .build();
-    let callback = on_action.clone();
-    connect_positive_number_commit(&first_episode, move |value| {
-        callback(ContentAction::SetSuggestionFirstEpisode(value));
-    });
-    let apply = gtk::Button::with_label("Apply all");
-    apply.add_css_class("suggested-action");
-    apply.set_valign(gtk::Align::Center);
-    let season_entry = season.clone();
-    let first_episode_entry = first_episode.clone();
-    apply.connect_clicked(move |_| {
-        commit_positive_number(&season_entry, &|value| {
-            on_action(ContentAction::SetSuggestionSeason(value));
-        });
-        commit_positive_number(&first_episode_entry, &|value| {
-            on_action(ContentAction::SetSuggestionFirstEpisode(value));
-        });
-        on_action(ContentAction::ApplyAllSuggestions);
-    });
-    actions.append(&season_label);
-    actions.append(&season);
-    actions.append(&first_episode_label);
-    actions.append(&first_episode);
-    actions.append(&apply);
-    row.append(&labels);
-    row.append(&actions);
-    row
-}
-
-fn connect_positive_number_commit(entry: &gtk::Entry, callback: impl Fn(u32) + Clone + 'static) {
-    let revision = Rc::new(Cell::new(0_u64));
-    let activate_callback = callback.clone();
-    let activate_revision = revision.clone();
-    entry.connect_activate(move |entry| {
-        activate_revision.set(activate_revision.get().wrapping_add(1));
-        commit_positive_number(entry, &activate_callback);
-    });
-    entry.connect_changed(move |entry| {
-        let pending_revision = revision.get().wrapping_add(1);
-        revision.set(pending_revision);
-        let entry = entry.clone();
-        let revision = revision.clone();
-        let callback = callback.clone();
-        glib::timeout_add_local_once(Duration::from_millis(300), move || {
-            if revision.get() == pending_revision {
-                commit_positive_number(&entry, &callback);
-            }
-        });
-    });
-}
-
-fn commit_positive_number(entry: &gtk::Entry, callback: &impl Fn(u32)) {
-    if let Ok(value) = entry.text().trim().parse::<u32>()
-        && value > 0
-    {
-        callback(value);
-    }
-}
-
-fn suggestion_explanation(suggestion: &VideoMetadataSuggestion) -> String {
-    let mut sections = Vec::new();
-    if !suggestion.evidence.is_empty() {
-        sections.push(format!("Why:\n• {}", suggestion.evidence.join("\n• ")));
-    }
-    if !suggestion.assumptions.is_empty() {
-        sections.push(format!(
-            "Assumptions:\n• {}",
-            suggestion.assumptions.join("\n• ")
-        ));
-    }
-    sections.join("\n")
-}
-
-fn suggested_episode_range(suggestions: &[VideoMetadataSuggestion]) -> Option<String> {
-    let season = suggestions.first()?.metadata.season?;
-    if suggestions
-        .iter()
-        .any(|suggestion| suggestion.metadata.season != Some(season))
-    {
-        return None;
-    }
-    let mut episodes = suggestions
-        .iter()
-        .filter_map(|suggestion| suggestion.metadata.episode);
-    let first = episodes.next()?;
-    let (minimum, maximum) = episodes.fold((first, first), |(minimum, maximum), episode| {
-        (minimum.min(episode), maximum.max(episode))
-    });
-    Some(if minimum == maximum {
-        format!("S{season:02}E{minimum:02}")
-    } else {
-        format!("S{season:02}E{minimum:02}–E{maximum:02}")
-    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -933,6 +745,7 @@ mod tests {
             track_cover_art: BTreeMap::new(),
             metadata_attributions: Vec::new(),
             video_metadata_suggestions: Vec::new(),
+            video_episode_context: None,
         }
     }
 

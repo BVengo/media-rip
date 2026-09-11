@@ -74,7 +74,7 @@ Linux packages are named differently by distribution, but a development machine 
 
 - Rust 1.85 or newer
 - GTK 4 development files
-- libdvdread and libbluray development files
+- libdvdread development files; libbluray is optional at runtime for folders and required for raw Blu-ray devices
 - FFmpeg and FFprobe
 - cdparanoia for Audio CDs; cd-info (from libcdio-utils) is optional for CD-TEXT
 - an FFmpeg build with the `dvdvideo` demuxer and `bluray` protocol for optical media

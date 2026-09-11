@@ -1309,6 +1309,7 @@ mod tests {
             track_cover_art: Default::default(),
             metadata_attributions: Vec::new(),
             video_metadata_suggestions: Vec::new(),
+            video_episode_context: None,
         }
     }
 
@@ -1333,6 +1334,7 @@ mod tests {
             track_cover_art: Default::default(),
             metadata_attributions: Vec::new(),
             video_metadata_suggestions: Vec::new(),
+            video_episode_context: None,
         }
     }
 

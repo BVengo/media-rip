@@ -10,7 +10,8 @@ use std::{collections::HashSet, path::Path};
 
 use media_rip_core::{
     CoverArt, DiscKind, MediaTag, MetadataAttribution, ScanOptions, Title, VideoEpisodeChoice,
-    VideoMetadata, VideoMetadataSuggestion, ports::CancellationToken, util::sanitize_file_name,
+    VideoEpisodeContext, VideoMetadata, VideoMetadataSuggestion, ports::CancellationToken,
+    util::sanitize_file_name,
 };
 
 use cache::MetadataCache;
@@ -59,7 +60,15 @@ impl VideoMetadataLink {
 /// The parsed identity stays private to the engine so callers only need one
 /// URL field and do not need provider-specific controls.
 pub fn video_metadata_link_provider(value: &str) -> Result<&'static str, String> {
-    parse_video_metadata_link(value).map(|link| link.provider())
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("Enter a movie or series title, or a supported metadata URL.".to_owned());
+    }
+    if value.starts_with("http://") || value.starts_with("https://") {
+        parse_video_metadata_link(value).map(|link| link.provider())
+    } else {
+        Ok("title search")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -400,6 +409,8 @@ pub(crate) struct VideoEnrichment {
     pub cover_art: Option<CoverArt>,
     pub attributions: Vec<MetadataAttribution>,
     pub suggestions: Vec<VideoMetadataSuggestion>,
+    pub episode_context: Option<VideoEpisodeContext>,
+    pub identity_url: Option<String>,
     pub warnings: Vec<String>,
 }
 
@@ -587,14 +598,46 @@ pub(crate) fn enrich_video(
         }
     }
 
-    let metadata_query = result
-        .source_name
+    let metadata_query = options
+        .video_metadata_url
         .as_deref()
-        .unwrap_or(fallback_name)
-        .to_owned();
+        .filter(|value| metadata_link.is_none() && !value.trim().is_empty())
+        .map(str::trim)
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            result
+                .source_name
+                .as_deref()
+                .unwrap_or(fallback_name)
+                .to_owned()
+        });
     let parsed_query = parse_disc_label(&metadata_query);
-    let hint = disc_hint_with_link(&parsed_query, metadata_link.as_ref());
-    let query_origin = if discdb_match.is_some() {
+    let hint = disc_hint_with_link(&parsed_query, metadata_link.as_ref())
+        .or_else(|| {
+            discdb_match
+                .as_ref()
+                .and_then(|matched| matched.disc_slug.as_deref())
+                .and_then(|slug| parse_disc_label(slug).hint())
+        })
+        .or_else(|| {
+            discdb_match.as_ref().and_then(|matched| {
+                discdb_episode_season(matched).map(|season| DiscHint {
+                    season,
+                    volume: None,
+                    disc: 1,
+                })
+            })
+        });
+    if let (Some(matched), Some(hint)) = (discdb_match.as_ref(), hint) {
+        result.episode_context = discdb_episode_context(matched, hint.season);
+    }
+    let query_origin = if options
+        .video_metadata_url
+        .as_deref()
+        .is_some_and(|value| metadata_link.is_none() && !value.trim().is_empty())
+    {
+        "user-entered metadata search"
+    } else if discdb_match.is_some() {
         "TheDiscDB exact content-hash match title"
     } else if authored_disc_name {
         "authored disc metadata"
@@ -804,6 +847,34 @@ pub(crate) fn enrich_video(
     );
     let mut spreadsheet_selection = None;
     if let Some(resolved) = resolved {
+        let effective_hint = if previous_fallback_used {
+            previous_hint
+        } else {
+            hint
+        };
+        result.identity_url = matched_identity_url(&resolved.matched);
+        if resolved.matched.media_type == MediaType::Tv {
+            let context = video_episode_context(
+                &resolved.matched,
+                &resolved.episodes,
+                effective_hint.map(|hint| hint.season),
+                if discdb_match.is_some() || metadata_link.is_some() {
+                    98
+                } else if resolved.matched.providers.len() > 1 {
+                    88
+                } else {
+                    75
+                },
+                resolved.match_method,
+            );
+            if result
+                .episode_context
+                .as_ref()
+                .is_none_or(|current| current.choices.is_empty() || !context.choices.is_empty())
+            {
+                result.episode_context = Some(context);
+            }
+        }
         if resolved.matched.media_type == MediaType::Tv && !resolved.episodes.is_empty() {
             spreadsheet_selection = Some((
                 resolved.matched.title.clone(),
@@ -905,6 +976,139 @@ pub(crate) fn enrich_video(
         }
     }
     result
+}
+
+fn video_episode_context(
+    series: &VideoMatch,
+    episodes: &[VideoEpisode],
+    season: Option<u32>,
+    confidence: u8,
+    match_method: &str,
+) -> VideoEpisodeContext {
+    VideoEpisodeContext {
+        metadata: VideoMetadata {
+            attribution: MetadataAttribution::new(
+                series.providers.join(" + "),
+                confidence,
+                match_method,
+            ),
+            content_type: Some("Series".to_owned()),
+            year: series.year,
+            season,
+            episode: None,
+            tmdb_id: series.tmdb_id,
+            tvdb_id: series.tvdb_id,
+            tvmaze_id: series.tvmaze_id,
+        },
+        choices: season
+            .map(|season| video_episode_choices(series, episodes, season))
+            .unwrap_or_default(),
+    }
+}
+
+fn matched_identity_url(matched: &VideoMatch) -> Option<String> {
+    matched
+        .tvmaze_id
+        .map(|id| format!("https://www.tvmaze.com/shows/{id}"))
+        .or_else(|| {
+            matched.tmdb_id.map(|id| {
+                let media_type = match matched.media_type {
+                    MediaType::Movie => "movie",
+                    MediaType::Tv => "tv",
+                };
+                format!("https://www.themoviedb.org/{media_type}/{id}")
+            })
+        })
+}
+
+fn discdb_episode_season(matched: &discdb::DiscDbMatch) -> Option<u32> {
+    let mut seasons = matched
+        .titles
+        .iter()
+        .filter_map(|title| title.item.as_ref())
+        .filter_map(|item| item.season.as_deref())
+        .filter_map(|season| season.parse::<u32>().ok());
+    let season = seasons.next()?;
+    seasons
+        .all(|candidate| candidate == season)
+        .then_some(season)
+}
+
+fn discdb_episode_context(
+    matched: &discdb::DiscDbMatch,
+    season: u32,
+) -> Option<VideoEpisodeContext> {
+    let provider_ids = VideoProviderIds {
+        tmdb: matched.tmdb_id,
+        ..Default::default()
+    };
+    let mut choices = matched
+        .titles
+        .iter()
+        .filter_map(|title| title.item.as_ref())
+        .filter_map(|item| {
+            let item_season = item.season.as_deref()?.parse::<u32>().ok()?;
+            let episode = item.episode.as_deref()?.parse::<u32>().ok()?;
+            (item_season == season && !item.title.trim().is_empty()).then(|| {
+                let name = mapped_display_name(item, &matched.title, Some(season), Some(episode));
+                VideoEpisodeChoice {
+                    episode,
+                    tags: video_tags(
+                        &name,
+                        &matched.title,
+                        matched.year,
+                        Some(season),
+                        Some(episode),
+                        provider_ids,
+                    ),
+                    name,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    choices.sort_by_key(|choice| choice.episode);
+    choices.dedup_by_key(|choice| choice.episode);
+    (!choices.is_empty()).then(|| VideoEpisodeContext {
+        metadata: VideoMetadata {
+            attribution: MetadataAttribution::new("TheDiscDB", 98, "Exact disc content hash"),
+            content_type: Some("Series".to_owned()),
+            year: matched.year,
+            season: Some(season),
+            episode: None,
+            tmdb_id: matched.tmdb_id,
+            tvdb_id: None,
+            tvmaze_id: None,
+        },
+        choices,
+    })
+}
+
+fn video_episode_choices(
+    series: &VideoMatch,
+    episodes: &[VideoEpisode],
+    season: u32,
+) -> Vec<VideoEpisodeChoice> {
+    episodes
+        .iter()
+        .map(|episode| {
+            let name = format!(
+                "{} - S{season:02}E{:02} - {}",
+                series.title, episode.episode_number, episode.name
+            );
+            VideoEpisodeChoice {
+                episode: episode.episode_number,
+                tags: video_tags(
+                    &name,
+                    &series.title,
+                    series.year,
+                    Some(season),
+                    Some(episode.episode_number),
+                    VideoProviderIds::from(series),
+                ),
+                name,
+            }
+        })
+        .collect()
 }
 
 fn provider_lookups_empty(
@@ -2629,14 +2833,108 @@ mod tests {
 
     use super::{
         DiscHint, MediaType, ProviderLookup, VideoEpisode, VideoMatch, VideoMetadataLink,
-        assign_output_names, disc_hint, disc_title_report, mapped_display_name,
-        merge_episode_metadata, parse_video_metadata_link, probable_episode_suggestions,
-        provider_matches_agree, reconcile_provider_lookups, searchable_disc_name,
-        title_review_score, tvdb::TvdbMediaType, video_metadata_link_provider,
+        assign_output_names, disc_hint, disc_title_report, discdb_episode_context,
+        mapped_display_name, merge_episode_metadata, parse_video_metadata_link,
+        probable_episode_suggestions, provider_matches_agree, reconcile_provider_lookups,
+        searchable_disc_name, title_review_score, tvdb::TvdbMediaType, video_episode_context,
+        video_metadata_link_provider,
     };
 
     #[test]
+    fn resolved_series_retains_episode_choices_without_title_suggestions() {
+        let series = VideoMatch {
+            providers: vec!["TheDiscDB", "TMDB"],
+            media_type: MediaType::Tv,
+            title: "Example Show".to_owned(),
+            year: Some(2024),
+            runtime_minutes: Some(45),
+            tmdb_id: Some(42),
+            tvdb_id: None,
+            tvmaze_id: None,
+        };
+        let episodes = vec![VideoEpisode {
+            episode_number: 3,
+            name: "Third Episode".to_owned(),
+            runtime: Some(45),
+        }];
+
+        let context = video_episode_context(&series, &episodes, Some(2), 98, "Exact disc match");
+
+        assert_eq!(context.metadata.season, Some(2));
+        assert_eq!(context.metadata.episode, None);
+        assert_eq!(context.metadata.tmdb_id, Some(42));
+        assert_eq!(context.choices[0].episode, 3);
+        assert_eq!(
+            context.choices[0].name,
+            "Example Show - S02E03 - Third Episode"
+        );
+    }
+
+    #[test]
+    fn resolved_series_without_a_season_still_retains_its_identity() {
+        let series = VideoMatch {
+            providers: vec!["TVMaze"],
+            media_type: MediaType::Tv,
+            title: "Example Show".to_owned(),
+            year: Some(2024),
+            runtime_minutes: Some(45),
+            tmdb_id: None,
+            tvdb_id: None,
+            tvmaze_id: Some(82),
+        };
+
+        let context = video_episode_context(&series, &[], None, 75, "Exact title match");
+
+        assert_eq!(context.metadata.season, None);
+        assert!(context.choices.is_empty());
+        assert_eq!(
+            super::matched_identity_url(&series).as_deref(),
+            Some("https://www.tvmaze.com/shows/82")
+        );
+    }
+
+    #[test]
+    fn exact_disc_match_retains_episode_choices_without_an_external_provider() {
+        let matched = super::discdb::DiscDbMatch {
+            title: "Example Show".to_owned(),
+            media_type: "Series".to_owned(),
+            year: Some(2024),
+            tmdb_id: Some(42),
+            imdb_id: None,
+            disc_slug: Some("S01D01".to_owned()),
+            titles: vec![super::discdb::DiscDbTitle {
+                index: 0,
+                duration: "45:00".to_owned(),
+                size: 1,
+                item: Some(super::discdb::DiscDbItem {
+                    title: "Pilot".to_owned(),
+                    item_type: "Episode".to_owned(),
+                    season: Some("1".to_owned()),
+                    episode: Some("1".to_owned()),
+                }),
+            }],
+        };
+
+        let context = discdb_episode_context(&matched, 1).unwrap();
+
+        assert_eq!(context.metadata.season, Some(1));
+        assert_eq!(context.choices[0].name, "Example Show - S01E01 - Pilot");
+        assert_eq!(
+            context.choices[0]
+                .tags
+                .iter()
+                .find(|tag| tag.key == "episode_id")
+                .map(|tag| tag.value.as_str()),
+            Some("1")
+        );
+    }
+
+    #[test]
     fn metadata_links_select_the_provider_and_exact_identity() {
+        assert_eq!(
+            video_metadata_link_provider("The Expanse"),
+            Ok("title search")
+        );
         assert_eq!(
             parse_video_metadata_link("https://www.tvmaze.com/shows/82/game-of-thrones"),
             Ok(VideoMetadataLink::Tvmaze { show_id: 82 })

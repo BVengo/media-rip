@@ -18,15 +18,7 @@ pub(crate) fn run(
     events: &Sender<EngineEvent>,
     cancellation: &CancellationToken,
 ) -> Result<(), MediaEngineError> {
-    if request.selections.is_empty() {
-        return Err(MediaEngineError::Other(
-            "select at least one title before saving".to_owned(),
-        ));
-    }
-    if !crate::probe::tool_availability().ffmpeg {
-        return Err(MediaEngineError::MissingTool("ffmpeg".to_owned()));
-    }
-    ffmpeg::validate_profile_available(request.output_profile)?;
+    validate_request(&request)?;
 
     fs::create_dir_all(&request.output_directory).map_err(|error| {
         MediaEngineError::Other(format!(
@@ -35,6 +27,8 @@ pub(crate) fn run(
         ))
     })?;
     validate_output_directory(&request.output_directory)?;
+    // Repeat destination checks after creating and probing the directory so a
+    // file that appeared after the UI review is still never overwritten.
     preflight(&request)?;
 
     let _ = events.send(EngineEvent::RipStarted {
@@ -80,6 +74,19 @@ pub(crate) fn run(
         destination: request.output_directory,
     });
     Ok(())
+}
+
+pub(crate) fn validate_request(request: &RipRequest) -> Result<(), MediaEngineError> {
+    if request.selections.is_empty() {
+        return Err(MediaEngineError::Other(
+            "select at least one title before saving".to_owned(),
+        ));
+    }
+    if !crate::probe::tool_availability().ffmpeg {
+        return Err(MediaEngineError::MissingTool("ffmpeg".to_owned()));
+    }
+    ffmpeg::validate_profile_available(request.output_profile)?;
+    preflight(request)
 }
 
 fn preflight(request: &RipRequest) -> Result<(), MediaEngineError> {
@@ -346,6 +353,7 @@ mod tests {
                 track_cover_art: Default::default(),
                 metadata_attributions: Vec::new(),
                 video_metadata_suggestions: Vec::new(),
+                video_episode_context: None,
             },
             selections: vec![
                 RipSelection {

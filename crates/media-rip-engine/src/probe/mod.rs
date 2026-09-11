@@ -432,6 +432,9 @@ pub(crate) fn scan_source(
         if let Some(identity) = &enrichment.disc_identity {
             source_info.push(InfoField::new("Disc identity", identity));
         }
+        if let Some(url) = &enrichment.identity_url {
+            source_info.push(InfoField::new("Metadata URL", url));
+        }
         if !enrichment.suggestions.is_empty() {
             source_info.push(InfoField::new(
                 "Probable episode matches",
@@ -497,8 +500,10 @@ pub(crate) fn scan_source(
             .map(|enrichment| enrichment.attributions.clone())
             .unwrap_or_default(),
         video_metadata_suggestions: video_enrichment
-            .map(|enrichment| enrichment.suggestions)
+            .as_ref()
+            .map(|enrichment| enrichment.suggestions.clone())
             .unwrap_or_default(),
+        video_episode_context: video_enrichment.and_then(|enrichment| enrichment.episode_context),
     };
     diagnostics::catalog(&catalog);
     Ok(catalog)

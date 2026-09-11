@@ -20,7 +20,7 @@ pub(crate) struct Sidebar {
 impl Sidebar {
     pub fn new() -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        root.set_size_request(400, -1);
+        root.set_size_request(320, -1);
 
         let info = InfoPanel::new();
 
@@ -71,21 +71,12 @@ impl Sidebar {
         let config_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         config_content.append(&profile_panel);
         config_content.append(&output_content);
-        let config_scroll = gtk::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .vscrollbar_policy(gtk::PolicyType::Automatic)
-            .min_content_height(110)
-            .child(&config_content)
-            .build();
-        info.add_tab("configuration", "Configuration", &config_scroll);
-        info.root.set_vexpand(true);
-        root.append(&info.root);
-
+        root.append(&config_content);
         let selection_summary = gtk::Label::new(Some("No items selected"));
-        selection_summary.set_xalign(0.5);
+        selection_summary.set_xalign(0.0);
+        selection_summary.set_hexpand(true);
         selection_summary.add_css_class("row-detail");
         selection_summary.set_wrap(true);
-        root.append(&selection_summary);
 
         let rip = gtk::Button::new();
         rip.add_css_class("make-mkv-button");
@@ -99,7 +90,6 @@ impl Sidebar {
         rip_content.append(&rip_icon);
         rip_content.append(&rip_label);
         rip.set_child(Some(&rip_content));
-        root.append(&rip);
 
         Self {
             root,
@@ -131,7 +121,7 @@ impl Sidebar {
         let selected = profiles[selected_index];
         self.profile_description.set_text(selected.description());
         self.rip_label.set_text(if selected.is_audio_only() {
-            "Rip audio"
+            "Start audio rip"
         } else {
             "Start rip"
         });

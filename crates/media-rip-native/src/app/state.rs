@@ -3,9 +3,9 @@ use std::{
     path::PathBuf,
 };
 
-use media_rip_core::{
-    Drive, MediaCatalog, OutputProfile, VideoEpisodeChoice, VideoMetadata, ports::CancellationToken,
-};
+use media_rip_core::{Drive, MediaCatalog, OutputProfile, VideoMetadata, ports::CancellationToken};
+
+pub(crate) use media_rip_core::VideoEpisodeContext as EpisodeMetadataContext;
 
 use super::AppSettings;
 
@@ -28,21 +28,13 @@ pub(crate) enum BusyState {
     Ripping,
 }
 
-/// Season metadata retained independently from the pending automatic
-/// suggestions. This lets a user assign an episode that the heuristic did not
-/// propose, including after all automatic suggestions have been applied.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct EpisodeMetadataContext {
-    pub metadata: VideoMetadata,
-    pub choices: Vec<VideoEpisodeChoice>,
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct VideoMetadataBackup {
     pub name: String,
     pub output_file: String,
     pub tags: Vec<media_rip_core::MediaTag>,
     pub metadata: Option<VideoMetadata>,
+    pub tracks: Vec<media_rip_core::Track>,
 }
 
 #[derive(Debug, Default)]
@@ -62,6 +54,9 @@ pub(crate) struct AppState {
     pub episode_metadata: Option<EpisodeMetadataContext>,
     pub pending_suggestion_season: Option<u32>,
     pub video_metadata_backups: BTreeMap<u32, VideoMetadataBackup>,
+    pub reidentification_backup: Option<Box<MediaCatalog>>,
+    pub metadata_step_complete: bool,
+    pub metadata_skipped: bool,
 }
 
 impl AppState {

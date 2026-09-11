@@ -73,6 +73,14 @@ pub struct VideoEpisodeChoice {
     pub tags: Vec<MediaTag>,
 }
 
+/// A resolved series and season retained even when disc-title matching could
+/// not propose an episode automatically.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VideoEpisodeContext {
+    pub metadata: VideoMetadata,
+    pub choices: Vec<VideoEpisodeChoice>,
+}
+
 impl MediaTag {
     pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
@@ -321,6 +329,8 @@ pub struct MediaCatalog {
     pub metadata_attributions: Vec<MetadataAttribution>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub video_metadata_suggestions: Vec<VideoMetadataSuggestion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_episode_context: Option<VideoEpisodeContext>,
 }
 
 impl MediaCatalog {
