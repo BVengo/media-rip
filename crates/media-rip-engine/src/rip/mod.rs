@@ -18,6 +18,9 @@ pub(crate) fn run(
     events: &Sender<EngineEvent>,
     cancellation: &CancellationToken,
 ) -> Result<(), MediaEngineError> {
+    if cancellation.is_cancelled() {
+        return Err(MediaEngineError::Cancelled);
+    }
     validate_request(&request)?;
 
     fs::create_dir_all(&request.output_directory).map_err(|error| {
@@ -98,7 +101,24 @@ fn preflight(request: &RipRequest) -> Result<(), MediaEngineError> {
         ));
     }
     let mut destinations = HashSet::new();
+    let mut title_ids = HashSet::new();
     for selection in &request.selections {
+        if !title_ids.insert(selection.title_id) {
+            return Err(MediaEngineError::Other(format!(
+                "title {} was selected more than once",
+                selection.title_id
+            )));
+        }
+        let mut streams = HashSet::new();
+        if selection
+            .stream_indices
+            .iter()
+            .any(|index| !streams.insert(*index))
+        {
+            return Err(MediaEngineError::Other(
+                "a stream was selected more than once".to_owned(),
+            ));
+        }
         let title = request
             .catalog
             .titles
@@ -137,7 +157,19 @@ fn preflight(request: &RipRequest) -> Result<(), MediaEngineError> {
                 destination.display()
             )));
         }
-        if destination.exists() && !request.overwrite {
+        if destination == request.catalog.source.path
+            || (destination
+                .canonicalize()
+                .ok()
+                .zip(request.catalog.source.path.canonicalize().ok())
+                .is_some_and(|(a, b)| a == b))
+        {
+            return Err(MediaEngineError::Other(
+                "the destination is the input file; choose a different output name or folder"
+                    .to_owned(),
+            ));
+        }
+        if destination.symlink_metadata().is_ok() && !request.overwrite {
             return Err(MediaEngineError::Other(format!(
                 "{} already exists; choose a different output name",
                 destination.display()
@@ -222,11 +254,9 @@ fn validate_output_directory(directory: &std::path::Path) -> Result<(), MediaEng
     ));
     let mut file = OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .open(&probe)
         .map_err(|error| {
-            let _ = fs::remove_file(&probe);
             MediaEngineError::Other(format!("cannot write to {}: {error}", directory.display()))
         })?;
     let result = file
@@ -258,6 +288,43 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn rejects_duplicate_titles_even_with_different_names() {
+        let mut request = request();
+        request.selections[1].title_id = request.selections[0].title_id;
+        assert!(
+            preflight(&request)
+                .unwrap_err()
+                .to_string()
+                .contains("selected more than once")
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_streams() {
+        let mut request = request();
+        request.selections[0].stream_indices = vec![0, 0];
+        assert!(
+            preflight(&request)
+                .unwrap_err()
+                .to_string()
+                .contains("stream was selected more than once")
+        );
+    }
+
+    #[test]
+    fn rejects_replacing_the_source_even_with_overwrite_enabled() {
+        let mut request = request();
+        request.catalog.source.path = request.output_directory.join("title-0.mkv");
+        request.overwrite = true;
+        assert!(
+            preflight(&request)
+                .unwrap_err()
+                .to_string()
+                .contains("destination is the input")
+        );
+    }
 
     #[test]
     fn preflight_rejects_duplicate_destinations_before_ripping() {
@@ -308,6 +375,7 @@ mod tests {
     fn request() -> RipRequest {
         let titles = (0..2)
             .map(|id| Title {
+                dvd: None,
                 id,
                 source_title_id: id.to_string(),
                 disc_title_number: None,
@@ -352,6 +420,7 @@ mod tests {
                 cover_art: None,
                 track_cover_art: Default::default(),
                 metadata_attributions: Vec::new(),
+                audio_metadata_candidates: Vec::new(),
                 video_metadata_suggestions: Vec::new(),
                 video_episode_context: None,
             },

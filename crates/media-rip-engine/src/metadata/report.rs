@@ -603,6 +603,7 @@ mod tests {
 
     fn title(id: u32, duration_ms: u64, chapters: usize) -> Title {
         Title {
+            dvd: None,
             id,
             source_title_id: format!("title-{id}"),
             disc_title_number: Some(id + 1),

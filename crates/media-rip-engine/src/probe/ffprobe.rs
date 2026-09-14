@@ -1,9 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    io::Read,
-    process::{Command, Output, Stdio},
-    thread,
-    time::Duration,
+    process::Command,
 };
 
 use media_rip_core::{
@@ -14,7 +11,7 @@ use serde::Deserialize;
 
 use crate::{
     diagnostics,
-    process::ProcessSupervisor,
+    process::run_cancellable,
     source::{ProbeCandidate, ProbeInput},
 };
 
@@ -183,52 +180,6 @@ fn estimate_size_from_packet_sample(
     Ok(size_from_packet_sample(&sample, duration_ms))
 }
 
-fn run_cancellable(
-    mut command: Command,
-    cancellation: &CancellationToken,
-) -> Result<Output, MediaEngineError> {
-    if cancellation.is_cancelled() {
-        return Err(MediaEngineError::Cancelled);
-    }
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut process = ProcessSupervisor::spawn(&mut command)
-        .map_err(|error| MediaEngineError::Process(format!("could not run ffprobe: {error}")))?;
-    let stdout = process.take_stdout().ok_or_else(|| {
-        MediaEngineError::Process("ffprobe output pipe is unavailable".to_owned())
-    })?;
-    let stderr = process
-        .take_stderr()
-        .ok_or_else(|| MediaEngineError::Process("ffprobe error pipe is unavailable".to_owned()))?;
-    let stdout_reader = thread::spawn(move || read_bytes(stdout));
-    let stderr_reader = thread::spawn(move || read_bytes(stderr));
-
-    loop {
-        if cancellation.is_cancelled() {
-            let _ = process.terminate();
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
-            return Err(MediaEngineError::Cancelled);
-        }
-        if let Some(status) = process
-            .try_wait()
-            .map_err(|error| MediaEngineError::Process(format!("ffprobe wait failed: {error}")))?
-        {
-            return Ok(Output {
-                status,
-                stdout: stdout_reader.join().unwrap_or_default(),
-                stderr: stderr_reader.join().unwrap_or_default(),
-            });
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-}
-
-fn read_bytes(mut reader: impl Read) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    let _ = reader.read_to_end(&mut bytes);
-    bytes
-}
-
 fn size_from_packet_sample(sample: &PacketProbeOutput, duration_ms: u64) -> Option<u64> {
     let mut bytes = 0_u64;
     let mut first_timestamp = f64::INFINITY;
@@ -315,21 +266,41 @@ fn title_from_probe(
         .filter(|chapters| !chapters.is_empty())
         .unwrap_or(ffprobe_chapters);
 
-    let duration_ms = probe
-        .format
-        .duration
-        .as_deref()
-        .and_then(parse_milliseconds)
+    let authored_duration = matches!(&candidate.input, ProbeInput::Dvd { .. })
+        .then(|| {
+            candidate
+                .chapters
+                .as_ref()
+                .and_then(|chapters| chapters.last())
+                .map(|chapter| chapter.end_ms)
+        })
+        .flatten();
+    let duration_ms = authored_duration
+        .or_else(|| {
+            probe
+                .format
+                .duration
+                .as_deref()
+                .and_then(parse_milliseconds)
+        })
         .or_else(|| chapters.last().map(|chapter| chapter.end_ms))
         .unwrap_or(0);
-    let exact_size = probe.format.size.as_deref().and_then(parse_positive_u64);
+    // Disc demuxers may report the entire VOB/device size for every title.
+    let exact_size = matches!(&candidate.input, ProbeInput::File(_))
+        .then(|| probe.format.size.as_deref().and_then(parse_positive_u64))
+        .flatten();
     let bit_rate = probe
         .format
         .bit_rate
         .as_deref()
         .and_then(parse_positive_u64)
         .or(stream_bit_rate);
-    let (size_bytes, size_is_estimate) = if let Some(size) = exact_size {
+    let dvd_size = matches!(&candidate.input, ProbeInput::Dvd { .. })
+        .then_some(candidate.size_hint)
+        .flatten();
+    let (size_bytes, size_is_estimate) = if let Some(size) = dvd_size {
+        (Some(size), true)
+    } else if let Some(size) = exact_size {
         (Some(size), false)
     } else if let Some(size) = candidate
         .size_hint
@@ -347,6 +318,10 @@ fn title_from_probe(
     let name = tag(&probe.format.tags, "title").unwrap_or_else(|| candidate.display_name.clone());
 
     Ok(Title {
+        dvd: match &candidate.input {
+            ProbeInput::Dvd { info, .. } => info.clone(),
+            _ => None,
+        },
         id: candidate.id,
         source_title_id: candidate.source_title_id.clone(),
         disc_title_number: candidate.disc_title_number,
@@ -523,6 +498,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dvd_sizes_and_durations_use_title_cells_not_whole_disc_values() {
+        let candidate = ProbeCandidate {
+            id: 65,
+            source_title_id: "65".into(),
+            disc_title_number: Some(65),
+            display_name: "DVD title 65".into(),
+            input: ProbeInput::Dvd {
+                root: "/disc".into(),
+                title: 65,
+                info: None,
+            },
+            size_hint: Some(4_700_000_000),
+            size_hint_is_estimate: true,
+            chapters: Some(vec![media_rip_core::Chapter {
+                index: 0,
+                start_ms: 0,
+                end_ms: 5_424_000,
+                name: None,
+            }]),
+            segment_count: None,
+            segment_map: None,
+            duplicate_key: None,
+            stream_languages: Default::default(),
+            authored_stream_pids: None,
+            is_main_title: false,
+        };
+        let probe: ProbeOutput = serde_json::from_value(serde_json::json!({
+            "format": {"size": "8500000000", "duration": "99999"},
+            "streams": [{"index":0,"codec_type":"video"}]
+        }))
+        .unwrap();
+        let title = title_from_probe(&candidate, probe).unwrap();
+        assert_eq!(title.size_bytes, Some(4_700_000_000));
+        assert!(title.size_is_estimate);
+        assert_eq!(title.duration_ms, 5_424_000);
+    }
+
+    #[test]
     fn cancelled_probe_does_not_start_a_process() {
         let cancellation = CancellationToken::default();
         cancellation.cancel();
@@ -577,6 +590,7 @@ mod tests {
             disc_title_number: None,
             display_name: "Title 1".to_owned(),
             input: ProbeInput::Dvd {
+                info: None,
                 root: PathBuf::from("/disc"),
                 title: 1,
             },

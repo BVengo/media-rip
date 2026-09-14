@@ -1,8 +1,6 @@
-use std::{
-    collections::{BTreeSet, HashMap},
-    fs,
-    path::Path,
-};
+mod layout;
+
+use std::{collections::HashMap, fs, path::Path};
 
 use media_rip_core::MediaEngineError;
 
@@ -24,40 +22,91 @@ struct DvdTitleReference {
 
 pub(crate) fn dvd_candidates(path: &Path) -> Result<Vec<ProbeCandidate>, MediaEngineError> {
     let root = normalize_disc_root(path, "VIDEO_TS");
-    if !root.is_dir() {
-        let title_references = read_title_references_from_dvd(&root).unwrap_or_default();
-        let title_count = (!title_references.is_empty())
-            .then_some(title_references.len() as u32)
-            .or_else(|| read_title_count_from_dvd(&root))
-            .ok_or_else(|| {
-                MediaEngineError::UnsupportedInput(format!(
-                    "could not read the DVD-Video title table from {}",
-                    root.display()
-                ))
-            })?;
-        let size_hints = title_sizes_from_dvd(&root, &title_references);
-        return Ok(title_candidates(root, title_count, &size_hints));
+    let load = |title_set: u8, backup: bool| {
+        if root.is_dir() {
+            let video_ts = locate_child_case_insensitive(&root, "VIDEO_TS")
+                .unwrap_or_else(|| root.join("VIDEO_TS"));
+            let stem = if title_set == 0 {
+                "VIDEO_TS".to_owned()
+            } else {
+                format!("VTS_{title_set:02}_0")
+            };
+            let extension = if backup { "BUP" } else { "IFO" };
+            let path = locate_child_case_insensitive(&video_ts, &format!("{stem}.{extension}"))?;
+            let size = fs::metadata(&path).ok()?.len();
+            if size > 16 * 1024 * 1024 {
+                return None;
+            }
+            fs::read(path).ok()
+        } else {
+            read_info_file_from_dvd(&root, title_set, backup)
+        }
+    };
+    let references = load(0, false)
+        .and_then(|bytes| read_title_references_from_manager(&bytes))
+        .or_else(|| load(0, true).and_then(|bytes| read_title_references_from_manager(&bytes)))
+        .ok_or_else(|| {
+            MediaEngineError::UnsupportedInput(format!(
+                "No valid DVD title table in IFO or BUP at {}",
+                root.display()
+            ))
+        })?;
+    let mut candidates = title_candidates(root.clone(), references.len() as u32, &[]);
+    let mut title_sets = HashMap::new();
+    for (candidate, (disc_title, reference)) in candidates.iter_mut().zip(references) {
+        candidate.id = disc_title;
+        candidate.source_title_id = disc_title.to_string();
+        candidate.disc_title_number = Some(disc_title);
+        if let ProbeInput::Dvd { title, .. } = &mut candidate.input {
+            *title = disc_title;
+        }
+        let (primary, backup, vob_sectors) =
+            title_sets.entry(reference.title_set).or_insert_with(|| {
+                (
+                    load(reference.title_set, false),
+                    load(reference.title_set, true),
+                    title_vob_sectors(&root, reference.title_set),
+                )
+            });
+        let primary_layout = primary
+            .as_deref()
+            .ok_or_else(|| "Title-set IFO is unreadable".to_owned())
+            .and_then(|bytes| layout::analyse(bytes, reference, *vob_sectors));
+        let analysed = primary_layout.or_else(|primary_error| {
+            backup
+                .as_deref()
+                .and_then(|bytes| layout::analyse(bytes, reference, *vob_sectors).ok())
+                .ok_or(primary_error)
+        });
+        let info = match analysed {
+            Ok(layout) => {
+                candidate.size_hint = Some(layout.size);
+                candidate.size_hint_is_estimate = true;
+                candidate.segment_count = Some(layout.info.cell_count);
+                candidate.segment_map = Some(layout.map);
+                candidate.chapters = Some(layout.chapters);
+                candidate.duplicate_key = Some(layout.duplicate_key);
+                layout.info
+            }
+            Err(error) => media_rip_core::model::dvd::DvdTitleInfo {
+                title_set: reference.title_set,
+                title_in_set: reference.title_number,
+                chapter_range: None,
+                cell_count: 0,
+                leading_padding_cells: 0,
+                trailing_padding_cells: 0,
+                warnings: vec![format!("DVD layout could not be validated: {error}")],
+            },
+        };
+        candidate.display_name = format!(
+            "DVD title {} · VTS {:02}, title {}",
+            candidate.source_title_id, reference.title_set, reference.title_number
+        );
+        if let ProbeInput::Dvd { info: slot, .. } = &mut candidate.input {
+            *slot = Some(info);
+        }
     }
-    let video_ts =
-        locate_child_case_insensitive(&root, "VIDEO_TS").unwrap_or_else(|| root.join("VIDEO_TS"));
-    let manager = locate_child_case_insensitive(&video_ts, "VIDEO_TS.IFO")
-        .unwrap_or_else(|| video_ts.join("VIDEO_TS.IFO"));
-
-    let title_references = read_title_references(&manager).unwrap_or_default();
-    let title_count = (!title_references.is_empty())
-        .then_some(title_references.len() as u32)
-        .or_else(|| read_title_count(&manager))
-        .or_else(|| read_title_count_from_dvd(&root))
-        .unwrap_or_else(|| count_title_sets(&video_ts));
-    if title_count == 0 {
-        return Err(MediaEngineError::UnsupportedInput(format!(
-            "{} does not contain a readable DVD-Video title table",
-            root.display()
-        )));
-    }
-
-    let size_hints = title_sizes_from_directory(&video_ts, &title_references);
-    Ok(title_candidates(root, title_count, &size_hints))
+    Ok(candidates)
 }
 
 pub(crate) fn dvd_text_name(path: &Path) -> Option<String> {
@@ -71,7 +120,7 @@ pub(crate) fn dvd_text_name(path: &Path) -> Option<String> {
     } else {
         #[cfg(target_os = "linux")]
         {
-            read_info_file_from_dvd(&root, 0)?
+            read_info_file_from_dvd(&root, 0, false)?
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -110,6 +159,7 @@ fn title_candidates(
             input: ProbeInput::Dvd {
                 root: root.clone(),
                 title,
+                info: None,
             },
             size_hint: size_hints.get(index).copied().flatten(),
             size_hint_is_estimate: false,
@@ -124,199 +174,98 @@ fn title_candidates(
         .collect()
 }
 
-fn read_title_count(path: &Path) -> Option<u32> {
-    let bytes = fs::read(path).ok()?;
-    title_count_from_manager(&bytes)
-}
-
-fn read_title_references(path: &Path) -> Option<Vec<DvdTitleReference>> {
-    let bytes = fs::read(path).ok()?;
-    read_title_references_from_manager(&bytes)
-}
-
-fn title_count_from_manager(bytes: &[u8]) -> Option<u32> {
-    let table = title_table_from_manager(bytes)?;
-    read_be_u16(table.get(..2)?)
-        .filter(|count| *count > 0)
-        .map(u32::from)
-}
-
-fn read_title_references_from_manager(bytes: &[u8]) -> Option<Vec<DvdTitleReference>> {
+fn read_title_references_from_manager(bytes: &[u8]) -> Option<Vec<(u32, DvdTitleReference)>> {
     read_title_references_from_table(title_table_from_manager(bytes)?)
 }
 
 fn title_table_from_manager(bytes: &[u8]) -> Option<&[u8]> {
     let sector = read_be_u32(bytes.get(TT_SRPT_SECTOR_OFFSET..TT_SRPT_SECTOR_OFFSET + 4)?)?;
+    if sector == 0 {
+        return None;
+    }
     bytes.get((sector as usize).checked_mul(DVD_SECTOR_SIZE)?..)
 }
 
-fn read_title_references_from_table(table: &[u8]) -> Option<Vec<DvdTitleReference>> {
+fn read_title_references_from_table(table: &[u8]) -> Option<Vec<(u32, DvdTitleReference)>> {
     let count = read_be_u16(table.get(..2)?)? as usize;
-    (0..count)
-        .map(|index| {
-            let offset = 8_usize.checked_add(index.checked_mul(12)?)?;
-            let title_set = table.get(offset + 6).copied()?;
-            let title_number = table.get(offset + 7).copied()?;
-            (title_set > 0 && title_number > 0).then_some(DvdTitleReference {
-                title_set,
-                title_number,
-            })
-        })
-        .collect()
-}
-
-fn title_sizes_from_directory(video_ts: &Path, titles: &[DvdTitleReference]) -> Vec<Option<u64>> {
-    let mut title_sets = HashMap::new();
-    titles
-        .iter()
-        .map(|title| {
-            let bytes = title_sets.entry(title.title_set).or_insert_with(|| {
-                locate_child_case_insensitive(
-                    video_ts,
-                    &format!("VTS_{:02}_0.IFO", title.title_set),
-                )
-                .and_then(|path| fs::read(path).ok())
-            });
-            bytes
-                .as_deref()
-                .and_then(|bytes| title_size_from_vts_ifo(bytes, title.title_number))
-        })
-        .collect()
-}
-
-fn title_size_from_vts_ifo(bytes: &[u8], title_number: u8) -> Option<u64> {
-    let programs = title_programs(bytes, title_number)?;
-    let pgcit = table_at_sector_pointer(bytes, VTS_PGCIT_SECTOR_OFFSET)?;
-    let pgc_count = read_be_u16(pgcit.get(..2)?)?;
-    let mut cells = BTreeSet::new();
-
-    for (pgcn, pgn) in programs {
-        if pgcn == 0 || pgcn > pgc_count {
-            return None;
-        }
-        let search_pointer = 8_usize.checked_add((usize::from(pgcn) - 1).checked_mul(8)?)?;
-        let pgc_offset = read_be_u32(pgcit.get(search_pointer + 4..search_pointer + 8)?)? as usize;
-        let pgc = pgcit.get(pgc_offset..)?;
-        let program_count = usize::from(*pgc.get(2)?);
-        let cell_count = usize::from(*pgc.get(3)?);
-        let program = usize::from(pgn);
-        if program == 0 || program > program_count || cell_count == 0 {
-            return None;
-        }
-        let program_map = read_be_u16(pgc.get(230..232)?)? as usize;
-        let cell_playback = read_be_u16(pgc.get(232..234)?)? as usize;
-        let first_cell = usize::from(*pgc.get(program_map + program - 1)?);
-        let next_cell = if program < program_count {
-            usize::from(*pgc.get(program_map + program)?)
-        } else {
-            cell_count + 1
-        };
-        if first_cell == 0 || first_cell >= next_cell || next_cell > cell_count + 1 {
-            return None;
-        }
-        for cell in first_cell..next_cell {
-            cells.insert((pgcn, pgc_offset, cell_playback, cell));
-        }
-    }
-
-    cells
-        .into_iter()
-        .try_fold(0_u64, |total, (_pgcn, pgc_offset, cell_playback, cell)| {
-            let pgc = pgcit.get(pgc_offset..)?;
-            let cell_offset = cell_playback.checked_add((cell - 1).checked_mul(24)?)?;
-            let cell = pgc.get(cell_offset..cell_offset + 24)?;
-            let block_mode = cell[0] >> 6;
-            let block_type = (cell[0] >> 4) & 0x03;
-            if block_type == 1 && block_mode != 1 {
-                return Some(total);
-            }
-            let first_sector = read_be_u32(cell.get(8..12)?)?;
-            let last_sector = read_be_u32(cell.get(20..24)?)?;
-            let sectors = last_sector.checked_sub(first_sector)?.checked_add(1)?;
-            total.checked_add(u64::from(sectors).checked_mul(DVD_SECTOR_SIZE as u64)?)
-        })
-}
-
-fn title_programs(bytes: &[u8], title_number: u8) -> Option<BTreeSet<(u16, u16)>> {
-    let table = table_at_sector_pointer(bytes, VTS_PTT_SRPT_SECTOR_OFFSET)?;
-    let title_count = usize::from(read_be_u16(table.get(..2)?)?);
-    let title_index = usize::from(title_number).checked_sub(1)?;
-    if title_index >= title_count {
+    if count == 0 || count > 99 || table.len() < 8 + count * 12 {
         return None;
     }
-    let offset_entry = 8_usize.checked_add(title_index.checked_mul(4)?)?;
-    let start = read_be_u32(table.get(offset_entry..offset_entry + 4)?)? as usize;
-    let end = if title_index + 1 < title_count {
-        let next_entry = offset_entry.checked_add(4)?;
-        read_be_u32(table.get(next_entry..next_entry + 4)?)? as usize
-    } else {
-        (read_be_u32(table.get(4..8)?)? as usize).checked_add(1)?
-    };
-    if start >= end || end > table.len() || (end - start) % 4 != 0 {
-        return None;
-    }
-    let programs = table[start..end]
-        .chunks_exact(4)
-        .filter_map(|entry| {
-            let pgcn = read_be_u16(entry.get(..2)?)?;
-            let pgn = read_be_u16(entry.get(2..4)?)?;
-            (pgcn > 0 && pgn > 0).then_some((pgcn, pgn))
+    let references = (0..count)
+        .filter_map(|index| {
+            let offset = 8 + index * 12;
+            let title_set = table[offset + 6];
+            let title_number = table[offset + 7];
+            (title_set > 0 && title_set <= 99 && title_number > 0 && title_number <= 99).then_some(
+                (
+                    index as u32 + 1,
+                    DvdTitleReference {
+                        title_set,
+                        title_number,
+                    },
+                ),
+            )
         })
-        .collect::<BTreeSet<_>>();
-    (!programs.is_empty()).then_some(programs)
+        .collect::<Vec<_>>();
+    (!references.is_empty()).then_some(references)
 }
 
 fn table_at_sector_pointer(bytes: &[u8], pointer: usize) -> Option<&[u8]> {
     let sector = read_be_u32(bytes.get(pointer..pointer + 4)?)? as usize;
+    if sector == 0 {
+        return None;
+    }
     bytes.get(sector.checked_mul(DVD_SECTOR_SIZE)?..)
 }
 
+fn title_vob_sectors(root: &Path, title_set: u8) -> Option<u64> {
+    if root.is_dir() {
+        let video_ts = locate_child_case_insensitive(root, "VIDEO_TS")
+            .unwrap_or_else(|| root.join("VIDEO_TS"));
+        let mut bytes = 0_u64;
+        for part in 1..=9 {
+            let Some(path) =
+                locate_child_case_insensitive(&video_ts, &format!("VTS_{title_set:02}_{part}.VOB"))
+            else {
+                break;
+            };
+            bytes = bytes.checked_add(fs::metadata(path).ok()?.len())?;
+        }
+        return (bytes > 0 && bytes.is_multiple_of(DVD_SECTOR_SIZE as u64))
+            .then_some(bytes / DVD_SECTOR_SIZE as u64);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+        let path = CString::new(root.as_os_str().as_bytes()).ok()?;
+        // SAFETY: Handles are checked and closed. DVDFileSize reports sectors
+        // for the concatenated title VOBs (libdvdread domain 3).
+        unsafe {
+            let dvd = dvd_open(path.as_ptr());
+            if dvd.is_null() {
+                return None;
+            }
+            let file = dvd_open_file(dvd, i32::from(title_set), 3);
+            if file.is_null() {
+                dvd_close(dvd);
+                return None;
+            }
+            let sectors = u64::try_from(dvd_file_size(file))
+                .ok()
+                .filter(|size| *size > 0);
+            dvd_close_file(file);
+            dvd_close(dvd);
+            sectors
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 #[cfg(target_os = "linux")]
-fn read_title_count_from_dvd(path: &Path) -> Option<u32> {
-    title_count_from_manager(&read_info_file_from_dvd(path, 0)?)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn read_title_count_from_dvd(_path: &Path) -> Option<u32> {
-    None
-}
-
-#[cfg(target_os = "linux")]
-const DVD_READ_INFO_FILE: i32 = 0;
-
-#[cfg(target_os = "linux")]
-fn read_title_references_from_dvd(path: &Path) -> Option<Vec<DvdTitleReference>> {
-    read_title_references_from_manager(&read_info_file_from_dvd(path, 0)?)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn read_title_references_from_dvd(_path: &Path) -> Option<Vec<DvdTitleReference>> {
-    None
-}
-
-#[cfg(target_os = "linux")]
-fn title_sizes_from_dvd(path: &Path, titles: &[DvdTitleReference]) -> Vec<Option<u64>> {
-    let mut title_sets = HashMap::new();
-    titles
-        .iter()
-        .map(|title| {
-            let bytes = title_sets
-                .entry(title.title_set)
-                .or_insert_with(|| read_info_file_from_dvd(path, title.title_set));
-            bytes
-                .as_deref()
-                .and_then(|bytes| title_size_from_vts_ifo(bytes, title.title_number))
-        })
-        .collect()
-}
-
-#[cfg(not(target_os = "linux"))]
-fn title_sizes_from_dvd(_path: &Path, titles: &[DvdTitleReference]) -> Vec<Option<u64>> {
-    vec![None; titles.len()]
-}
-
-#[cfg(target_os = "linux")]
-fn read_info_file_from_dvd(path: &Path, title_set: u8) -> Option<Vec<u8>> {
+fn read_info_file_from_dvd(path: &Path, title_set: u8, backup: bool) -> Option<Vec<u8>> {
     use std::{ffi::CString, os::unix::ffi::OsStrExt};
 
     let path = CString::new(path.as_os_str().as_bytes()).ok()?;
@@ -329,7 +278,7 @@ fn read_info_file_from_dvd(path: &Path, title_set: u8) -> Option<Vec<u8>> {
         if dvd.is_null() {
             return None;
         }
-        let file = dvd_open_file(dvd, i32::from(title_set), DVD_READ_INFO_FILE);
+        let file = dvd_open_file(dvd, i32::from(title_set), i32::from(backup));
         if file.is_null() {
             dvd_close(dvd);
             return None;
@@ -337,6 +286,9 @@ fn read_info_file_from_dvd(path: &Path, title_set: u8) -> Option<Vec<u8>> {
         let result = (|| {
             let blocks = usize::try_from(dvd_file_size(file)).ok()?;
             let capacity = blocks.checked_mul(DVD_SECTOR_SIZE)?;
+            if capacity == 0 || capacity > 16 * 1024 * 1024 {
+                return None;
+            }
             let mut bytes = vec![0_u8; capacity];
             let bytes_read =
                 usize::try_from(dvd_read_bytes(file, bytes.as_mut_ptr().cast(), capacity)).ok()?;
@@ -372,16 +324,6 @@ unsafe extern "C" {
     ) -> isize;
 }
 
-fn count_title_sets(video_ts: &Path) -> u32 {
-    fs::read_dir(video_ts)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| entry.file_name().to_str().map(str::to_ascii_uppercase))
-        .filter(|name| name.starts_with("VTS_") && name.ends_with("_0.IFO") && name.len() == 12)
-        .count() as u32
-}
-
 fn read_be_u16(bytes: &[u8]) -> Option<u16> {
     let bytes: [u8; 2] = bytes.try_into().ok()?;
     Some(u16::from_be_bytes(bytes))
@@ -392,120 +334,90 @@ fn read_be_u32(bytes: &[u8]) -> Option<u32> {
     Some(u32::from_be_bytes(bytes))
 }
 
+#[cfg(not(target_os = "linux"))]
+fn read_info_file_from_dvd(_path: &Path, _title_set: u8, _backup: bool) -> Option<Vec<u8>> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn reads_the_optional_dvd_text_disc_name() {
-        let mut bytes = vec![0_u8; DVD_SECTOR_SIZE * 2];
+    fn skips_invalid_references_without_renumbering_remaining_titles() {
+        let mut table = vec![0; 8 + 99 * 12];
+        table[..2].copy_from_slice(&99_u16.to_be_bytes());
+        table[8 + 64 * 12 + 6] = 1;
+        table[8 + 64 * 12 + 7] = 1;
+        let references = read_title_references_from_table(&table).unwrap();
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].0, 65);
+    }
+
+    #[test]
+    fn uses_valid_backup_tables_when_ifo_files_are_unreadable() {
+        let root =
+            std::env::temp_dir().join(format!("media-rip-dvd-backup-{}", std::process::id()));
+        let video_ts = root.join("VIDEO_TS");
+        fs::create_dir_all(&video_ts).unwrap();
+        let mut manager = vec![0; DVD_SECTOR_SIZE * 2];
+        manager[..12].copy_from_slice(b"DVDVIDEO-VMG");
+        manager[TT_SRPT_SECTOR_OFFSET..TT_SRPT_SECTOR_OFFSET + 4]
+            .copy_from_slice(&1_u32.to_be_bytes());
+        manager[DVD_SECTOR_SIZE..DVD_SECTOR_SIZE + 2].copy_from_slice(&1_u16.to_be_bytes());
+        manager[DVD_SECTOR_SIZE + 14] = 1;
+        manager[DVD_SECTOR_SIZE + 15] = 1;
+        fs::write(video_ts.join("VIDEO_TS.IFO"), [0; 16]).unwrap();
+        fs::write(video_ts.join("VIDEO_TS.BUP"), manager).unwrap();
+        fs::write(video_ts.join("VTS_01_0.IFO"), [0; 16]).unwrap();
+        fs::write(
+            video_ts.join("VTS_01_0.BUP"),
+            layout::tests::fixture(&[(60_000, 0, 99)]),
+        )
+        .unwrap();
+        fs::File::create(video_ts.join("VTS_01_1.VOB"))
+            .unwrap()
+            .set_len(100 * 2048)
+            .unwrap();
+        let candidates = dvd_candidates(&root).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].size_hint, Some(100 * 2048));
+        let ProbeInput::Dvd {
+            info: Some(info), ..
+        } = &candidates[0].input
+        else {
+            panic!("missing DVD analysis")
+        };
+        assert!(info.warnings.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_impossible_title_counts_and_truncated_tables() {
+        for count in [0_u16, 100, u16::MAX] {
+            let mut table = vec![0; 1200];
+            table[..2].copy_from_slice(&count.to_be_bytes());
+            assert!(read_title_references_from_table(&table).is_none());
+        }
+        assert!(read_title_references_from_table(&[0, 2, 0, 0, 0, 0, 0, 0]).is_none());
+    }
+
+    #[test]
+    fn keeps_authored_title_numbers_in_probe_candidates() {
+        let candidates = title_candidates("/disc".into(), 99, &[]);
+        assert_eq!(candidates[64].disc_title_number, Some(65));
+        assert_eq!(candidates[64].source_title_id, "65");
+    }
+
+    #[test]
+    fn reads_optional_disc_text_name() {
+        let mut bytes = vec![0; DVD_SECTOR_SIZE * 2];
         bytes[TXTDT_MGI_SECTOR_OFFSET..TXTDT_MGI_SECTOR_OFFSET + 4]
             .copy_from_slice(&1_u32.to_be_bytes());
         bytes[DVD_SECTOR_SIZE..DVD_SECTOR_SIZE + 11].copy_from_slice(b"Example DVD");
-
         assert_eq!(
             dvd_text_name_from_manager(&bytes).as_deref(),
             Some("Example DVD")
-        );
-    }
-
-    #[test]
-    fn reads_title_count_from_video_manager_table() {
-        let mut bytes = vec![0; DVD_SECTOR_SIZE * 2];
-        bytes[TT_SRPT_SECTOR_OFFSET..TT_SRPT_SECTOR_OFFSET + 4]
-            .copy_from_slice(&1_u32.to_be_bytes());
-        bytes[DVD_SECTOR_SIZE..DVD_SECTOR_SIZE + 2].copy_from_slice(&7_u16.to_be_bytes());
-
-        let path = std::env::temp_dir().join(format!(
-            "media-rip-dvd-ifo-test-{}-{}.ifo",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("thread")
-        ));
-        fs::write(&path, bytes).unwrap();
-        assert_eq!(read_title_count(&path), Some(7));
-        fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn creates_one_probe_candidate_for_each_dvd_title() {
-        let candidates = title_candidates("/disc".into(), 3, &[]);
-
-        assert_eq!(candidates.len(), 3);
-        assert_eq!(candidates[0].source_title_id, "1");
-        assert_eq!(candidates[2].source_title_id, "3");
-        assert!(matches!(
-            candidates[1].input,
-            ProbeInput::Dvd { title: 2, .. }
-        ));
-    }
-
-    #[test]
-    fn reads_title_references_from_the_video_manager_table() {
-        let mut bytes = vec![0; DVD_SECTOR_SIZE * 2];
-        bytes[TT_SRPT_SECTOR_OFFSET..TT_SRPT_SECTOR_OFFSET + 4]
-            .copy_from_slice(&1_u32.to_be_bytes());
-        bytes[DVD_SECTOR_SIZE..DVD_SECTOR_SIZE + 2].copy_from_slice(&2_u16.to_be_bytes());
-        bytes[DVD_SECTOR_SIZE + 8 + 6] = 1;
-        bytes[DVD_SECTOR_SIZE + 8 + 7] = 2;
-        bytes[DVD_SECTOR_SIZE + 20 + 6] = 3;
-        bytes[DVD_SECTOR_SIZE + 20 + 7] = 4;
-
-        let path = std::env::temp_dir().join(format!(
-            "media-rip-dvd-title-set-test-{}.ifo",
-            std::process::id()
-        ));
-        fs::write(&path, bytes).unwrap();
-        assert_eq!(
-            read_title_references(&path),
-            Some(vec![
-                DvdTitleReference {
-                    title_set: 1,
-                    title_number: 2
-                },
-                DvdTitleReference {
-                    title_set: 3,
-                    title_number: 4
-                }
-            ])
-        );
-        fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn calculates_a_title_size_from_its_program_cells() {
-        let mut bytes = vec![0_u8; 4_600];
-        bytes[VTS_PTT_SRPT_SECTOR_OFFSET..VTS_PTT_SRPT_SECTOR_OFFSET + 4]
-            .copy_from_slice(&1_u32.to_be_bytes());
-        bytes[VTS_PGCIT_SECTOR_OFFSET..VTS_PGCIT_SECTOR_OFFSET + 4]
-            .copy_from_slice(&2_u32.to_be_bytes());
-
-        let ptt = DVD_SECTOR_SIZE;
-        bytes[ptt..ptt + 2].copy_from_slice(&1_u16.to_be_bytes());
-        bytes[ptt + 4..ptt + 8].copy_from_slice(&15_u32.to_be_bytes());
-        bytes[ptt + 8..ptt + 12].copy_from_slice(&12_u32.to_be_bytes());
-        bytes[ptt + 12..ptt + 14].copy_from_slice(&1_u16.to_be_bytes());
-        bytes[ptt + 14..ptt + 16].copy_from_slice(&1_u16.to_be_bytes());
-
-        let pgcit = DVD_SECTOR_SIZE * 2;
-        bytes[pgcit..pgcit + 2].copy_from_slice(&1_u16.to_be_bytes());
-        bytes[pgcit + 12..pgcit + 16].copy_from_slice(&16_u32.to_be_bytes());
-        let pgc = pgcit + 16;
-        bytes[pgc + 2] = 1;
-        bytes[pgc + 3] = 2;
-        bytes[pgc + 230..pgc + 232].copy_from_slice(&236_u16.to_be_bytes());
-        bytes[pgc + 232..pgc + 234].copy_from_slice(&237_u16.to_be_bytes());
-        bytes[pgc + 236] = 1;
-
-        let first_cell = pgc + 237;
-        bytes[first_cell + 8..first_cell + 12].copy_from_slice(&100_u32.to_be_bytes());
-        bytes[first_cell + 20..first_cell + 24].copy_from_slice(&199_u32.to_be_bytes());
-        let second_cell = first_cell + 24;
-        bytes[second_cell + 8..second_cell + 12].copy_from_slice(&300_u32.to_be_bytes());
-        bytes[second_cell + 20..second_cell + 24].copy_from_slice(&349_u32.to_be_bytes());
-
-        assert_eq!(
-            title_size_from_vts_ifo(&bytes, 1),
-            Some(150 * DVD_SECTOR_SIZE as u64)
         );
     }
 }

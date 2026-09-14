@@ -1,3 +1,10 @@
+use media_rip_core::model::editing::{
+    apply_video_suggestion, assign_video_episode, episode_metadata_context, mark_title_completed,
+    preserve_choices_and_stage_reidentification, remove_cover_art, rename_title, rename_track,
+    replace_suggestion_season_choices, set_catalog_selection, set_cover_art,
+    set_suggestion_first_episode, set_tag, shift_video_suggestion_seasons, shift_video_suggestions,
+    update_probable_suggestion_count,
+};
 use std::{
     cell::{Cell, RefCell},
     fs,
@@ -13,7 +20,7 @@ use std::{
 use gtk::{gio, glib, prelude::*};
 use media_rip_core::{
     CoverArt, DiscKind, Drive, EngineEvent, LogLevel, MediaEngine, OutputProfile, PreviousDvdMatch,
-    RipRequest, ScanOptions, TrackCoverArt, VideoMetadataSuggestion,
+    RipRequest, ScanOptions,
     ports::CancellationToken,
     util::{ensure_extension, format_bytes, format_duration, format_rate, sanitize_file_name},
 };
@@ -23,8 +30,8 @@ use media_rip_engine::{
 
 use crate::{
     app::{
-        AppSettings, AppState, BusyState, EpisodeMetadataContext, RememberedDvdMatch, Selection,
-        VideoMetadataBackup, notifications::publish_ntfy, settings::format_audio_cd_file_name,
+        AppSettings, AppState, BusyState, RememberedDvdMatch, Selection, VideoMetadataBackup,
+        notifications::publish_ntfy, settings::format_audio_cd_file_name,
     },
     ui::{
         ContentAction, DiscUiState, IdentificationDialog, InfoAction, MainWindow, SettingsDialog,
@@ -251,6 +258,7 @@ impl Controller {
         let this = self.clone();
         self.ui.window.connect_close_request(move |_| {
             let mut state = this.state.borrow_mut();
+            state.cancel_metadata_refresh();
             if !state.is_busy() {
                 return glib::Propagation::Proceed;
             }
@@ -657,6 +665,7 @@ impl Controller {
         let token = CancellationToken::default();
         {
             let mut state = self.state.borrow_mut();
+            state.cancel_metadata_refresh();
             state.busy = BusyState::Scanning;
             state.cancellation = Some(token.clone());
             if user_initiated {
@@ -782,6 +791,7 @@ impl Controller {
         {
             let mut state = self.state.borrow_mut();
             state.output_directory = request.output_directory.clone();
+            state.cancel_metadata_refresh();
             state.busy = BusyState::Ripping;
             state.cancellation = Some(token.clone());
             state.completed_titles_this_job = 0;
@@ -808,7 +818,7 @@ impl Controller {
             let ripping = self.state.borrow().busy == BusyState::Ripping;
             if ripping {
                 self.ui.output_review.set_cancelling();
-                self.ui.set_status("Ready", None);
+                self.ui.set_status("Cancelling…", None);
             } else {
                 self.ui.set_status("Cancelling…", None);
             }
@@ -924,16 +934,8 @@ impl Controller {
                 }
                 let output_profile = if reidentification_backup.is_some() {
                     self.state.borrow().output_profile
-                } else if catalog.source.kind == media_rip_core::DiscKind::AudioCd {
-                    match self.state.borrow().settings.audio_cd.output_format.as_str() {
-                        "wav" => OutputProfile::AudioWav,
-                        "opus" => OutputProfile::AudioOpus,
-                        "aac" => OutputProfile::AudioAac,
-                        _ => OutputProfile::AudioFlac,
-                    }
                 } else {
-                    OutputProfile::from_id(&self.state.borrow().settings.advanced.default_profile)
-                        .unwrap_or_default()
+                    self.state.borrow().settings.profile_for_catalog(&catalog)
                 };
                 self.state
                     .borrow()
@@ -981,7 +983,8 @@ impl Controller {
                         .require_audio_cd_metadata;
                 let metadata_available = audio_cd_metadata_available(&catalog);
                 let episode_metadata = episode_metadata_context(&catalog);
-                let metadata_step_complete = catalog.video_metadata_suggestions.is_empty();
+                let metadata_step_complete = catalog.video_metadata_suggestions.is_empty()
+                    && catalog.audio_metadata_candidates.is_empty();
                 {
                     let mut state = self.state.borrow_mut();
                     if reidentification_backup.is_none() {
@@ -1065,12 +1068,16 @@ impl Controller {
                 self.ui.set_status("Cancelled.", None);
                 self.render();
             }
-            EngineEvent::EpisodeSeasonRefreshed { season, choices } => {
+            EngineEvent::EpisodeSeasonRefreshed {
+                request_id,
+                season,
+                choices,
+            } => {
                 let mut correction = None;
                 let mut updated = false;
                 {
                     let mut state = self.state.borrow_mut();
-                    if state.pending_suggestion_season != Some(season) {
+                    if !state.accept_metadata_refresh(request_id, season) {
                         return;
                     }
                     state.pending_suggestion_season = None;
@@ -1123,9 +1130,13 @@ impl Controller {
                 }
                 self.render();
             }
-            EngineEvent::EpisodeSeasonRefreshFailed { season, error } => {
+            EngineEvent::EpisodeSeasonRefreshFailed {
+                request_id,
+                season,
+                error,
+            } => {
                 let mut state = self.state.borrow_mut();
-                if state.pending_suggestion_season != Some(season) {
+                if !state.accept_metadata_refresh(request_id, season) {
                     return;
                 }
                 state.pending_suggestion_season = None;
@@ -1140,6 +1151,14 @@ impl Controller {
                 self.ui
                     .messages
                     .append(&format!("Saving {title_count} selected item(s)."));
+            }
+            EngineEvent::RipPhaseChanged { phase, title_name } => {
+                self.ui.progress.set_fraction(0.0);
+                self.ui.progress.set_text(Some(phase.description()));
+                self.ui
+                    .progress_title
+                    .set_text(&format!("{}: {title_name}", phase.description()));
+                self.ui.set_status(phase.description(), None);
             }
             EngineEvent::RipProgress(progress) => {
                 self.ui.output_review.update_progress(&progress);
@@ -1356,6 +1375,9 @@ impl Controller {
     }
 
     fn handle_content_action(&self, action: ContentAction) {
+        if self.state.borrow().is_busy() {
+            return;
+        }
         if matches!(action, ContentAction::ApplySuggestions(_))
             && self.state.borrow().pending_suggestion_season.is_some()
         {
@@ -1369,6 +1391,7 @@ impl Controller {
             action,
             ContentAction::SetAllChecked(_)
                 | ContentAction::ApplySuggestions(_)
+                | ContentAction::ApplyAudioCandidate(_)
                 | ContentAction::SkipMetadata
                 | ContentAction::SetSuggestionSeason(_)
                 | ContentAction::SetSuggestionFirstEpisode(_)
@@ -1431,15 +1454,56 @@ impl Controller {
                             ));
                         }
                         catalog.video_metadata_suggestions.clear();
+                        catalog.audio_metadata_candidates.clear();
                         update_probable_suggestion_count(catalog);
                     }
                     state.metadata_step_complete = true;
                     state.metadata_skipped = false;
                     metadata_decision_completed = true;
                 }
+                ContentAction::ApplyAudioCandidate(id) => {
+                    let template = state.settings.audio_cd.file_name_template.clone();
+                    if let Some(catalog) = state.catalog.as_mut() {
+                        let automatic_names = catalog
+                            .titles
+                            .iter()
+                            .filter(|title| {
+                                title.output_file
+                                    == ensure_extension(
+                                        &format_audio_cd_file_name(
+                                            &template,
+                                            title,
+                                            &catalog.source.name,
+                                        ),
+                                        output_extension,
+                                    )
+                            })
+                            .map(|title| title.id)
+                            .collect::<std::collections::HashSet<_>>();
+                        if catalog.apply_audio_candidate(&id) {
+                            for title in &mut catalog.titles {
+                                if automatic_names.contains(&title.id) {
+                                    title.output_file = ensure_extension(
+                                        &format_audio_cd_file_name(
+                                            &template,
+                                            title,
+                                            &catalog.source.name,
+                                        ),
+                                        output_extension,
+                                    );
+                                }
+                            }
+                            suggestions_applied = catalog.titles.len();
+                            state.metadata_step_complete = true;
+                            state.metadata_skipped = false;
+                            metadata_decision_completed = true;
+                        }
+                    }
+                }
                 ContentAction::SkipMetadata => {
                     if let Some(catalog) = state.catalog.as_mut() {
                         catalog.video_metadata_suggestions.clear();
+                        catalog.audio_metadata_candidates.clear();
                         update_probable_suggestion_count(catalog);
                     }
                     state.metadata_step_complete = true;
@@ -1469,62 +1533,74 @@ impl Controller {
                     }
                 }
                 ContentAction::SetSuggestionSeason(requested_season) => {
+                    if !state.settings.general.allow_online_access {
+                        return;
+                    }
                     let suggestion = state
                         .catalog
                         .as_ref()
-                        .and_then(|catalog| catalog.video_metadata_suggestions.first())
+                        .and_then(|catalog| {
+                            catalog
+                                .video_metadata_suggestions
+                                .iter()
+                                .find(|suggestion| {
+                                    media_rip_core::model::metadata::MetadataKind::from_video(
+                                        &suggestion.metadata,
+                                    ) == Some(
+                                        media_rip_core::model::metadata::MetadataKind::Television,
+                                    )
+                                })
+                        })
                         .cloned();
                     if suggestion
                         .as_ref()
                         .and_then(|suggestion| suggestion.metadata.season)
                         != Some(requested_season)
+                        && let Some(suggestion) = suggestion
                     {
-                        state.pending_suggestion_season = Some(requested_season);
-                        if let Some(suggestion) = suggestion {
-                            let settings = &state.settings.integrations;
-                            let show = suggestion
-                                .tags
-                                .iter()
-                                .find(|tag| tag.key.eq_ignore_ascii_case("show"))
-                                .map(|tag| tag.value.clone())
-                                .unwrap_or_else(|| {
-                                    suggestion
-                                        .name
-                                        .split(" - S")
-                                        .next()
-                                        .unwrap_or(&suggestion.name)
-                                        .to_owned()
-                                });
-                            let options = EpisodeSeasonOptions {
-                                show,
-                                season: requested_season,
-                                year: suggestion.metadata.year,
-                                tmdb_id: suggestion.metadata.tmdb_id,
-                                tvdb_id: suggestion.metadata.tvdb_id,
-                                tvmaze_id: suggestion.metadata.tvmaze_id,
-                                tmdb_access_token: nonempty_owned(&settings.tmdb_access_token),
-                                tvdb_api_key: nonempty_owned(&settings.tvdb_api_key),
-                                tvdb_subscriber_pin: nonempty_owned(&settings.tvdb_subscriber_pin),
-                                tvmaze_enabled: settings.tvmaze_enabled,
-                            };
-                            let events = self.events.clone();
-                            thread::spawn(move || {
-                                let event = match refresh_episode_season(
-                                    options,
-                                    &CancellationToken::default(),
-                                ) {
-                                    Ok(choices) => EngineEvent::EpisodeSeasonRefreshed {
-                                        season: requested_season,
-                                        choices,
-                                    },
-                                    Err(error) => EngineEvent::EpisodeSeasonRefreshFailed {
-                                        season: requested_season,
-                                        error,
-                                    },
-                                };
-                                let _ = events.send(event);
+                        let settings = &state.settings.integrations;
+                        let show = suggestion
+                            .tags
+                            .iter()
+                            .find(|tag| tag.key.eq_ignore_ascii_case("show"))
+                            .map(|tag| tag.value.clone())
+                            .unwrap_or_else(|| {
+                                suggestion
+                                    .name
+                                    .split(" - S")
+                                    .next()
+                                    .unwrap_or(&suggestion.name)
+                                    .to_owned()
                             });
-                        }
+                        let options = EpisodeSeasonOptions {
+                            show,
+                            season: requested_season,
+                            year: suggestion.metadata.year,
+                            tmdb_id: suggestion.metadata.tmdb_id,
+                            tvdb_id: suggestion.metadata.tvdb_id,
+                            tvmaze_id: suggestion.metadata.tvmaze_id,
+                            tmdb_access_token: nonempty_owned(&settings.tmdb_access_token),
+                            tvdb_api_key: nonempty_owned(&settings.tvdb_api_key),
+                            tvdb_subscriber_pin: nonempty_owned(&settings.tvdb_subscriber_pin),
+                            tvmaze_enabled: settings.tvmaze_enabled,
+                        };
+                        let (request_id, token) = state.begin_metadata_refresh(requested_season);
+                        let events = self.events.clone();
+                        thread::spawn(move || {
+                            let event = match refresh_episode_season(options, &token) {
+                                Ok(choices) => EngineEvent::EpisodeSeasonRefreshed {
+                                    request_id,
+                                    season: requested_season,
+                                    choices,
+                                },
+                                Err(error) => EngineEvent::EpisodeSeasonRefreshFailed {
+                                    request_id,
+                                    season: requested_season,
+                                    error,
+                                },
+                            };
+                            let _ = events.send(event);
+                        });
                     }
                 }
                 ContentAction::SetTitleChecked { title_id, selected } => {
@@ -1667,6 +1743,9 @@ impl Controller {
     }
 
     fn handle_info_action(&self, action: InfoAction) {
+        if self.state.borrow().is_busy() {
+            return;
+        }
         if let InfoAction::ChooseCoverArt { title_id } = &action {
             self.choose_cover_art(*title_id);
             return;
@@ -1736,6 +1815,15 @@ impl Controller {
                     &file_name_template,
                     output_extension,
                 );
+                if key.eq_ignore_ascii_case("title") {
+                    if all_tracks {
+                        for title in &catalog.titles {
+                            self.ui.content.sync_title_name(title.id, &title.name);
+                        }
+                    } else {
+                        renamed_title = Some((title_id, value));
+                    }
+                }
                 false
             }
             InfoAction::AddTag {
@@ -1811,11 +1899,17 @@ impl Controller {
         }
         if rerender {
             self.render_info();
+            self.render_metadata();
         }
     }
 
     fn refresh_episode_context_season(&self, requested_season: u32) {
-        let options = {
+        if self.state.borrow().is_busy()
+            || !self.state.borrow().settings.general.allow_online_access
+        {
+            return;
+        }
+        let (options, request_id, token) = {
             let mut state = self.state.borrow_mut();
             let Some(context) = state.episode_metadata.as_ref() else {
                 return;
@@ -1841,17 +1935,19 @@ impl Controller {
                 tvdb_subscriber_pin: nonempty_owned(&settings.tvdb_subscriber_pin),
                 tvmaze_enabled: settings.tvmaze_enabled,
             };
-            state.pending_suggestion_season = Some(requested_season);
-            options
+            let (request_id, token) = state.begin_metadata_refresh(requested_season);
+            (options, request_id, token)
         };
         let events = self.events.clone();
         thread::spawn(move || {
-            let event = match refresh_episode_season(options, &CancellationToken::default()) {
+            let event = match refresh_episode_season(options, &token) {
                 Ok(choices) => EngineEvent::EpisodeSeasonRefreshed {
+                    request_id,
                     season: requested_season,
                     choices,
                 },
                 Err(error) => EngineEvent::EpisodeSeasonRefreshFailed {
+                    request_id,
                     season: requested_season,
                     error,
                 },
@@ -2000,9 +2096,11 @@ impl Controller {
                     .find(|field| field.label == "Year")
                     .map(|field| format!(" ({})", field.value))
                     .unwrap_or_default();
-                let pending = (pending > 0)
-                    .then(|| format!(" · {pending} proposed episode assignment(s)"))
-                    .unwrap_or_default();
+                let pending = if pending > 0 {
+                    format!(" · {pending} proposed episode assignment(s)")
+                } else {
+                    String::new()
+                };
                 format!(
                     "Matched \"{}\"{year} via {} · score {}/100{pending}",
                     catalog.source.name, attribution.provider, attribution.confidence_percent
@@ -2292,6 +2390,9 @@ impl Controller {
 
 fn update_workflow_controls(ui: &MainWindow, state: &AppState) {
     let has_catalog = state.catalog.is_some();
+    ui.metadata
+        .root
+        .set_sensitive(has_catalog && !state.is_busy());
     ui.workflow_identify_button.set_sensitive(!state.is_busy());
     ui.workflow_select_button
         .set_sensitive(has_catalog && !state.is_busy());
@@ -2352,208 +2453,6 @@ fn log_label(level: LogLevel) -> &'static str {
     }
 }
 
-fn set_tag(
-    catalog: &mut media_rip_core::MediaCatalog,
-    title_id: u32,
-    key: &str,
-    value: &str,
-    all_tracks: bool,
-    file_name_template: &str,
-    output_extension: &str,
-) -> bool {
-    let key = key.trim().to_ascii_lowercase();
-    if key.is_empty() {
-        return false;
-    }
-    let album = catalog.source.name.clone();
-    let is_audio_cd = catalog.source.kind == DiscKind::AudioCd;
-    let mut renamed = false;
-    for title in &mut catalog.titles {
-        if title.id != title_id && !all_tracks {
-            continue;
-        }
-        let had_auto_name = is_audio_cd
-            && title.output_file
-                == ensure_extension(
-                    &format_audio_cd_file_name(file_name_template, title, &album),
-                    output_extension,
-                );
-        let mut updated = false;
-        title.tags.retain_mut(|tag| {
-            if !tag.key.eq_ignore_ascii_case(&key) {
-                return true;
-            }
-            if updated {
-                return false;
-            }
-            tag.key.clone_from(&key);
-            tag.value = value.to_owned();
-            updated = true;
-            true
-        });
-        if !updated {
-            title.tags.push(media_rip_core::MediaTag::new(&key, value));
-        }
-        if had_auto_name {
-            let updated_output_file = ensure_extension(
-                &format_audio_cd_file_name(file_name_template, title, &album),
-                output_extension,
-            );
-            if title.output_file != updated_output_file {
-                title.output_file = updated_output_file;
-                renamed = true;
-            }
-        }
-    }
-    renamed
-}
-
-fn rename_title(catalog: &mut media_rip_core::MediaCatalog, title_id: u32, name: &str) -> bool {
-    let Some(title) = catalog.titles.iter_mut().find(|title| title.id == title_id) else {
-        return false;
-    };
-    title.name = name.to_owned();
-    if let Some(tag) = title
-        .tags
-        .iter_mut()
-        .find(|tag| tag.key.eq_ignore_ascii_case("title"))
-    {
-        tag.value = name.to_owned();
-    }
-    true
-}
-
-fn rename_track(
-    catalog: &mut media_rip_core::MediaCatalog,
-    title_id: u32,
-    stream_index: u32,
-    name: String,
-) -> Option<media_rip_core::Track> {
-    let track = catalog
-        .titles
-        .iter_mut()
-        .find(|title| title.id == title_id)?
-        .tracks
-        .iter_mut()
-        .find(|track| track.index == stream_index)?;
-    track.name = (!name.trim().is_empty()).then_some(name);
-    Some(track.clone())
-}
-
-fn apply_video_suggestion(
-    catalog: &mut media_rip_core::MediaCatalog,
-    title_id: u32,
-    output_extension: &str,
-) -> bool {
-    let Some(position) = catalog
-        .video_metadata_suggestions
-        .iter()
-        .position(|suggestion| suggestion.title_id == title_id)
-    else {
-        return false;
-    };
-    let Some(title_index) = catalog
-        .titles
-        .iter()
-        .position(|title| title.id == title_id && title.video_metadata.is_none())
-    else {
-        return false;
-    };
-    let suggestion = catalog.video_metadata_suggestions.remove(position);
-    let mut output_file = ensure_extension(&sanitize_file_name(&suggestion.name), output_extension);
-    if catalog.titles.iter().enumerate().any(|(index, title)| {
-        index != title_index && title.output_file.eq_ignore_ascii_case(&output_file)
-    }) {
-        output_file = ensure_extension(
-            &format!(
-                "{}_{}",
-                sanitize_file_name(&suggestion.name),
-                sanitize_file_name(&catalog.titles[title_index].source_title_id)
-            ),
-            output_extension,
-        );
-    }
-    let title = &mut catalog.titles[title_index];
-    title.name = suggestion.name;
-    title.output_file = output_file;
-    title.video_metadata = Some(suggestion.metadata);
-    for suggested_tag in suggestion.tags {
-        if let Some(tag) = title
-            .tags
-            .iter_mut()
-            .find(|tag| tag.key.eq_ignore_ascii_case(&suggested_tag.key))
-        {
-            *tag = suggested_tag;
-        } else {
-            title.tags.push(suggested_tag);
-        }
-    }
-    update_probable_suggestion_count(catalog);
-    true
-}
-
-fn preserve_choices_and_stage_reidentification(
-    catalog: &mut media_rip_core::MediaCatalog,
-    previous: &media_rip_core::MediaCatalog,
-) {
-    let mut staged = Vec::new();
-    for title in &mut catalog.titles {
-        let Some(old_title) = previous
-            .titles
-            .iter()
-            .find(|candidate| candidate.source_title_id == title.source_title_id)
-        else {
-            continue;
-        };
-
-        title.selected = old_title.selected;
-        for track in &mut title.tracks {
-            if let Some(old_track) = old_title
-                .tracks
-                .iter()
-                .find(|candidate| candidate.index == track.index)
-            {
-                track.selected = old_track.selected;
-                track.name = old_track.name.clone();
-            }
-        }
-
-        if let Some(proposed_metadata) = title.video_metadata.take()
-            && (old_title.video_metadata.as_ref() != Some(&proposed_metadata)
-                || old_title.name != title.name)
-        {
-            staged.push(VideoMetadataSuggestion {
-                title_id: title.id,
-                name: title.name.clone(),
-                tags: title.tags.clone(),
-                metadata: proposed_metadata,
-                evidence: vec!["Matched from the identification you requested".to_owned()],
-                assumptions: vec![
-                    "The disc title mapping is unchanged from the current source scan".to_owned(),
-                ],
-                episode_choices: Vec::new(),
-            });
-        }
-
-        title.name = old_title.name.clone();
-        title.output_file = old_title.output_file.clone();
-        title.tags = old_title.tags.clone();
-        title.video_metadata = old_title.video_metadata.clone();
-    }
-    for suggestion in staged {
-        if let Some(existing) = catalog
-            .video_metadata_suggestions
-            .iter_mut()
-            .find(|candidate| candidate.title_id == suggestion.title_id)
-        {
-            *existing = suggestion;
-        } else {
-            catalog.video_metadata_suggestions.push(suggestion);
-        }
-    }
-    update_probable_suggestion_count(catalog);
-}
-
 fn info_action_title_id(action: &InfoAction) -> Option<u32> {
     match action {
         InfoAction::AssignEpisode { title_id, .. }
@@ -2568,66 +2467,6 @@ fn info_action_title_id(action: &InfoAction) -> Option<u32> {
         }
         InfoAction::SetEpisodeSeason(_) => None,
     }
-}
-
-fn assign_video_episode(
-    catalog: &mut media_rip_core::MediaCatalog,
-    context: &EpisodeMetadataContext,
-    title_id: u32,
-    episode: u32,
-    output_extension: &str,
-) -> bool {
-    let Some(choice) = context
-        .choices
-        .iter()
-        .find(|choice| choice.episode == episode)
-        .cloned()
-    else {
-        return false;
-    };
-    let Some(title_index) = catalog.titles.iter().position(|title| title.id == title_id) else {
-        return false;
-    };
-    let mut output_file = ensure_extension(&sanitize_file_name(&choice.name), output_extension);
-    if catalog.titles.iter().enumerate().any(|(index, title)| {
-        index != title_index && title.output_file.eq_ignore_ascii_case(&output_file)
-    }) {
-        output_file = ensure_extension(
-            &format!(
-                "{}_{}",
-                sanitize_file_name(&choice.name),
-                sanitize_file_name(&catalog.titles[title_index].source_title_id)
-            ),
-            output_extension,
-        );
-    }
-    let mut metadata = context.metadata.clone();
-    metadata.episode = Some(episode);
-    metadata.content_type = Some("Episode".to_owned());
-    metadata.attribution.confidence_percent = 100;
-    metadata.attribution.match_method =
-        "User-selected episode from matched season metadata".to_owned();
-
-    let title = &mut catalog.titles[title_index];
-    title.name = choice.name;
-    title.output_file = output_file;
-    title.video_metadata = Some(metadata);
-    for suggested_tag in choice.tags {
-        if let Some(tag) = title
-            .tags
-            .iter_mut()
-            .find(|tag| tag.key.eq_ignore_ascii_case(&suggested_tag.key))
-        {
-            *tag = suggested_tag;
-        } else {
-            title.tags.push(suggested_tag);
-        }
-    }
-    catalog
-        .video_metadata_suggestions
-        .retain(|suggestion| suggestion.title_id != title_id);
-    update_probable_suggestion_count(catalog);
-    true
 }
 
 fn remember_video_metadata_state(state: &mut AppState, title_id: u32) {
@@ -2673,194 +2512,6 @@ fn restore_video_metadata(
     true
 }
 
-fn update_probable_suggestion_count(catalog: &mut media_rip_core::MediaCatalog) {
-    let remaining = catalog.video_metadata_suggestions.len();
-    if let Some(field) = catalog
-        .source_info
-        .iter_mut()
-        .find(|field| field.label == "Probable episode matches")
-    {
-        field.value =
-            format!("{remaining} suggestion(s), not applied — review them in the content list");
-    }
-    if remaining == 0 {
-        catalog
-            .source_info
-            .retain(|field| field.label != "Probable episode matches");
-    }
-}
-
-fn episode_metadata_context(
-    catalog: &media_rip_core::MediaCatalog,
-) -> Option<EpisodeMetadataContext> {
-    if let Some(context) = &catalog.video_episode_context {
-        return Some(context.clone());
-    }
-    let suggestion = catalog
-        .video_metadata_suggestions
-        .iter()
-        .find(|suggestion| !suggestion.episode_choices.is_empty())?;
-    let mut metadata = suggestion.metadata.clone();
-    metadata.episode = None;
-    Some(EpisodeMetadataContext {
-        metadata,
-        choices: suggestion.episode_choices.clone(),
-    })
-}
-
-fn shift_video_suggestions(catalog: &mut media_rip_core::MediaCatalog, offset: i32) -> bool {
-    shift_video_suggestions_with_result(catalog, offset).is_ok_and(|result| result.is_some())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SuggestionShift {
-    offset: i32,
-    unmatched: usize,
-    first: u32,
-    last: u32,
-}
-
-fn shift_video_suggestions_with_result(
-    catalog: &mut media_rip_core::MediaCatalog,
-    offset: i32,
-) -> Result<Option<SuggestionShift>, String> {
-    if offset == 0 {
-        return Ok(None);
-    }
-    let updates = catalog
-        .video_metadata_suggestions
-        .iter()
-        .map(|suggestion| {
-            let episode = suggestion
-                .metadata
-                .episode
-                .and_then(|episode| episode.checked_add_signed(offset))?;
-            suggestion
-                .episode_choices
-                .iter()
-                .find(|choice| choice.episode == episode)
-                .map(|choice| (episode, choice.name.clone(), choice.tags.clone()))
-        })
-        .collect::<Vec<_>>();
-    let unmatched = updates.iter().filter(|update| update.is_none()).count();
-    if unmatched == updates.len() {
-        return Err(
-            "That starting episode leaves no available season episodes for these disc titles."
-                .to_owned(),
-        );
-    }
-    let mut shifted = Vec::with_capacity(updates.len() - unmatched);
-    for (mut suggestion, update) in catalog.video_metadata_suggestions.drain(..).zip(updates) {
-        let Some((episode, name, tags)) = update else {
-            continue;
-        };
-        suggestion.metadata.episode = Some(episode);
-        suggestion.name = name;
-        suggestion.tags = tags;
-        shifted.push(suggestion);
-    }
-    let first = shifted
-        .iter()
-        .filter_map(|suggestion| suggestion.metadata.episode)
-        .min()
-        .expect("at least one shifted suggestion remains");
-    let last = shifted
-        .iter()
-        .filter_map(|suggestion| suggestion.metadata.episode)
-        .max()
-        .expect("at least one shifted suggestion remains");
-    catalog.video_metadata_suggestions = shifted;
-    update_probable_suggestion_count(catalog);
-    Ok(Some(SuggestionShift {
-        offset,
-        unmatched,
-        first,
-        last,
-    }))
-}
-
-fn set_suggestion_first_episode(
-    catalog: &mut media_rip_core::MediaCatalog,
-    requested_first: u32,
-) -> Result<Option<SuggestionShift>, String> {
-    let current_first = catalog
-        .video_metadata_suggestions
-        .iter()
-        .filter_map(|suggestion| suggestion.metadata.episode)
-        .min()
-        .ok_or_else(|| "No episode suggestions are available to shift.".to_owned())?;
-    let difference = i64::from(requested_first) - i64::from(current_first);
-    let offset = i32::try_from(difference)
-        .map_err(|_| "The requested episode number is outside the supported range.".to_owned())?;
-    shift_video_suggestions_with_result(catalog, offset)
-}
-
-fn shift_video_suggestion_seasons(catalog: &mut media_rip_core::MediaCatalog, offset: i32) -> bool {
-    let seasons = catalog
-        .video_metadata_suggestions
-        .iter()
-        .map(|suggestion| suggestion.metadata.season?.checked_add_signed(offset))
-        .collect::<Option<Vec<_>>>();
-    let Some(seasons) = seasons else {
-        return false;
-    };
-    for (suggestion, season) in catalog.video_metadata_suggestions.iter_mut().zip(seasons) {
-        let previous = suggestion.metadata.season.replace(season).unwrap_or(season);
-        update_suggestion_season_text(&mut suggestion.name, previous, season);
-        update_season_tags(&mut suggestion.tags, season);
-        for choice in &mut suggestion.episode_choices {
-            update_suggestion_season_text(&mut choice.name, previous, season);
-            update_season_tags(&mut choice.tags, season);
-        }
-    }
-    true
-}
-
-fn replace_suggestion_season_choices(
-    catalog: &mut media_rip_core::MediaCatalog,
-    requested_season: u32,
-    choices: &[media_rip_core::VideoEpisodeChoice],
-) -> Option<i32> {
-    let current_season = catalog
-        .video_metadata_suggestions
-        .first()?
-        .metadata
-        .season?;
-    let difference = i64::from(requested_season) - i64::from(current_season);
-    let offset = i32::try_from(difference).ok()?;
-    let selected = catalog
-        .video_metadata_suggestions
-        .iter()
-        .map(|suggestion| {
-            let episode = suggestion.metadata.episode?;
-            choices
-                .iter()
-                .find(|choice| choice.episode == episode)
-                .cloned()
-        })
-        .collect::<Option<Vec<_>>>()?;
-
-    for (suggestion, selected) in catalog.video_metadata_suggestions.iter_mut().zip(selected) {
-        suggestion.metadata.season = Some(requested_season);
-        suggestion.name = selected.name;
-        suggestion.tags = selected.tags;
-        suggestion.episode_choices = choices.to_vec();
-    }
-    (offset != 0).then_some(offset)
-}
-
-fn update_suggestion_season_text(value: &mut String, previous: u32, season: u32) {
-    *value = value.replacen(&format!("S{previous:02}E"), &format!("S{season:02}E"), 1);
-}
-
-fn update_season_tags(tags: &mut [media_rip_core::MediaTag], season: u32) {
-    for tag in tags {
-        if tag.key.eq_ignore_ascii_case("season_number") {
-            tag.value = season.to_string();
-        }
-    }
-}
-
 #[cfg(test)]
 fn set_suggestion_season(
     catalog: &mut media_rip_core::MediaCatalog,
@@ -2888,57 +2539,6 @@ fn nonempty_owned(value: &str) -> Option<String> {
     (!value.trim().is_empty()).then(|| value.trim().to_owned())
 }
 
-fn set_cover_art(
-    catalog: &mut media_rip_core::MediaCatalog,
-    title_id: Option<u32>,
-    cover_art: CoverArt,
-) {
-    if let Some(title_id) = title_id {
-        if catalog.cover_art.as_ref() == Some(&cover_art) {
-            catalog.track_cover_art.remove(&title_id);
-        } else {
-            catalog
-                .track_cover_art
-                .insert(title_id, TrackCoverArt::Custom(cover_art));
-        }
-    } else {
-        catalog.track_cover_art.retain(|_, track_art| {
-            !matches!(track_art, TrackCoverArt::Custom(custom) if custom == &cover_art)
-        });
-        catalog.cover_art = Some(cover_art);
-    }
-}
-
-fn remove_cover_art(catalog: &mut media_rip_core::MediaCatalog, title_id: Option<u32>) {
-    if let Some(title_id) = title_id {
-        catalog
-            .track_cover_art
-            .insert(title_id, TrackCoverArt::Removed);
-    } else {
-        catalog.cover_art = None;
-    }
-}
-
-fn mark_title_completed(catalog: &mut media_rip_core::MediaCatalog, title_id: u32) -> bool {
-    let Some(title) = catalog.titles.iter_mut().find(|title| title.id == title_id) else {
-        return false;
-    };
-    title.selected = false;
-    for track in &mut title.tracks {
-        track.selected = false;
-    }
-    true
-}
-
-fn set_catalog_selection(catalog: &mut media_rip_core::MediaCatalog, selected: bool) {
-    for title in &mut catalog.titles {
-        title.selected = selected;
-        for track in &mut title.tracks {
-            track.selected = selected;
-        }
-    }
-}
-
 fn resumable_failure_detail(error: &str, completed: usize) -> String {
     if completed == 0 {
         return error.to_owned();
@@ -2960,11 +2560,11 @@ fn default_output_directory(
         DiscKind::BluRay => &settings.output.bluray_directory,
         _ => "",
     };
-    if !type_directory.trim().is_empty() {
-        return PathBuf::from(type_directory.trim());
-    }
     if settings.output.destination_mode == "none" {
         return PathBuf::new();
+    }
+    if !type_directory.trim().is_empty() {
+        return PathBuf::from(type_directory.trim());
     }
     if settings.output.destination_mode == "custom"
         && !settings.output.custom_directory.trim().is_empty()
@@ -2992,11 +2592,36 @@ fn default_output_directory(
 }
 
 fn audio_cd_metadata_available(catalog: &media_rip_core::MediaCatalog) -> bool {
-    catalog.source.kind != DiscKind::AudioCd
-        || catalog
-            .source_info
-            .iter()
-            .any(|field| field.label == "Tag source" && field.value != "Generic track information")
+    if catalog.source.kind != DiscKind::AudioCd {
+        return true;
+    }
+    let selected = catalog
+        .titles
+        .iter()
+        .filter(|title| title.selected)
+        .collect::<Vec<_>>();
+    !selected.is_empty()
+        && selected.iter().all(|title| {
+            let tag = |key: &str| {
+                title
+                    .tags
+                    .iter()
+                    .find(|tag| tag.key.eq_ignore_ascii_case(key))
+                    .map(|tag| tag.value.as_str())
+            };
+            useful_audio_metadata_name(tag("album").unwrap_or(&catalog.source.name))
+                && useful_audio_metadata_name(tag("title").unwrap_or(&title.name))
+        })
+}
+
+fn useful_audio_metadata_name(value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    !matches!(
+        value.as_str(),
+        "" | "audio cd" | "unknown album" | "untitled"
+    ) && value
+        .strip_prefix("track ")
+        .is_none_or(|number| number.parse::<u32>().is_err())
 }
 
 fn cover_art_from_file(path: &Path) -> Result<CoverArt, String> {
@@ -3029,6 +2654,7 @@ fn cover_art_mime_type(data: &[u8]) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use media_rip_core::{TrackCoverArt, model::editing::SuggestionShift};
 
     #[test]
     fn ask_every_time_starts_without_an_output_directory() {
@@ -3090,13 +2716,14 @@ mod tests {
             cover_art: None,
             track_cover_art: Default::default(),
             metadata_attributions: Vec::new(),
+            audio_metadata_candidates: Vec::new(),
             video_metadata_suggestions: Vec::new(),
             video_episode_context: None,
         };
 
         assert!(!audio_cd_metadata_available(&catalog));
         catalog.source_info[0].value = "CD-TEXT".to_owned();
-        assert!(audio_cd_metadata_available(&catalog));
+        assert!(!audio_cd_metadata_available(&catalog));
     }
 
     #[test]
@@ -3127,6 +2754,7 @@ mod tests {
                 encrypted: None,
             },
             titles: vec![Title {
+                dvd: None,
                 id: 1,
                 source_title_id: "1".to_owned(),
                 disc_title_number: Some(1),
@@ -3158,6 +2786,7 @@ mod tests {
             cover_art: None,
             track_cover_art: Default::default(),
             metadata_attributions: Vec::new(),
+            audio_metadata_candidates: Vec::new(),
             video_metadata_suggestions: Vec::new(),
             video_episode_context: None,
         };
@@ -3235,6 +2864,7 @@ mod tests {
         use media_rip_core::{DiscKind, MediaCatalog, MediaSource, StreamKind, Title, Track};
 
         let title = Title {
+            dvd: None,
             id: 7,
             source_title_id: "7".to_owned(),
             disc_title_number: None,
@@ -3277,6 +2907,7 @@ mod tests {
             cover_art: None,
             track_cover_art: Default::default(),
             metadata_attributions: Vec::new(),
+            audio_metadata_candidates: Vec::new(),
             video_metadata_suggestions: Vec::new(),
             video_episode_context: None,
         };
@@ -3312,6 +2943,7 @@ mod tests {
                 encrypted: None,
             },
             titles: vec![Title {
+                dvd: None,
                 id: 0,
                 source_title_id: "0".to_owned(),
                 disc_title_number: None,
@@ -3334,6 +2966,7 @@ mod tests {
             cover_art: None,
             track_cover_art: Default::default(),
             metadata_attributions: Vec::new(),
+            audio_metadata_candidates: Vec::new(),
             video_metadata_suggestions: Vec::new(),
             video_episode_context: None,
         };
@@ -3385,6 +3018,7 @@ mod tests {
             cover_art: None,
             track_cover_art: Default::default(),
             metadata_attributions: Vec::new(),
+            audio_metadata_candidates: Vec::new(),
             video_metadata_suggestions: vec![VideoMetadataSuggestion {
                 title_id: 1,
                 name: "Show - S02E12 - Episode 12".to_owned(),
@@ -3486,6 +3120,7 @@ mod tests {
             tags: vec![MediaTag::new("episode_id", episode.to_string())],
         };
         let title = |id| Title {
+            dvd: None,
             id,
             source_title_id: format!("title-{id}"),
             disc_title_number: Some(id + 1),
@@ -3532,6 +3167,7 @@ mod tests {
             cover_art: None,
             track_cover_art: Default::default(),
             metadata_attributions: Vec::new(),
+            audio_metadata_candidates: Vec::new(),
             video_metadata_suggestions: vec![VideoMetadataSuggestion {
                 title_id: 0,
                 name: choice(12).name,
@@ -3587,6 +3223,7 @@ mod tests {
         use media_rip_core::{DiscKind, MediaCatalog, MediaSource, StreamKind, Title, Track};
 
         let title = |id| Title {
+            dvd: None,
             id,
             source_title_id: (id + 1).to_string(),
             disc_title_number: None,
@@ -3629,6 +3266,7 @@ mod tests {
             cover_art: None,
             track_cover_art: Default::default(),
             metadata_attributions: Vec::new(),
+            audio_metadata_candidates: Vec::new(),
             video_metadata_suggestions: Vec::new(),
             video_episode_context: None,
         };
@@ -3762,3 +3400,7 @@ mod tests {
         assert_eq!(cover_art_mime_type(b"not an image"), None);
     }
 }
+
+#[cfg(test)]
+#[path = "controller_ui_tests.rs"]
+mod ui_tests;

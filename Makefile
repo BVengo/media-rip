@@ -1,4 +1,4 @@
-.PHONY: check test run release fmt lint notices
+.PHONY: check test test-ui run release fmt lint notices
 
 # 'help' uses inline ## for descriptions, and ##@ for sections
 help: ## Show the available targets.
@@ -29,3 +29,6 @@ fmt: ## Run the code formatter
 
 lint: ## Check for linting warnings
 	cargo clippy --workspace --all-targets -- -D warnings
+
+test-ui: ## Exercise GTK workflows with a virtual display
+	GDK_BACKEND=x11 xvfb-run -a cargo test -p media-rip gtk_workflows -- --ignored

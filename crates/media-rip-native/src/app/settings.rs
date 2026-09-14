@@ -1,16 +1,14 @@
+pub(crate) use media_rip_core::model::editing::format_audio_cd_file_name;
 use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
 
-use media_rip_core::{
-    MediaCatalog, StreamKind, Track,
-    util::{ensure_extension, sanitize_file_name},
-};
+use media_rip_core::{MediaCatalog, StreamKind, Track};
 use serde::{Deserialize, Deserializer, Serialize};
 
-const SETTINGS_VERSION: u32 = 11;
+const SETTINGS_VERSION: u32 = 12;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct RememberedDvdMatch {
@@ -29,21 +27,17 @@ pub(crate) struct AppSettings {
     pub automation: AutomationSettings,
     pub selection: SelectionSettings,
     pub io: IoSettings,
-    pub dvd: DvdSettings,
     pub bluray: BluraySettings,
     pub audio_cd: AudioCdSettings,
     pub notifications: NotificationSettings,
     pub integrations: IntegrationSettings,
-    pub advanced: AdvancedSettings,
+    #[serde(rename = "advanced", skip_serializing)]
+    legacy_advanced: Option<LegacyAdvancedSettings>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct GeneralSettings {
-    pub data_directory: String,
-    pub debug_logging: bool,
-    pub expert_controls: bool,
-    pub av_sync_messages: bool,
     pub allow_online_access: bool,
 }
 
@@ -51,12 +45,12 @@ pub(crate) struct GeneralSettings {
 #[serde(default)]
 pub(crate) struct OutputSettings {
     pub destination_mode: String,
+    pub video_profile: String,
     pub custom_directory: String,
     pub audio_cd_directory: String,
     pub dvd_directory: String,
     pub bluray_directory: String,
     pub minimum_title_seconds: u32,
-    pub minimum_free_space_gib: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,18 +88,9 @@ pub(crate) struct SelectionSettings {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub(crate) struct IoSettings {
-    pub read_retry_count: u32,
-    pub read_buffer_mib: u32,
-    pub single_drive_mode: bool,
     pub eject_when_finished: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub(crate) struct DvdSettings {
-    pub structure_protection_method: String,
-    pub processing_mode: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -115,8 +100,6 @@ pub(crate) struct BluraySettings {
     pub select_duplicate_playlists: bool,
     #[serde(default, rename = "playlist_policy", skip_serializing)]
     legacy_playlist_policy: Option<String>,
-    pub create_protection_dumps: bool,
-    pub java_executable: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,7 +107,6 @@ pub(crate) struct BluraySettings {
 pub(crate) struct AudioCdSettings {
     pub output_format: String,
     pub file_name_template: String,
-    pub secure_extraction: bool,
     pub use_disc_metadata: bool,
     pub auto_tagging: bool,
 }
@@ -149,11 +131,6 @@ pub(crate) struct IntegrationSettings {
     pub tmdb_access_token: String,
     pub tvdb_api_key: String,
     pub tvdb_subscriber_pin: String,
-    pub optical_access_provider: String,
-    pub expose_to_media_players: bool,
-    pub streaming_enabled: bool,
-    pub streaming_address: String,
-    pub streaming_port: u32,
     /// User-reviewed episode offsets keyed by the exact disc-content hash.
     pub video_metadata_corrections: BTreeMap<String, i32>,
     /// User-reviewed season offsets keyed by the exact disc-content hash.
@@ -162,13 +139,8 @@ pub(crate) struct IntegrationSettings {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-pub(crate) struct AdvancedSettings {
+struct LegacyAdvancedSettings {
     pub default_profile: String,
-    pub default_selection_rule: String,
-    pub output_file_name_template: String,
-    pub ffmpeg_executable: String,
-    pub ccextractor_executable: String,
-    pub temporary_directory: String,
 }
 
 impl Default for AppSettings {
@@ -180,12 +152,11 @@ impl Default for AppSettings {
             automation: AutomationSettings::default(),
             selection: SelectionSettings::default(),
             io: IoSettings::default(),
-            dvd: DvdSettings::default(),
             bluray: BluraySettings::default(),
             audio_cd: AudioCdSettings::default(),
             notifications: NotificationSettings::default(),
             integrations: IntegrationSettings::default(),
-            advanced: AdvancedSettings::default(),
+            legacy_advanced: None,
         }
     }
 }
@@ -193,10 +164,6 @@ impl Default for AppSettings {
 impl Default for GeneralSettings {
     fn default() -> Self {
         Self {
-            data_directory: String::new(),
-            debug_logging: false,
-            expert_controls: false,
-            av_sync_messages: true,
             allow_online_access: true,
         }
     }
@@ -206,12 +173,12 @@ impl Default for OutputSettings {
     fn default() -> Self {
         Self {
             destination_mode: "automatic".into(),
+            video_profile: "copy-mkv".into(),
             custom_directory: String::new(),
             audio_cd_directory: String::new(),
             dvd_directory: String::new(),
             bluray_directory: String::new(),
             minimum_title_seconds: 120,
-            minimum_free_space_gib: 4,
         }
     }
 }
@@ -252,32 +219,11 @@ impl Default for SelectionSettings {
     }
 }
 
-impl Default for IoSettings {
-    fn default() -> Self {
-        Self {
-            read_retry_count: 5,
-            read_buffer_mib: 0,
-            single_drive_mode: false,
-            eject_when_finished: false,
-        }
-    }
-}
-
-impl Default for DvdSettings {
-    fn default() -> Self {
-        Self {
-            structure_protection_method: "automatic".into(),
-            processing_mode: "automatic".into(),
-        }
-    }
-}
-
 impl Default for AudioCdSettings {
     fn default() -> Self {
         Self {
             output_format: "flac".into(),
             file_name_template: "{artist}/{album}/{disc}-{track:02} - {title}.flac".into(),
-            secure_extraction: true,
             use_disc_metadata: true,
             auto_tagging: true,
         }
@@ -306,28 +252,16 @@ impl Default for IntegrationSettings {
             tmdb_access_token: String::new(),
             tvdb_api_key: String::new(),
             tvdb_subscriber_pin: String::new(),
-            optical_access_provider: "system".into(),
-            expose_to_media_players: false,
-            streaming_enabled: false,
-            streaming_address: "127.0.0.1".into(),
-            streaming_port: 51000,
             video_metadata_corrections: BTreeMap::new(),
             video_metadata_season_corrections: BTreeMap::new(),
         }
     }
 }
 
-impl Default for AdvancedSettings {
+impl Default for LegacyAdvancedSettings {
     fn default() -> Self {
         Self {
             default_profile: "copy-mkv".into(),
-            default_selection_rule:
-                "-sel:all,+sel:(favlang|nolang),-sel:(havemulti|havecore),=100:all,-10:favlang"
-                    .into(),
-            output_file_name_template: "{source}{_t:title:02}".into(),
-            ffmpeg_executable: String::new(),
-            ccextractor_executable: String::new(),
-            temporary_directory: String::new(),
         }
     }
 }
@@ -342,11 +276,12 @@ impl AppSettings {
             .map_err(|error| format!("could not read {}: {error}", path.display()))?;
         let mut settings: Self = serde_json::from_str(&contents)
             .map_err(|error| format!("could not parse {}: {error}", path.display()))?;
-        settings.migrate_legacy_bluray_playlist_policy();
+        settings.migrate();
         Ok(settings)
     }
 
     pub fn save(&self) -> Result<PathBuf, String> {
+        self.validate()?;
         let path = settings_path()?;
         let parent = path
             .parent()
@@ -355,12 +290,8 @@ impl AppSettings {
             .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
         let contents = serde_json::to_string_pretty(self)
             .map_err(|error| format!("could not encode settings: {error}"))?;
-        let temporary = path.with_extension("json.tmp");
-        fs::write(&temporary, format!("{contents}\n"))
-            .map_err(|error| format!("could not write {}: {error}", temporary.display()))?;
-        secure_settings_file(&temporary)?;
-        fs::rename(&temporary, &path)
-            .map_err(|error| format!("could not replace {}: {error}", path.display()))?;
+        media_rip_engine::atomic_write(&path, format!("{contents}\n").as_bytes())
+            .map_err(|error| format!("could not save {}: {error}", path.display()))?;
         Ok(path)
     }
 
@@ -381,15 +312,21 @@ impl AppSettings {
             let main_title_includes_title = !self.bluray.select_only_main_title
                 || !has_authored_main_title
                 || title.is_main_title;
-            let duplicate_selection_includes_title =
-                self.bluray.select_duplicate_playlists || is_duplicate_representative;
+            let duplicate_selection_includes_title = match source_kind {
+                media_rip_core::DiscKind::Dvd => is_duplicate_representative,
+                media_rip_core::DiscKind::BluRay => {
+                    self.bluray.select_duplicate_playlists || is_duplicate_representative
+                }
+                _ => true,
+            };
             let preference_includes_title = match tv_title_preferences.get(&title.id) {
                 Some(TvTitlePreference::Episode) => self.selection.select_tv_episodes,
                 Some(TvTitlePreference::PlayAll) => self.selection.select_tv_play_all,
                 Some(TvTitlePreference::NonEpisodic) => self.selection.select_tv_non_episodic,
                 None => true,
             };
-            let include_title = main_title_includes_title
+            let include_title = title.dvd.as_ref().is_none_or(|dvd| dvd.warnings.is_empty())
+                && main_title_includes_title
                 && duplicate_selection_includes_title
                 && preference_includes_title
                 && (source_kind == media_rip_core::DiscKind::AudioCd
@@ -423,6 +360,95 @@ impl AppSettings {
                 self.bluray.select_duplicate_playlists,
                 self.bluray.select_only_main_title && !has_authored_main_title
             );
+        }
+    }
+
+    fn migrate(&mut self) {
+        self.migrate_legacy_bluray_playlist_policy();
+        if let Some(legacy) = self.legacy_advanced.take()
+            && media_rip_core::OutputProfile::from_id(&legacy.default_profile)
+                .is_some_and(|profile| !profile.is_audio_only())
+        {
+            self.output.video_profile = legacy.default_profile;
+        }
+        if self.output.destination_mode == "semi-automatic" {
+            self.output.destination_mode = "automatic".to_owned();
+        }
+        self.version = SETTINGS_VERSION;
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !matches!(
+            self.output.destination_mode.as_str(),
+            "automatic" | "none" | "custom"
+        ) {
+            return Err("Choose an output destination behaviour.".to_owned());
+        }
+        if self.output.destination_mode == "custom"
+            && self.output.custom_directory.trim().is_empty()
+        {
+            return Err(
+                "Choose a default output folder, or select a different destination behaviour."
+                    .to_owned(),
+            );
+        }
+        if media_rip_core::OutputProfile::from_id(&self.output.video_profile)
+            .is_none_or(|profile| profile.is_audio_only())
+        {
+            return Err("Choose a video output format.".to_owned());
+        }
+        if !matches!(
+            self.audio_cd.output_format.as_str(),
+            "flac" | "wav" | "opus" | "aac"
+        ) {
+            return Err("Choose an audio output format.".to_owned());
+        }
+        if !matches!(
+            self.selection.audio_policy.as_str(),
+            "all" | "preferred" | "original-preferred"
+        ) {
+            return Err("Choose an audio track selection policy.".to_owned());
+        }
+        if !matches!(
+            self.selection.subtitle_policy.as_str(),
+            "all" | "preferred" | "forced" | "none"
+        ) {
+            return Err("Choose a subtitle selection policy.".to_owned());
+        }
+        if self.selection.preferred_languages.iter().any(|code| {
+            !(2..=3).contains(&code.len()) || !code.bytes().all(|byte| byte.is_ascii_alphabetic())
+        }) {
+            return Err(
+                "Use two- or three-letter codes for additional preferred languages.".to_owned(),
+            );
+        }
+        if self.notifications.ntfy_enabled {
+            super::notifications::ntfy_endpoint(&self.notifications)?;
+        }
+        validate_audio_template(&self.audio_cd.file_name_template)?;
+        Ok(())
+    }
+
+    pub fn profile_for_catalog(&self, catalog: &MediaCatalog) -> media_rip_core::OutputProfile {
+        let audio_only = !catalog.titles.is_empty()
+            && catalog.titles.iter().all(|title| {
+                matches!(
+                    media_rip_core::model::metadata::MetadataKind::for_title(catalog, title),
+                    media_rip_core::model::metadata::MetadataKind::Music
+                        | media_rip_core::model::metadata::MetadataKind::Audiobook
+                )
+            });
+        if audio_only {
+            match self.audio_cd.output_format.as_str() {
+                "wav" => media_rip_core::OutputProfile::AudioWav,
+                "opus" => media_rip_core::OutputProfile::AudioOpus,
+                "aac" => media_rip_core::OutputProfile::AudioAac,
+                _ => media_rip_core::OutputProfile::AudioFlac,
+            }
+        } else {
+            media_rip_core::OutputProfile::from_id(&self.output.video_profile)
+                .filter(|profile| !profile.is_audio_only())
+                .unwrap_or_default()
         }
     }
 
@@ -509,92 +535,43 @@ impl AppSettings {
     }
 }
 
-#[cfg(unix)]
-fn secure_settings_file(path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .map_err(|error| format!("could not secure {}: {error}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn secure_settings_file(_path: &Path) -> Result<(), String> {
-    Ok(())
-}
-
-pub(crate) fn format_audio_cd_file_name(
-    template: &str,
-    title: &media_rip_core::Title,
-    album: &str,
-) -> String {
-    let template = if template.trim().is_empty() {
-        "{artist}/{album}/{disc}-{track:02} - {title}.flac"
-    } else {
-        template
-    };
-    let tag = |key: &str| {
-        title
-            .tags
-            .iter()
-            .find(|tag| tag.key == key)
-            .map(|tag| tag.value.as_str())
-            .and_then(nonempty)
-    };
-    let clean_value = |value: &str| {
-        if value.is_empty() {
-            String::new()
-        } else {
-            sanitize_file_name(value)
+fn validate_audio_template(template: &str) -> Result<(), String> {
+    if template.trim().is_empty() {
+        return Ok(());
+    }
+    if Path::new(template).is_absolute() || template.split(['/', '\\']).any(|part| part == "..") {
+        return Err(
+            "The Audio CD filename template must stay within the output folder.".to_owned(),
+        );
+    }
+    let mut remaining = template;
+    while let Some((before, after)) = remaining.split_once('{') {
+        if before.contains('}') {
+            return Err("The Audio CD filename template has an unmatched brace.".to_owned());
         }
-    };
-    let track = tag("track")
-        .or_else(|| nonempty(&title.source_title_id))
-        .map(str::to_owned)
-        .unwrap_or_else(|| title.id.saturating_add(1).to_string());
-    let track = clean_value(&track);
-    let padded_track = track
-        .parse::<u32>()
-        .map(|number| format!("{number:02}"))
-        .unwrap_or_else(|_| track.clone());
-    let title_name = tag("title")
-        .or_else(|| nonempty(&title.name))
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("Track {padded_track}"));
-    let artist = tag("artist")
-        .or_else(|| tag("album_artist"))
-        .or_else(|| {
-            title
-                .tracks
-                .first()
-                .and_then(|track| track.name.as_deref())
-                .and_then(nonempty)
-        })
-        .unwrap_or("Unknown Artist");
-    let album = tag("album")
-        .or_else(|| nonempty(album).filter(|album| !album.eq_ignore_ascii_case("Audio CD")))
-        .unwrap_or("Unknown Album");
-    let disc = tag("discnumber").unwrap_or("1");
-    let title_name = clean_value(&title_name);
-    let artist = clean_value(artist);
-    let album = clean_value(album);
-    let disc = clean_value(disc);
-    let expanded = template
-        // Keep these aliases so a previously entered template continues to work.
-        .replace("{disc:1d}", &disc)
-        .replace("{disc}", &disc)
-        .replace("{track:2d}", &padded_track)
-        .replace("{track:02}", &padded_track)
-        .replace("{track}", &track)
-        .replace("{name}", &title_name)
-        .replace("{title}", &title_name)
-        .replace("{artist}", &artist)
-        .replace("{album}", &album);
-    ensure_extension(&expanded, "flac")
-}
-
-fn nonempty(value: &str) -> Option<&str> {
-    let value = value.trim();
-    (!value.is_empty()).then_some(value)
+        let Some((field, rest)) = after.split_once('}') else {
+            return Err("The Audio CD filename template has an unmatched brace.".to_owned());
+        };
+        if !matches!(
+            field,
+            "artist"
+                | "album"
+                | "disc"
+                | "disc:1d"
+                | "track"
+                | "track:02"
+                | "track:2d"
+                | "title"
+                | "name"
+        ) {
+            return Err(format!("Unknown Audio CD filename field: {{{field}}}."));
+        }
+        remaining = rest;
+    }
+    if remaining.contains('}') {
+        return Err("The Audio CD filename template has an unmatched brace.".to_owned());
+    }
+    Ok(())
 }
 
 fn duplicate_representatives(catalog: &MediaCatalog) -> std::collections::HashMap<String, String> {
@@ -720,10 +697,15 @@ impl SelectionSettings {
             StreamKind::Data => false,
             StreamKind::Audio => match self.audio_policy.as_str() {
                 "preferred" => self.preferred_languages.is_empty() || preferred || language_unknown,
-                "original-preferred" => default || preferred || language_unknown,
+                "original-preferred" => {
+                    self.preferred_languages.is_empty() || default || preferred || language_unknown
+                }
                 _ => true,
             },
             StreamKind::Subtitle => {
+                if self.subtitle_policy == "none" {
+                    return false;
+                }
                 let selected = match self.subtitle_policy.as_str() {
                     "preferred" => {
                         self.preferred_languages.is_empty() || preferred || language_unknown
@@ -821,6 +803,72 @@ mod tests {
 
     use super::AppSettings;
     use super::RememberedDvdMatch;
+
+    #[test]
+    fn migrates_working_legacy_settings_and_drops_placeholders() {
+        let mut settings: AppSettings = serde_json::from_str(
+            r#"{
+            "version": 11,
+            "general": {"allow_online_access": false, "expert_controls": true},
+            "output": {"destination_mode": "semi-automatic", "minimum_free_space_gib": 12},
+            "advanced": {"default_profile": "h265-mkv", "ffmpeg_executable": "/old/fake"},
+            "dvd": {"processing_mode": "titlesets"},
+            "integrations": {"streaming_enabled": true, "tmdb_access_token": "retained"}
+        }"#,
+        )
+        .unwrap();
+        settings.migrate();
+        assert_eq!(settings.version, super::SETTINGS_VERSION);
+        assert_eq!(settings.output.video_profile, "h265-mkv");
+        assert_eq!(settings.output.destination_mode, "automatic");
+        assert!(!settings.general.allow_online_access);
+        assert_eq!(settings.integrations.tmdb_access_token, "retained");
+        let json = serde_json::to_value(&settings).unwrap();
+        assert!(json.get("dvd").is_none());
+        assert!(json.get("advanced").is_none());
+        assert!(json["general"].get("expert_controls").is_none());
+        assert!(json["integrations"].get("streaming_enabled").is_none());
+        assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn no_subtitles_overrides_the_forced_preference() {
+        let mut settings = AppSettings::default();
+        settings.selection.subtitle_policy = "none".to_owned();
+        settings.selection.include_forced_subtitles = true;
+        assert!(!settings.selection.selects_track(&track(
+            StreamKind::Subtitle,
+            Some("eng"),
+            &["forced only"]
+        )));
+    }
+
+    #[test]
+    fn default_and_preferred_with_no_languages_keeps_audio() {
+        let mut settings = AppSettings::default();
+        settings.selection.audio_policy = "original-preferred".to_owned();
+        assert!(
+            settings
+                .selection
+                .selects_track(&track(StreamKind::Audio, Some("jpn"), &[]))
+        );
+    }
+
+    #[test]
+    fn validation_catches_unusable_destinations_and_templates() {
+        let mut settings = AppSettings::default();
+        settings.output.destination_mode = "custom".to_owned();
+        assert!(settings.validate().unwrap_err().contains("output folder"));
+        settings.output.custom_directory = "/tmp/music".to_owned();
+        for invalid in ["../{title}", "/{title}", "{unknown}", "{title", "title}"] {
+            settings.audio_cd.file_name_template = invalid.to_owned();
+            assert!(settings.validate().is_err(), "{invalid}");
+        }
+        settings.audio_cd.file_name_template = "{artist}/{album}/{track:02} - {title}".to_owned();
+        assert!(settings.validate().is_ok());
+        settings.output.video_profile = "flac-audio".to_owned();
+        assert!(settings.validate().unwrap_err().contains("video output"));
+    }
 
     #[test]
     fn settings_round_trip_through_json() {
@@ -943,8 +991,8 @@ mod tests {
 
         assert_eq!(settings.output.minimum_title_seconds, 300);
         assert_eq!(settings.output.destination_mode, "automatic");
-        assert_eq!(settings.io.read_retry_count, 9);
-        assert!(settings.general.av_sync_messages);
+        assert!(!settings.io.eject_when_finished);
+        assert!(settings.general.allow_online_access);
         assert!(settings.audio_cd.auto_tagging);
         assert!(!settings.automation.audio_cd.read_automatically);
         assert!(settings.automation.require_audio_cd_metadata);
@@ -1273,6 +1321,7 @@ mod tests {
                 encrypted: None,
             },
             titles: vec![Title {
+                dvd: None,
                 id: 0,
                 source_title_id: "1".into(),
                 disc_title_number: None,
@@ -1308,6 +1357,7 @@ mod tests {
             cover_art: None,
             track_cover_art: Default::default(),
             metadata_attributions: Vec::new(),
+            audio_metadata_candidates: Vec::new(),
             video_metadata_suggestions: Vec::new(),
             video_episode_context: None,
         }
@@ -1333,6 +1383,7 @@ mod tests {
             cover_art: None,
             track_cover_art: Default::default(),
             metadata_attributions: Vec::new(),
+            audio_metadata_candidates: Vec::new(),
             video_metadata_suggestions: Vec::new(),
             video_episode_context: None,
         }
@@ -1370,6 +1421,7 @@ mod tests {
 
     fn title(source_title_id: &str, duplicate_key: &str) -> Title {
         Title {
+            dvd: None,
             id: 0,
             source_title_id: source_title_id.into(),
             disc_title_number: None,

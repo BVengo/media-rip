@@ -47,6 +47,44 @@ With these integrations come:
 - Metadata review
 
 
+## Settings
+
+Settings are grouped by task: Output, Selection, Metadata, Disc automation and Completion.
+Search finds controls across all five pages. Selection, metadata and format defaults apply
+when opening a source; use the workflow to change the current job.
+
+Output keeps all destination overrides together and separates video and audio formats.
+"Ask every time" leaves the destination blank even when an override is saved. Short-title
+and playlist preferences change the initial selection; they never hide discovered titles.
+
+Online metadata access controls metadata providers independently of ntfy notifications.
+Automatic disc reading is armed by the first manual read in each session. Automatic saving
+pauses when metadata needs review; after reviewing it, start the job from Output.
+
+Settings changes are validated before saving. Older working settings are migrated; obsolete
+placeholder options are no longer displayed or written. Use `make test-ui` to exercise the GTK
+workflows with Xvfb. Set `MEDIA_RIP_SETTINGS_SCREENSHOTS` to a directory when running that test
+to capture the rendered settings pages.
+
+
+## DVD title review
+
+DVD titles are playback paths, not necessarily separate films or copies of the video.
+MediaRip analyses chapter and cell tables in authored order, checks sector addresses against
+VOB extents, and falls back to BUP tables when the corresponding IFO is unreadable. It retains
+the original title numbers and uses the same chapter boundaries for probing and ripping.
+Padding-only boundary chapters are excluded; cell-derived sizes are shown as estimates.
+
+Duplicate paths and structurally suspect titles start unchecked in a separate review group.
+The title details show the VTS location, cells, padding and validation concerns. Suspect paths
+are excluded from automatic metadata matching. This structural analysis does not prove that
+a path is the intended feature, and does not implement a DVD menu virtual machine or promise
+MakeMKV-equivalent handling of every authored protection scheme.
+
+A remembered TV identity is only reused when the current disc's independently obtained title
+matches the series. An opaque label or a failed lookup leaves the source unidentified.
+
+
 ## Disc support and encryption
 
 Unencrypted DVD and Blu-ray media are supported through FFmpeg's open DVD/Blu-ray integrations.
@@ -72,7 +110,7 @@ make release
 
 Linux packages are named differently by distribution, but a development machine needs:
 
-- Rust 1.85 or newer
+- Rust 1.88 or newer
 - GTK 4 development files
 - libdvdread development files; libbluray is optional at runtime for folders and required for raw Blu-ray devices
 - FFmpeg and FFprobe

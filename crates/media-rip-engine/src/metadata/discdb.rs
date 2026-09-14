@@ -526,6 +526,7 @@ mod tests {
 
     fn title(id: u32, source_id: &str, duration_ms: u64, size: u64) -> Title {
         Title {
+            dvd: None,
             id,
             source_title_id: source_id.into(),
             disc_title_number: None,

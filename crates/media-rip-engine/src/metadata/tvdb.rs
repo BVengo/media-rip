@@ -46,6 +46,12 @@ pub(super) struct TvdbEpisode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Envelope<T> {
     data: T,
+    links: Option<PageLinks>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PageLinks {
+    next: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,7 +90,7 @@ struct EpisodesData {
     episodes: Vec<EpisodeRecord>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EpisodeRecord {
     name: String,
@@ -201,32 +207,59 @@ impl<'a> TvdbClient<'a> {
     }
 
     pub(super) fn season(&self, id: u64, season: u32) -> Result<Vec<TvdbEpisode>, String> {
-        // Physical media benefits from TVDB's DVD ordering. Some series only
-        // have a default order, so fall back without failing the provider.
+        let mut failures = Vec::new();
         for order in ["dvd", "default"] {
-            let response = self.get_json::<Envelope<EpisodesData>>(
-                &format!("/series/{id}/episodes/{order}"),
-                &[("page", "0"), ("season", &season.to_string())],
-            );
-            let Ok(response) = response else {
-                continue;
-            };
-            let episodes = response
-                .data
-                .episodes
-                .into_iter()
-                .filter(|episode| episode.season_number == season)
-                .map(|episode| TvdbEpisode {
-                    episode_number: episode.number,
-                    name: episode.name,
-                    runtime: episode.runtime,
-                })
-                .collect::<Vec<_>>();
-            if !episodes.is_empty() {
-                return Ok(episodes);
+            match self.season_order(id, season, order) {
+                Ok(episodes) if !episodes.is_empty() => return Ok(episodes),
+                Ok(_) => {}
+                Err(error) => failures.push(format!("{order} order: {error}")),
             }
         }
-        Ok(Vec::new())
+        if failures.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(failures.join("; "))
+        }
+    }
+
+    fn season_order(&self, id: u64, season: u32, order: &str) -> Result<Vec<TvdbEpisode>, String> {
+        let records = super::pagination::collect_pages(0, 25, |page| {
+            let response: Envelope<EpisodesData> = self.get_json(
+                &format!("/series/{id}/episodes/{order}"),
+                &[("page", &page.to_string()), ("season", &season.to_string())],
+            )?;
+            Ok(super::pagination::Page {
+                has_more: response
+                    .links
+                    .and_then(|links| links.next)
+                    .is_some_and(|next| !next.is_empty()),
+                items: response.data.episodes,
+            })
+        })?;
+        let mut episodes = std::collections::BTreeMap::new();
+        for episode in records
+            .into_iter()
+            .filter(|episode| episode.season_number == season)
+        {
+            if let Some(previous) = episodes.get(&episode.number) {
+                if previous != &episode {
+                    return Err(format!(
+                        "TVDB returned conflicting records for episode {}",
+                        episode.number
+                    ));
+                }
+            } else {
+                episodes.insert(episode.number, episode);
+            }
+        }
+        Ok(episodes
+            .into_values()
+            .map(|episode| TvdbEpisode {
+                episode_number: episode.number,
+                name: episode.name,
+                runtime: episode.runtime,
+            })
+            .collect())
     }
 
     pub(super) fn artwork(&self, artwork_url: &str) -> Result<CoverArt, String> {
@@ -471,11 +504,7 @@ fn parse_year(value: &str) -> Option<u32> {
 }
 
 fn normalize_title(value: &str) -> String {
-    value
-        .chars()
-        .filter(|character| character.is_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
+    media_rip_core::model::matching::text_key(value)
 }
 
 fn year_in(value: &str) -> Option<u32> {

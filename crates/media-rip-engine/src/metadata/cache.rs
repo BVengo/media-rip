@@ -66,9 +66,8 @@ impl MetadataCache {
         if fs::create_dir_all(parent).is_err() {
             return;
         }
-        let temporary = path.with_extension("json.tmp");
-        if fs::write(&temporary, data).is_ok() {
-            let _ = fs::rename(temporary, path);
+        if let Err(error) = crate::atomic_write(&path, &data) {
+            log::debug!("Could not save metadata cache {}: {error}", path.display());
         }
     }
 
@@ -87,9 +86,8 @@ impl MetadataCache {
         if fs::create_dir_all(parent).is_err() {
             return;
         }
-        let temporary = path.with_extension("bin.tmp");
-        if fs::write(&temporary, data).is_ok() {
-            let _ = fs::rename(temporary, path);
+        if let Err(error) = crate::atomic_write(&path, data) {
+            log::debug!("Could not save artwork cache {}: {error}", path.display());
         }
     }
 

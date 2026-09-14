@@ -10,12 +10,15 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use media_rip_core::{
-    CoverArt, DiscKind, EngineEvent, LogLevel, MediaEngineError, OutputProfile, RipProgress,
-    RipRequest, RipSelection, RipTitleResult, Title, ports::CancellationToken,
+    CoverArt, DiscKind, EngineEvent, LogLevel, MediaEngineError, OutputProfile, RipPhase,
+    RipProgress, RipRequest, RipSelection, RipTitleResult, Title, ports::CancellationToken,
     util::ensure_extension,
 };
 
-use crate::process::ProcessSupervisor;
+use crate::{
+    process::{ProcessSupervisor, read_diagnostic_tail},
+    storage::StagingDirectory,
+};
 
 pub(super) fn validate_profile_available(profile: OutputProfile) -> Result<(), MediaEngineError> {
     let encoders = required_encoders(profile);
@@ -87,18 +90,30 @@ pub(super) fn process_title(
         ))
     })?;
 
-    let temporary = temporary_output_path(&destination, title.id);
+    let staging = StagingDirectory::new(parent).map_err(|error| {
+        MediaEngineError::Other(format!(
+            "could not prepare output in {}: {error}",
+            parent.display()
+        ))
+    })?;
+    let staging_destination = staging.path().join("output");
+    let temporary = staging_destination.with_extension("part");
     let extracted_cd = if request.catalog.source.kind == DiscKind::AudioCd {
         Some(TemporaryCdAudio(extract_audio_cd_track(
             request,
             title,
-            &destination,
+            &staging_destination,
+            selection_index,
             events,
             cancellation,
         )?))
     } else {
         None
     };
+    let _ = events.send(EngineEvent::RipPhaseChanged {
+        phase: RipPhase::Encoding,
+        title_name: title.name.clone(),
+    });
     let mut command = Command::new("ffmpeg");
     command.args(["-hide_banner", "-nostdin", "-loglevel", "warning"]);
     add_input(
@@ -108,10 +123,18 @@ pub(super) fn process_title(
         extracted_cd.as_ref().map(|audio| audio.0.as_path()),
     );
     let attached_cover = attached_cover_art(request, title)
-        .map(|art| TemporaryCoverArt::write(&destination, title.id, art))
+        .map(|art| TemporaryCoverArt::write(&staging_destination, title.id, art))
         .transpose()?;
     if let Some(cover) = &attached_cover {
         command.arg("-i").arg(&cover.0);
+    }
+    let opus_metadata = opus_cover_metadata(request, title);
+    if let Some(contents) = &opus_metadata {
+        let path = staging.path().join("artwork.ffmetadata");
+        fs::write(&path, contents).map_err(|error| {
+            MediaEngineError::Other(format!("could not prepare artwork metadata: {error}"))
+        })?;
+        command.args(["-f", "ffmetadata", "-i"]).arg(path);
     }
     for stream in &selection.stream_indices {
         command.args(["-map", &format!("0:{stream}")]);
@@ -120,8 +143,10 @@ pub(super) fn process_title(
         command.args(["-map", "1:v:0"]);
     }
     command.args(["-map_chapters", "0"]);
+    if opus_metadata.is_some() {
+        command.args(["-map_metadata", "1"]);
+    }
     add_output_metadata(&mut command, request, title);
-    add_opus_cover_art_metadata(&mut command, request, title);
     add_output_profile(
         &mut command,
         request.output_profile,
@@ -167,7 +192,7 @@ pub(super) fn process_title(
         .take_stderr()
         .ok_or_else(|| MediaEngineError::Process("ffmpeg error pipe is unavailable".to_owned()))?;
     let (progress_tx, progress_rx) = mpsc::channel();
-    let stderr_reader = thread::spawn(move || read_all(stderr));
+    let stderr_reader = thread::spawn(move || read_diagnostic_tail(stderr));
     let progress_reader = thread::spawn(move || read_progress(stdout, progress_tx));
     let started = Instant::now();
     let mut last_emit = Instant::now() - Duration::from_secs(1);
@@ -175,7 +200,8 @@ pub(super) fn process_title(
     loop {
         if cancellation.is_cancelled() {
             let _ = process.terminate();
-            cleanup_partial(&temporary);
+            let _ = progress_reader.join();
+            let _ = stderr_reader.join();
             return Err(MediaEngineError::Cancelled);
         }
 
@@ -222,20 +248,26 @@ pub(super) fn process_title(
                 }));
             }
 
-            if destination.exists() && request.overwrite {
-                fs::remove_file(&destination).map_err(|error| {
+            if cancellation.is_cancelled() {
+                return Err(MediaEngineError::Cancelled);
+            }
+            if fs::metadata(&temporary).map_or(true, |metadata| metadata.len() == 0) {
+                return Err(MediaEngineError::Process(
+                    "FFmpeg produced no output; the title was not saved".to_owned(),
+                ));
+            }
+            let _ = events.send(EngineEvent::RipPhaseChanged {
+                phase: RipPhase::Finalising,
+                title_name: title.name.clone(),
+            });
+            staging
+                .publish(&temporary, &destination, request.overwrite)
+                .map_err(|error| {
                     MediaEngineError::Other(format!(
-                        "could not replace {}: {error}",
+                        "could not finalise {}: {error}",
                         destination.display()
                     ))
                 })?;
-            }
-            fs::rename(&temporary, &destination).map_err(|error| {
-                MediaEngineError::Other(format!(
-                    "could not finalize {}: {error}",
-                    destination.display()
-                ))
-            })?;
             let bytes_written = fs::metadata(&destination)
                 .map(|metadata| metadata.len())
                 .ok();
@@ -344,14 +376,11 @@ fn add_input(
     let source = &request.catalog.source;
     match source.kind {
         DiscKind::Dvd => {
-            command.args([
-                "-f",
-                "dvdvideo",
-                "-title",
+            command.args(crate::source::dvd_input_args(
+                &source.path,
                 &title.source_title_id,
-                "-i",
-                &source.path.to_string_lossy(),
-            ]);
+                title.dvd.as_ref(),
+            ));
         }
         DiscKind::BluRay => {
             if title.source_title_id != "-1" {
@@ -375,9 +404,14 @@ fn extract_audio_cd_track(
     request: &RipRequest,
     title: &Title,
     destination: &Path,
+    selection_index: usize,
     events: &Sender<EngineEvent>,
     cancellation: &CancellationToken,
 ) -> Result<PathBuf, MediaEngineError> {
+    let _ = events.send(EngineEvent::RipPhaseChanged {
+        phase: RipPhase::Reading,
+        title_name: title.name.clone(),
+    });
     let wave = cd_wave_path(destination, title.id);
     cleanup_partial(&wave);
     let _ = events.send(EngineEvent::Log {
@@ -403,8 +437,35 @@ fn extract_audio_cd_track(
     let stderr = process.take_stderr().ok_or_else(|| {
         MediaEngineError::Process("cdparanoia error pipe is unavailable".to_owned())
     })?;
-    let stderr_reader = thread::spawn(move || read_all(stderr));
+    let stderr_reader = thread::spawn(move || read_diagnostic_tail(stderr));
+    let started = Instant::now();
+    let mut last_emit = Instant::now() - Duration::from_secs(1);
     loop {
+        if last_emit.elapsed() >= Duration::from_millis(500) {
+            let bytes = fs::metadata(&wave)
+                .map(|meta| meta.len().saturating_sub(44))
+                .unwrap_or(0);
+            let fraction = title
+                .size_bytes
+                .filter(|size| *size > 0)
+                .map_or(0.0, |size| (bytes as f64 / size as f64).clamp(0.0, 1.0));
+            let elapsed_seconds = started.elapsed().as_secs();
+            let _ = events.send(EngineEvent::RipProgress(RipProgress {
+                current_title: selection_index + 1,
+                title_count: request.selections.len(),
+                title_name: title.name.clone(),
+                fraction,
+                bytes_written: Some(bytes),
+                read_rate_bytes: (elapsed_seconds > 0).then(|| bytes / elapsed_seconds.max(1)),
+                elapsed_seconds,
+                remaining_seconds: estimate_remaining(elapsed_seconds, fraction),
+                destination: request.output_directory.join(ensure_extension(
+                    &request.selections[selection_index].output_file,
+                    request.output_profile.extension(),
+                )),
+            }));
+            last_emit = Instant::now();
+        }
         if cancellation.is_cancelled() {
             let _ = process.terminate();
             let _ = stderr_reader.join();
@@ -423,9 +484,16 @@ fn extract_audio_cd_track(
                     detail.trim().to_owned()
                 }));
             }
-            if !wave.is_file() {
+            if !wave.is_file()
+                || fs::metadata(&wave).is_ok_and(|meta| {
+                    title
+                        .size_bytes
+                        .is_some_and(|expected| meta.len() < expected)
+                })
+            {
                 return Err(MediaEngineError::Process(
-                    "cdparanoia completed without producing track audio".to_owned(),
+                    "cdparanoia produced incomplete track audio; check the disc and retry"
+                        .to_owned(),
                 ));
             }
             return Ok(wave);
@@ -453,21 +521,21 @@ fn attached_cover_art<'a>(request: &'a RipRequest, title: &Title) -> Option<&'a 
     .flatten()
 }
 
-fn add_opus_cover_art_metadata(command: &mut Command, request: &RipRequest, title: &Title) {
+fn opus_cover_metadata(request: &RipRequest, title: &Title) -> Option<String> {
     if request.catalog.source.kind != DiscKind::AudioCd
         || request.output_profile != OutputProfile::AudioOpus
     {
-        return;
+        return None;
     }
-    if let Some(cover_art) = request.catalog.cover_art_for_title(title.id) {
-        command.args([
-            "-metadata",
-            &format!(
-                "METADATA_BLOCK_PICTURE={}",
+    request
+        .catalog
+        .cover_art_for_title(title.id)
+        .map(|cover_art| {
+            format!(
+                ";FFMETADATA1\nMETADATA_BLOCK_PICTURE={}\n",
                 metadata_block_picture(cover_art)
-            ),
-        ]);
-    }
+            )
+        })
 }
 
 /// Build the FLAC picture block used by Vorbis comments in Ogg Opus files.
@@ -497,7 +565,7 @@ fn audio_cd_metadata(request: &RipRequest, title: &Title) -> Vec<(String, String
         return title
             .tags
             .iter()
-            .filter(|tag| !tag.key.trim().is_empty() && !tag.value.is_empty())
+            .filter(|tag| !tag.key.trim().is_empty())
             .map(|tag| (tag.key.clone(), tag.value.clone()))
             .collect();
     }
@@ -618,24 +686,6 @@ fn read_progress(reader: impl Read, sender: Sender<ProgressState>) {
     }
 }
 
-fn read_all(mut reader: impl Read) -> String {
-    let mut buffer = String::new();
-    let _ = reader.read_to_string(&mut buffer);
-    buffer
-}
-
-fn temporary_output_path(destination: &Path, title_id: u32) -> PathBuf {
-    let file_name = destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("title.mkv");
-    destination.with_file_name(format!(
-        ".{file_name}.{}.{}.part",
-        std::process::id(),
-        title_id
-    ))
-}
-
 fn cleanup_partial(path: &Path) {
     if path.is_file() {
         let _ = fs::remove_file(path);
@@ -658,21 +708,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn estimates_remaining_from_progress() {
-        assert_eq!(estimate_remaining(30, 0.25), Some(90));
-        assert_eq!(estimate_remaining(30, 0.0), None);
+    fn dvd_rip_uses_the_same_title_and_trimmed_chapters_as_the_probe() {
+        let mut request = audio_cd_request();
+        request.catalog.source.kind = DiscKind::Dvd;
+        request.catalog.source.path = "/disc".into();
+        let title = &mut request.catalog.titles[0];
+        title.source_title_id = "65".to_owned();
+        title.dvd = Some(media_rip_core::model::dvd::DvdTitleInfo {
+            title_set: 1,
+            title_in_set: 1,
+            chapter_range: Some(media_rip_core::model::dvd::DvdChapterRange { first: 9, last: 24 }),
+            cell_count: 16,
+            leading_padding_cells: 8,
+            trailing_padding_cells: 1,
+            warnings: vec![],
+        });
+        let probe = crate::source::ProbeInput::Dvd {
+            root: request.catalog.source.path.clone(),
+            title: 65,
+            info: title.dvd.clone(),
+        };
+        let mut command = Command::new("ffmpeg");
+        add_input(&mut command, &request, &request.catalog.titles[0], None);
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(args, probe.ffmpeg_input_args());
+        for pair in [
+            ["-title", "65"],
+            ["-chapter_start", "9"],
+            ["-chapter_end", "24"],
+            ["-trim", "1"],
+        ] {
+            assert!(args.windows(2).any(|args| args == pair));
+        }
     }
 
     #[test]
-    fn produces_hidden_partial_beside_destination() {
-        let path = temporary_output_path(Path::new("/video/Movie.mkv"), 3);
-        assert_eq!(path.parent(), Some(Path::new("/video")));
-        assert!(
-            path.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with(".Movie.mkv.")
-        );
+    fn estimates_remaining_from_progress() {
+        assert_eq!(estimate_remaining(30, 0.25), Some(90));
+        assert_eq!(estimate_remaining(30, 0.0), None);
     }
 
     #[test]
@@ -721,6 +797,7 @@ mod tests {
     fn audio_cd_metadata_includes_album_artist_and_track_total() {
         let titles = (1..=12)
             .map(|number| Title {
+                dvd: None,
                 id: number - 1,
                 source_title_id: number.to_string(),
                 disc_title_number: None,
@@ -765,6 +842,7 @@ mod tests {
                 cover_art: None,
                 track_cover_art: Default::default(),
                 metadata_attributions: Vec::new(),
+                audio_metadata_candidates: Vec::new(),
                 video_metadata_suggestions: Vec::new(),
                 video_episode_context: None,
             },
@@ -825,16 +903,9 @@ mod tests {
         let mut request = audio_cd_request();
         request.output_profile = OutputProfile::AudioOpus;
         request.catalog.cover_art = Some(CoverArt::new("image/jpeg", vec![1, 2, 3, 4]));
-        let mut command = Command::new("ffmpeg");
-
-        add_opus_cover_art_metadata(&mut command, &request, &request.catalog.titles[0]);
-
-        let arguments = command
-            .get_args()
-            .map(|value| value.to_string_lossy())
-            .collect::<Vec<_>>();
-        let picture = arguments
-            .iter()
+        let metadata = opus_cover_metadata(&request, &request.catalog.titles[0]).unwrap();
+        let picture = metadata
+            .lines()
             .find_map(|value| value.strip_prefix("METADATA_BLOCK_PICTURE="))
             .expect("picture metadata");
         let decoded = STANDARD.decode(picture).expect("valid base64");
@@ -895,6 +966,7 @@ mod tests {
                     encrypted: None,
                 },
                 titles: vec![Title {
+                    dvd: None,
                     id: 0,
                     source_title_id: "1".into(),
                     disc_title_number: None,
@@ -926,6 +998,7 @@ mod tests {
                 cover_art: None,
                 track_cover_art: Default::default(),
                 metadata_attributions: Vec::new(),
+                audio_metadata_candidates: Vec::new(),
                 video_metadata_suggestions: Vec::new(),
                 video_episode_context: None,
             },

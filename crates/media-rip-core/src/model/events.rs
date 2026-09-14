@@ -37,6 +37,23 @@ pub struct RipTitleResult {
     pub bytes_written: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RipPhase {
+    Reading,
+    Encoding,
+    Finalising,
+}
+
+impl RipPhase {
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Reading => "Reading disc audio",
+            Self::Encoding => "Writing media and metadata",
+            Self::Finalising => "Finalising output",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EngineEvent {
     Log {
@@ -55,10 +72,12 @@ pub enum EngineEvent {
     ScanFailed(String),
     ScanCancelled,
     EpisodeSeasonRefreshed {
+        request_id: u64,
         season: u32,
         choices: Vec<VideoEpisodeChoice>,
     },
     EpisodeSeasonRefreshFailed {
+        request_id: u64,
         season: u32,
         error: String,
     },
@@ -66,6 +85,10 @@ pub enum EngineEvent {
         title_count: usize,
     },
     RipProgress(RipProgress),
+    RipPhaseChanged {
+        phase: RipPhase,
+        title_name: String,
+    },
     TitleFinished(RipTitleResult),
     RipFinished {
         saved_titles: usize,

@@ -225,7 +225,7 @@ impl InfoPanel {
                 {
                     fields.push(InfoField::new(
                         "Exact duplicate of",
-                        format!("Playlist {}", original.source_title_id),
+                        format!("Title {}", original.source_title_id),
                     ));
                 }
                 if let Some(size) = title.size_bytes {
@@ -236,6 +236,36 @@ impl InfoPanel {
                             "Size"
                         },
                         format_bytes(size),
+                    ));
+                }
+                if let Some(dvd) = &title.dvd {
+                    fields.push(InfoField::new(
+                        "DVD location",
+                        format!("VTS {:02}, title {}", dvd.title_set, dvd.title_in_set),
+                    ));
+                    if let Some(range) = dvd.chapter_range {
+                        fields.push(InfoField::new(
+                            "Original DVD chapters",
+                            format!("{} to {}", range.first, range.last),
+                        ));
+                    }
+                    fields.push(InfoField::new(
+                        "Padding cells",
+                        format!(
+                            "{} at start, {} at end",
+                            dvd.leading_padding_cells, dvd.trailing_padding_cells
+                        ),
+                    ));
+                    for warning in &dvd.warnings {
+                        fields.push(InfoField::new("DVD layout review", warning));
+                    }
+                    fields.push(InfoField::new(
+                        "Size basis",
+                        if dvd.cell_count > 0 {
+                            "Estimated from title cell sectors; not a measured output file size"
+                        } else {
+                            "DVD layout unverified; any displayed size is an estimate"
+                        },
                     ));
                 }
                 if let Some(count) = title.segment_count {

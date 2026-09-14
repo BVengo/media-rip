@@ -1,6 +1,8 @@
 mod cache;
 mod discdb;
 mod embedded;
+pub(crate) mod musicbrainz;
+mod pagination;
 mod report;
 mod tmdb;
 mod tvdb;
@@ -422,6 +424,52 @@ pub(crate) fn enrich_video(
     options: &ScanOptions,
     cancellation: &CancellationToken,
 ) -> VideoEnrichment {
+    if kind == DiscKind::Dvd {
+        let indices = dvd_metadata_title_indices(titles);
+        let mut eligible = indices
+            .iter()
+            .map(|&index| titles[index].clone())
+            .collect::<Vec<_>>();
+        let result = enrich_video_titles(
+            path,
+            kind,
+            fallback_name,
+            &mut eligible,
+            options,
+            cancellation,
+        );
+        for (index, title) in indices.into_iter().zip(eligible) {
+            titles[index] = title;
+        }
+        return result;
+    }
+    enrich_video_titles(path, kind, fallback_name, titles, options, cancellation)
+}
+
+fn dvd_metadata_title_indices(titles: &[Title]) -> Vec<usize> {
+    let mut seen = std::collections::HashSet::new();
+    titles
+        .iter()
+        .enumerate()
+        .filter(|(_, title)| {
+            title.dvd.as_ref().is_none_or(|dvd| dvd.warnings.is_empty())
+                && title
+                    .duplicate_key
+                    .as_ref()
+                    .is_none_or(|key| seen.insert(key.clone()))
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+fn enrich_video_titles(
+    path: &Path,
+    kind: DiscKind,
+    fallback_name: &str,
+    titles: &mut [Title],
+    options: &ScanOptions,
+    cancellation: &CancellationToken,
+) -> VideoEnrichment {
     let mut result = VideoEnrichment::default();
     let embedded = match kind {
         DiscKind::BluRay => embedded::read_bluray(path),
@@ -707,20 +755,35 @@ pub(crate) fn enrich_video(
         .as_ref()
         .and_then(|matched| matched.metadata_url.as_deref())
         .and_then(|url| parse_video_metadata_link(url).ok());
-    let mut previous_hint = options.previous_dvd_match.as_ref().and_then(|matched| {
-        Some(DiscHint {
-            season: matched.season?,
-            volume: None,
-            disc: 1,
+    let mut previous_hint = hint.or_else(|| {
+        options.previous_dvd_match.as_ref().and_then(|matched| {
+            Some(DiscHint {
+                season: matched.season?,
+                volume: None,
+                disc: 1,
+            })
         })
     });
-    if kind == DiscKind::Dvd
+    let may_continue_previous = options.previous_dvd_match.as_ref().is_some_and(|previous| {
+        previous_dvd_identity_matches(
+            kind,
+            &metadata_query,
+            options.video_metadata_url.as_deref(),
+            discdb_match.is_some(),
+            &previous.title,
+        )
+    });
+    if options.previous_dvd_match.is_some() && !may_continue_previous {
+        log::debug!(target: "media_rip_engine::metadata_decision",
+            "previous DVD identity ignored: no independent matching identity on the current disc");
+    }
+    if may_continue_previous
         && provider_lookups_empty(&tmdb_lookup, &tvdb_lookup, &tvmaze_lookup)
         && let Some(previous) = options.previous_dvd_match.as_ref()
     {
         log::debug!(
             target: "media_rip_engine::metadata_decision",
-            "ordinary DVD identification failed; retrying with previous matched DVD identity {:?}",
+            "current DVD label independently matches the previous series; retrying identity {:?}",
             previous.title
         );
         (tmdb_lookup, tvdb_lookup, tvmaze_lookup) = parallel_provider_lookups(
@@ -737,6 +800,7 @@ pub(crate) fn enrich_video(
     }
     let mut previous_season_rolled_over = false;
     if previous_fallback_used
+        && hint.is_none()
         && let Some(previous) = options.previous_dvd_match.as_ref()
         && let (Some(season), Some(next_episode)) = (previous.season, previous.next_episode)
     {
@@ -826,7 +890,7 @@ pub(crate) fn enrich_video(
         tmdb_lookup,
         tvdb_lookup,
         tvmaze_lookup,
-        discdb_match.is_some() || metadata_link.is_some() || previous_fallback_used,
+        discdb_match.is_some() || metadata_link.is_some(),
     );
     if previous_fallback_used {
         for attribution in &mut attributions {
@@ -896,7 +960,11 @@ pub(crate) fn enrich_video(
         }
         if discdb_match.is_none() {
             if resolved.matched.media_type == MediaType::Movie {
-                apply_movie_match(titles, &resolved.matched);
+                if let Some(suggestion) =
+                    apply_movie_match(titles, &resolved.matched, metadata_link.is_some())
+                {
+                    result.suggestions.push(suggestion);
+                }
             } else if let Some(hint) = if previous_fallback_used {
                 previous_hint
             } else {
@@ -912,6 +980,7 @@ pub(crate) fn enrich_video(
                 result.suggestions = probable.suggestions;
                 result.disc_identity = probable.disc_identity;
                 if previous_fallback_used
+                    && parsed_query.hint().is_none()
                     && !previous_season_rolled_over
                     && let Some(first) = options
                         .previous_dvd_match
@@ -1109,6 +1178,32 @@ fn video_episode_choices(
             }
         })
         .collect()
+}
+
+/// Remembered state can narrow an independently identified series; failure to
+/// identify a disc is never evidence that it belongs to the previous series.
+fn previous_dvd_identity_matches(
+    kind: DiscKind,
+    current: &str,
+    explicit_query: Option<&str>,
+    exact_disc_match: bool,
+    previous: &str,
+) -> bool {
+    if kind != DiscKind::Dvd
+        || exact_disc_match
+        || explicit_query.is_some_and(|query| !query.trim().is_empty())
+    {
+        return false;
+    }
+    let current = media_rip_core::model::matching::text_key(&parse_disc_label(current).title);
+    let previous = media_rip_core::model::matching::text_key(&parse_disc_label(previous).title);
+    current.len() >= 3
+        && current.chars().any(char::is_alphabetic)
+        && current == previous
+        && !matches!(
+            current.as_str(),
+            "dvd" | "disc" | "unknown" | "videots" | "dvdvideo"
+        )
 }
 
 fn provider_lookups_empty(
@@ -1828,11 +1923,29 @@ fn provider_matches_agree(first: &VideoMatch, second: &VideoMatch) -> bool {
     if first.media_type != second.media_type {
         return false;
     }
-    let titles_agree = tmdb::normalize_title(&first.title) == tmdb::normalize_title(&second.title);
-    match (first.year, second.year) {
-        (Some(first), Some(second)) => first == second,
-        _ => titles_agree,
+    let ids = [
+        (first.tmdb_id, second.tmdb_id),
+        (first.tvdb_id, second.tvdb_id),
+        (first.tvmaze_id, second.tvmaze_id),
+    ];
+    if ids
+        .iter()
+        .any(|(a, b)| matches!((a, b), (Some(a), Some(b)) if a != b))
+    {
+        return false;
     }
+    if matches!((first.year, second.year), (Some(a), Some(b)) if a != b) {
+        return false;
+    }
+    if matches!((first.runtime_minutes, second.runtime_minutes), (Some(a), Some(b)) if a > 0 && b > 0 && a.abs_diff(b) > a.max(b) / 4)
+    {
+        return false;
+    }
+    let shared_id = ids
+        .iter()
+        .any(|(a, b)| matches!((a, b), (Some(a), Some(b)) if a == b));
+    let first_title = tmdb::normalize_title(&first.title);
+    shared_id || (!first_title.is_empty() && first_title == tmdb::normalize_title(&second.title))
 }
 
 fn merge_provider_lookups(
@@ -2680,12 +2793,19 @@ pub(crate) fn assign_output_names(titles: &mut [Title], fallback_stem: &str) {
     }
 }
 
-fn apply_movie_match(titles: &mut [Title], matched: &VideoMatch) {
+fn apply_movie_match(
+    titles: &mut [Title],
+    matched: &VideoMatch,
+    explicit_identity: bool,
+) -> Option<VideoMetadataSuggestion> {
     if matched.media_type != MediaType::Movie {
-        return;
+        return None;
     }
-    let runtime_ms = matched.runtime_minutes.map(|minutes| minutes * 60_000);
-    let mut candidates = titles
+    let runtime_ms = matched
+        .runtime_minutes
+        .filter(|minutes| *minutes > 0)
+        .and_then(|minutes| minutes.checked_mul(60_000));
+    let candidates = titles
         .iter()
         .enumerate()
         .filter(|(_, title)| {
@@ -2695,9 +2815,9 @@ fn apply_movie_match(titles: &mut [Title], matched: &VideoMatch) {
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
     if candidates.len() != 1 {
-        return;
+        return None;
     }
-    let title = &mut titles[candidates.remove(0)];
+    let title = &mut titles[candidates[0]];
     let tags = video_tags(
         &matched.title,
         &matched.title,
@@ -2706,26 +2826,49 @@ fn apply_movie_match(titles: &mut [Title], matched: &VideoMatch) {
         None,
         VideoProviderIds::from(matched),
     );
-    apply_title_name(
-        title,
-        &matched.title,
-        VideoMetadata {
-            attribution: MetadataAttribution::new(
-                matched.providers.join(" + "),
-                if matched.providers.len() > 1 { 90 } else { 80 },
-                "Exact title + unique runtime match",
-            ),
-            content_type: Some("MainMovie".to_owned()),
-            year: matched.year,
-            season: None,
-            episode: None,
-            tmdb_id: matched.tmdb_id,
-            tvdb_id: matched.tvdb_id,
-            tvmaze_id: matched.tvmaze_id,
-        },
-        &tags,
-    );
-    title.is_main_title = true;
+    let automatic = runtime_ms.is_some() && (explicit_identity || matched.providers.len() > 1);
+    let metadata = VideoMetadata {
+        attribution: MetadataAttribution::new(
+            matched.providers.join(" + "),
+            if automatic { 90 } else { 65 },
+            if automatic {
+                "Confirmed identity and unique runtime match"
+            } else {
+                "Movie identity needs review"
+            },
+        ),
+        content_type: Some("MainMovie".to_owned()),
+        year: matched.year,
+        season: None,
+        episode: None,
+        tmdb_id: matched.tmdb_id,
+        tvdb_id: matched.tvdb_id,
+        tvmaze_id: matched.tvmaze_id,
+    };
+    if automatic {
+        apply_title_name(title, &matched.title, metadata, &tags);
+        title.is_main_title = true;
+        None
+    } else {
+        Some(VideoMetadataSuggestion {
+            title_id: title.id,
+            name: matched.title.clone(),
+            tags,
+            metadata,
+            evidence: vec![
+                if runtime_ms.is_some() {
+                    "One disc title has a compatible runtime"
+                } else {
+                    "The disc marks this as its main title; the provider supplied no runtime"
+                }
+                .to_owned(),
+            ],
+            assumptions: vec![
+                "Confirm the movie and edition from the packaging before applying".to_owned(),
+            ],
+            episode_choices: Vec::new(),
+        })
+    }
 }
 
 fn mapped_display_name(
@@ -2839,6 +2982,80 @@ mod tests {
         searchable_disc_name, title_review_score, tvdb::TvdbMediaType, video_episode_context,
         video_metadata_link_provider,
     };
+
+    #[test]
+    fn duplicate_and_suspect_dvd_paths_are_not_episode_matching_evidence() {
+        let mut first = title("DVD title 65", false);
+        first.duplicate_key = Some("same physical cells".to_owned());
+        let duplicate = first.clone();
+        let mut suspect = title("Unverified title", false);
+        suspect.dvd = Some(media_rip_core::model::dvd::DvdTitleInfo {
+            title_set: 1,
+            title_in_set: 2,
+            chapter_range: None,
+            cell_count: 0,
+            leading_padding_cells: 0,
+            trailing_padding_cells: 0,
+            warnings: vec!["Cells jump backwards".to_owned()],
+        });
+        assert_eq!(
+            super::dvd_metadata_title_indices(&[first, duplicate, suspect]),
+            [0]
+        );
+    }
+
+    #[test]
+    fn remembered_series_requires_independent_identity_on_the_current_disc() {
+        use media_rip_core::DiscKind;
+        for current in [
+            "C-126802-8",
+            "JS1Disc1",
+            "VIDEO_TS",
+            "",
+            "123456",
+            "The Boy in the Striped Pyjamas",
+            "CRIMINALMINDS_AUS_S1D1",
+        ] {
+            assert!(
+                !super::previous_dvd_identity_matches(
+                    DiscKind::Dvd,
+                    current,
+                    None,
+                    false,
+                    "Dexter"
+                ),
+                "{current}"
+            );
+        }
+        assert!(super::previous_dvd_identity_matches(
+            DiscKind::Dvd,
+            "DEXTER_S1D2",
+            None,
+            false,
+            "Dexter"
+        ));
+        assert!(!super::previous_dvd_identity_matches(
+            DiscKind::Dvd,
+            "DEXTER_S1D2",
+            Some("A different film"),
+            false,
+            "Dexter"
+        ));
+        assert!(!super::previous_dvd_identity_matches(
+            DiscKind::Dvd,
+            "DEXTER_S1D2",
+            None,
+            true,
+            "Dexter"
+        ));
+        assert!(!super::previous_dvd_identity_matches(
+            DiscKind::BluRay,
+            "DEXTER_S1D2",
+            None,
+            false,
+            "Dexter"
+        ));
+    }
 
     #[test]
     fn resolved_series_retains_episode_choices_without_title_suggestions() {
@@ -3020,6 +3237,7 @@ mod tests {
 
     fn title(name: &str, enriched: bool) -> Title {
         Title {
+            dvd: None,
             id: 0,
             source_title_id: "00800".into(),
             disc_title_number: None,
@@ -3583,13 +3801,74 @@ mod tests {
     }
 
     #[test]
+    fn movie_ranking_does_not_imply_confidence_without_runtime() {
+        let mut titles = vec![title("Original", false)];
+        titles[0].is_main_title = true;
+        titles[0].duration_ms = 120 * 60_000;
+        let mut matched = VideoMatch {
+            providers: vec!["TMDB", "TVDB"],
+            media_type: MediaType::Movie,
+            title: "Matched film".into(),
+            year: None,
+            runtime_minutes: None,
+            tmdb_id: Some(1),
+            tvdb_id: None,
+            tvmaze_id: None,
+        };
+        assert!(super::apply_movie_match(&mut titles, &matched, false).is_some());
+        assert_eq!(titles[0].name, "Original");
+        matched.runtime_minutes = Some(120);
+        matched.providers.pop();
+        assert!(super::apply_movie_match(&mut titles, &matched, false).is_some());
+        assert_eq!(titles[0].name, "Original");
+        assert!(super::apply_movie_match(&mut titles, &matched, true).is_none());
+        assert_eq!(titles[0].name, "Matched film");
+    }
+
+    #[test]
+    fn provider_agreement_rejects_titles_years_identifiers_and_runtime_conflicts() {
+        let original = VideoMatch {
+            providers: vec!["TMDB"],
+            media_type: MediaType::Movie,
+            title: "Film".into(),
+            year: Some(2001),
+            runtime_minutes: Some(120),
+            tmdb_id: Some(1),
+            tvdb_id: None,
+            tvmaze_id: None,
+        };
+        for field in 0..5 {
+            let mut other = original.clone();
+            match field {
+                0 => {
+                    other.title = "Different Film".into();
+                    other.tmdb_id = None;
+                }
+                1 => other.year = Some(2020),
+                2 => other.tmdb_id = Some(99),
+                3 => other.runtime_minutes = Some(40),
+                _ => other.media_type = MediaType::Tv,
+            }
+            assert!(
+                !provider_matches_agree(&original, &other),
+                "conflict {field}"
+            );
+        }
+        let mut translated = original.clone();
+        translated.title = "Translated title".into();
+        assert!(provider_matches_agree(&original, &translated));
+        translated.tmdb_id = None;
+        assert!(!provider_matches_agree(&original, &translated));
+    }
+
+    #[test]
     fn provider_agreement_combines_ids_and_raises_confidence() {
         let tmdb = ProviderLookup {
             match_method: "exact title",
             matched: VideoMatch {
                 providers: vec!["TMDB"],
                 media_type: MediaType::Tv,
-                title: "The Example".into(),
+                title: "Example".into(),
                 year: Some(2005),
                 runtime_minutes: Some(42),
                 tmdb_id: Some(10),

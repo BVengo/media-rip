@@ -51,6 +51,7 @@ struct SeasonResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SearchResponse {
+    total_pages: Option<u32>,
     #[serde(default)]
     results: Vec<SearchResult>,
 }
@@ -172,18 +173,28 @@ impl<'a> TmdbClient<'a> {
     }
 
     fn search_results(&self, query: &str) -> Result<Vec<SearchResult>, String> {
-        let response: SearchResponse = self.get_json(
-            "/search/multi",
-            &[
-                ("query", query),
-                ("include_adult", "false"),
-                ("language", "en-US"),
-            ],
-        )?;
-        Ok(response
-            .results
+        let results = super::pagination::collect_pages(1, 25, |page| {
+            let response: SearchResponse = self.get_json(
+                "/search/multi",
+                &[
+                    ("query", query),
+                    ("include_adult", "false"),
+                    ("language", "en-US"),
+                    ("page", &page.to_string()),
+                ],
+            )?;
+            Ok(super::pagination::Page {
+                has_more: response.total_pages.is_some_and(|total| page < total),
+                items: response.results,
+            })
+        })?;
+        let mut seen = std::collections::HashSet::new();
+        Ok(results
             .into_iter()
-            .filter(|result| matches!(result.media_type.as_str(), "movie" | "tv"))
+            .filter(|result| {
+                matches!(result.media_type.as_str(), "movie" | "tv")
+                    && seen.insert((result.media_type.clone(), result.id))
+            })
             .collect())
     }
 
@@ -339,11 +350,7 @@ fn match_from_details(details: DetailsResponse, media_type: MediaType) -> TmdbMa
 }
 
 pub(super) fn normalize_title(value: &str) -> String {
-    value
-        .chars()
-        .filter(|character| character.is_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
+    media_rip_core::model::matching::text_key(value)
 }
 
 fn year_in(value: &str) -> Option<u32> {

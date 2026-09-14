@@ -16,11 +16,11 @@ jobs:
       - name: Install native dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes ffmpeg libbluray-dev libdvdread-dev libgtk-4-dev
+          sudo apt-get install --yes xvfb ffmpeg libbluray-dev libdvdread-dev libgtk-4-dev
       - name: Install minimum supported Rust
         run: |
-          rustup toolchain install 1.85 --profile minimal --component clippy,rustfmt
-          rustup default 1.85
+          rustup toolchain install 1.88 --profile minimal --component clippy,rustfmt
+          rustup default 1.88
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Check workspace
@@ -29,3 +29,5 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Test GTK workflows
+        run: GDK_BACKEND=x11 xvfb-run -a cargo test -p media-rip gtk_workflows -- --ignored

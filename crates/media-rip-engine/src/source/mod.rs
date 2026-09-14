@@ -38,6 +38,7 @@ pub(crate) enum ProbeInput {
     Dvd {
         root: PathBuf,
         title: u32,
+        info: Option<media_rip_core::model::dvd::DvdTitleInfo>,
     },
     BluRay {
         root: PathBuf,
@@ -49,14 +50,9 @@ impl ProbeInput {
     pub fn ffmpeg_input_args(&self) -> Vec<String> {
         match self {
             Self::File(path) => vec!["-i".to_owned(), path.to_string_lossy().into_owned()],
-            Self::Dvd { root, title } => vec![
-                "-f".to_owned(),
-                "dvdvideo".to_owned(),
-                "-title".to_owned(),
-                title.to_string(),
-                "-i".to_owned(),
-                root.to_string_lossy().into_owned(),
-            ],
+            Self::Dvd { root, title, info } => {
+                dvd_input_args(root, &title.to_string(), info.as_ref())
+            }
             Self::BluRay { root, playlist } => {
                 let mut args = Vec::new();
                 if let Some(playlist) = playlist {
@@ -70,6 +66,32 @@ impl ProbeInput {
             }
         }
     }
+}
+
+/// Scanning and ripping must use identical navigation and chapter boundaries.
+pub(crate) fn dvd_input_args(
+    root: &Path,
+    title: &str,
+    info: Option<&media_rip_core::model::dvd::DvdTitleInfo>,
+) -> Vec<String> {
+    let mut args = vec![
+        "-f".to_owned(),
+        "dvdvideo".to_owned(),
+        "-title".to_owned(),
+        title.to_owned(),
+        "-trim".to_owned(),
+        "1".to_owned(),
+    ];
+    if let Some(range) = info.and_then(|info| info.chapter_range) {
+        args.extend([
+            "-chapter_start".to_owned(),
+            range.first.to_string(),
+            "-chapter_end".to_owned(),
+            range.last.to_string(),
+        ]);
+    }
+    args.extend(["-i".to_owned(), root.to_string_lossy().into_owned()]);
+    args
 }
 
 pub fn detect_kind(path: &Path) -> DiscKind {

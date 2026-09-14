@@ -90,6 +90,18 @@ impl MediaTag {
     }
 }
 
+/// A release awaiting an explicit user choice. Track metadata is keyed by the
+/// physical track number, never by provider response order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioMetadataCandidate {
+    pub id: String,
+    pub album: String,
+    pub artist: String,
+    pub edition: String,
+    pub evidence: String,
+    pub tracks: BTreeMap<u32, Vec<MediaTag>>,
+}
+
 /// Source artwork: album art for Audio CDs or disc/poster art for video media.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoverArt {
@@ -268,6 +280,8 @@ impl Track {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Title {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dvd: Option<super::dvd::DvdTitleInfo>,
     pub id: u32,
     pub source_title_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -328,12 +342,79 @@ pub struct MediaCatalog {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub metadata_attributions: Vec<MetadataAttribution>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio_metadata_candidates: Vec<AudioMetadataCandidate>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub video_metadata_suggestions: Vec<VideoMetadataSuggestion>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_episode_context: Option<VideoEpisodeContext>,
 }
 
 impl MediaCatalog {
+    /// Explicit release selection replaces tags but preserves stream choices.
+    /// Validate the complete mapping before changing any title.
+    pub fn apply_audio_candidate(&mut self, id: &str) -> bool {
+        let Some(candidate) = self
+            .audio_metadata_candidates
+            .iter()
+            .find(|candidate| candidate.id == id)
+        else {
+            return false;
+        };
+        if self.titles.iter().any(|title| {
+            title
+                .source_title_id
+                .parse::<u32>()
+                .ok()
+                .is_none_or(|number| !candidate.tracks.contains_key(&number))
+        }) {
+            return false;
+        }
+        for title in &mut self.titles {
+            let number = title
+                .source_title_id
+                .parse::<u32>()
+                .expect("validated track number");
+            title.tags.clone_from(&candidate.tracks[&number]);
+            if let Some(tag) = title
+                .tags
+                .iter()
+                .find(|tag| tag.key.eq_ignore_ascii_case("title"))
+            {
+                title.name.clone_from(&tag.value);
+            }
+            if let Some(track) = title.tracks.first_mut() {
+                track.name = title
+                    .tags
+                    .iter()
+                    .find(|tag| tag.key.eq_ignore_ascii_case("artist"))
+                    .map(|tag| tag.value.clone());
+            }
+        }
+        self.source.name.clone_from(&candidate.album);
+        for (label, value) in [
+            ("Album artist", candidate.artist.as_str()),
+            ("Tag source", "MusicBrainz (release selected by user)"),
+        ] {
+            if let Some(field) = self
+                .source_info
+                .iter_mut()
+                .find(|field| field.label == label)
+            {
+                field.value = value.to_owned();
+            } else {
+                self.source_info.push(InfoField::new(label, value));
+            }
+        }
+
+        self.metadata_attributions.push(MetadataAttribution::new(
+            "MusicBrainz",
+            100,
+            "Release selected by user",
+        ));
+        self.audio_metadata_candidates.clear();
+        true
+    }
+
     pub fn cover_art_for_title(&self, title_id: u32) -> Option<&CoverArt> {
         match self.track_cover_art.get(&title_id) {
             None => self.cover_art.as_ref(),

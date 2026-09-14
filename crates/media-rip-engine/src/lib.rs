@@ -10,6 +10,9 @@ mod probe;
 mod process;
 mod rip;
 mod source;
+mod storage;
+
+pub use storage::atomic_write;
 
 pub use engine::OpenMediaEngine;
 pub use metadata::{EpisodeSeasonOptions, refresh_episode_season, video_metadata_link_provider};

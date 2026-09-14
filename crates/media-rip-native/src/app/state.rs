@@ -53,6 +53,8 @@ pub(crate) struct AppState {
     pub auto_read_armed: bool,
     pub episode_metadata: Option<EpisodeMetadataContext>,
     pub pending_suggestion_season: Option<u32>,
+    pub metadata_request_id: u64,
+    pub metadata_cancellation: Option<CancellationToken>,
     pub video_metadata_backups: BTreeMap<u32, VideoMetadataBackup>,
     pub reidentification_backup: Option<Box<MediaCatalog>>,
     pub metadata_step_complete: bool,
@@ -60,7 +62,51 @@ pub(crate) struct AppState {
 }
 
 impl AppState {
+    pub fn cancel_metadata_refresh(&mut self) {
+        if let Some(token) = self.metadata_cancellation.take() {
+            token.cancel();
+        }
+        self.metadata_request_id = self.metadata_request_id.wrapping_add(1);
+        self.pending_suggestion_season = None;
+    }
+
+    pub fn begin_metadata_refresh(&mut self, season: u32) -> (u64, CancellationToken) {
+        self.cancel_metadata_refresh();
+        let token = CancellationToken::default();
+        self.metadata_cancellation = Some(token.clone());
+        self.pending_suggestion_season = Some(season);
+        (self.metadata_request_id, token)
+    }
+
+    pub fn accept_metadata_refresh(&mut self, request_id: u64, season: u32) -> bool {
+        if self.metadata_request_id != request_id
+            || self.pending_suggestion_season != Some(season)
+            || self.is_busy()
+        {
+            return false;
+        }
+        self.pending_suggestion_season = None;
+        self.metadata_cancellation = None;
+        true
+    }
+
     pub fn is_busy(&self) -> bool {
         self.busy != BusyState::Idle
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn stale_same_season_response_cannot_mutate_a_new_source() {
+        let mut state = AppState::default();
+        let (old_id, old_token) = state.begin_metadata_refresh(1);
+        state.cancel_metadata_refresh();
+        let (new_id, _) = state.begin_metadata_refresh(1);
+        assert!(old_token.is_cancelled());
+        assert!(!state.accept_metadata_refresh(old_id, 1));
+        assert!(state.accept_metadata_refresh(new_id, 1));
+        assert!(!state.accept_metadata_refresh(new_id, 1));
     }
 }

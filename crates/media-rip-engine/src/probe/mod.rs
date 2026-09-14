@@ -70,6 +70,7 @@ pub(crate) fn scan_source(
             path.display()
         ),
     );
+    let mut audio_metadata_candidates = Vec::new();
     let (
         mut titles,
         disc_album,
@@ -107,6 +108,7 @@ pub(crate) fn scan_source(
             options.auto_tag_audio && options.allow_online_access,
             cancellation,
         )?;
+        audio_metadata_candidates = catalog.candidates;
         let online_tagged = catalog.titles.iter().any(|title| {
             title
                 .tags
@@ -129,6 +131,31 @@ pub(crate) fn scan_source(
             LogLevel::Info,
             format!("Discovered {} candidate title(s).", candidates.len()),
         );
+        if kind == DiscKind::Dvd {
+            let mut unique = std::collections::HashSet::new();
+            let duplicates = candidates
+                .iter()
+                .filter(|candidate| {
+                    candidate
+                        .duplicate_key
+                        .as_ref()
+                        .is_some_and(|key| !unique.insert(key))
+                })
+                .count();
+            let review = candidates.iter().filter(|candidate| matches!(&candidate.input, source::ProbeInput::Dvd { info: Some(info), .. } if !info.warnings.is_empty())).count();
+            log(
+                events,
+                if review > 0 {
+                    LogLevel::Warning
+                } else {
+                    LogLevel::Info
+                },
+                format!(
+                    "DVD cell analysis: {} title references, {duplicates} duplicate paths, {review} layouts needing review. Title sizes describe cell extents, not separate copies of the disc.",
+                    candidates.len()
+                ),
+            );
+        }
         let mut titles = Vec::new();
         let mut errors = Vec::new();
         for (index, candidate) in candidates.iter().enumerate() {
@@ -495,6 +522,7 @@ pub(crate) fn scan_source(
         source_info,
         cover_art,
         track_cover_art: Default::default(),
+        audio_metadata_candidates,
         metadata_attributions: video_enrichment
             .as_ref()
             .map(|enrichment| enrichment.attributions.clone())

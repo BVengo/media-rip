@@ -1,3 +1,4 @@
+use media_rip_core::model::{editing::episode_assignment_title_ids, metadata::MetadataKind};
 use std::{cell::RefCell, collections::BTreeSet, rc::Rc};
 
 use gtk::prelude::*;
@@ -59,6 +60,51 @@ impl MetadataPanel {
             return;
         };
 
+        if !catalog.audio_metadata_candidates.is_empty() {
+            self.rows.append(&empty_state("Choose the release matching your disc packaging. Existing metadata is kept until you choose."));
+            for candidate in &catalog.audio_metadata_candidates {
+                let row = gtk::Box::new(gtk::Orientation::Vertical, 8);
+                let label = gtk::Label::new(Some(&format!(
+                    "{} · {}\n{}\n{}",
+                    candidate.album, candidate.artist, candidate.edition, candidate.evidence
+                )));
+                label.set_wrap(true);
+                label.set_xalign(0.0);
+                row.append(&label);
+                let tracks = candidate
+                    .tracks
+                    .iter()
+                    .map(|(number, tags)| {
+                        format!(
+                            "{number}. {}",
+                            tags.iter()
+                                .find(|tag| tag.key == "title")
+                                .map(|tag| tag.value.as_str())
+                                .unwrap_or("Untitled")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let details = gtk::Expander::new(Some("Track list"));
+                let track_label = gtk::Label::new(Some(&tracks));
+                track_label.set_xalign(0.0);
+                details.set_child(Some(&track_label));
+                row.append(&details);
+                let apply = gtk::Button::with_label("Use this release");
+                let id = candidate.id.clone();
+                let callback = on_content_action.clone();
+                apply.connect_clicked(move |_| {
+                    callback(ContentAction::ApplyAudioCandidate(id.clone()))
+                });
+                row.append(&apply);
+                self.rows.append(&row);
+            }
+            let keep = gtk::Button::with_label("Keep current metadata");
+            keep.connect_clicked(move |_| on_content_action(ContentAction::SkipMetadata));
+            self.actions.append(&keep);
+            return;
+        }
+
         let selected_title_ids = catalog
             .titles
             .iter()
@@ -70,13 +116,58 @@ impl MetadataPanel {
             .iter()
             .filter(|suggestion| selected_title_ids.contains(&suggestion.title_id))
             .collect::<Vec<_>>();
+        let has_episodes = catalog.titles.iter().any(|title| {
+            title.selected && MetadataKind::for_title(catalog, title) == MetadataKind::Television
+        });
+        let episode_context = episode_context.filter(|_| has_episodes);
         render_controls(
             &self.controls,
             &suggestions,
             episode_context,
+            has_episodes,
             on_content_action.clone(),
             on_info_action.clone(),
         );
+        let audio_only = !catalog.titles.is_empty()
+            && catalog.titles.iter().all(|title| {
+                matches!(
+                    MetadataKind::for_title(catalog, title),
+                    MetadataKind::Music | MetadataKind::Audiobook
+                )
+            });
+        if audio_only && let Some(title) = catalog.titles.first() {
+            let chooser = gtk::DropDown::from_strings(&["Music", "Audiobook", "Mixed audio"]);
+            let first_kind = MetadataKind::for_title(catalog, title);
+            let uniform = catalog
+                .titles
+                .iter()
+                .all(|title| MetadataKind::for_title(catalog, title) == first_kind);
+            chooser.set_selected(if uniform {
+                u32::from(first_kind == MetadataKind::Audiobook)
+            } else {
+                2
+            });
+            chooser.set_tooltip_text(Some(
+                "Set the metadata type for every track on this source.",
+            ));
+            let callback = on_info_action.clone();
+            let title_id = title.id;
+            chooser.connect_selected_notify(move |chooser| {
+                let value = match chooser.selected() {
+                    0 => "music",
+                    1 => "audiobook",
+                    _ => return,
+                };
+                callback(InfoAction::AddTag {
+                    title_id,
+                    key: "media_type".to_owned(),
+                    value: value.to_owned(),
+                    all_tracks: true,
+                });
+            });
+            self.controls.append(&gtk::Label::new(Some("All tracks")));
+            self.controls.append(&chooser);
+        }
         let selected = Rc::new(RefCell::new(
             suggestions
                 .iter()
@@ -84,7 +175,11 @@ impl MetadataPanel {
                 .collect::<BTreeSet<_>>(),
         ));
         let suggested_ids = selected.borrow().clone();
-        let assignment_ids = episode_assignment_title_ids(catalog);
+        let assignment_ids = if has_episodes {
+            episode_assignment_title_ids(catalog)
+        } else {
+            BTreeSet::new()
+        };
 
         for suggestion in &suggestions {
             let current_name = catalog
@@ -101,11 +196,43 @@ impl MetadataPanel {
                 &suggestion.metadata.attribution.provider,
                 selected.clone(),
             ));
+            let details = gtk::Expander::new(Some("Review fields and match evidence"));
+            let body = gtk::Box::new(gtk::Orientation::Vertical, 4);
+            for tag in &suggestion.tags {
+                body.append(&empty_state(&format!("{}: {}", tag.key, tag.value)));
+            }
+            for detail in &suggestion.evidence {
+                body.append(&empty_state(&format!("Evidence: {detail}")));
+            }
+            for detail in &suggestion.assumptions {
+                body.append(&empty_state(&format!("Assumption: {detail}")));
+            }
+            details.set_child(Some(&body));
+            self.rows.append(&details);
+        }
+
+        for title in catalog.titles.iter().filter(|title| title.selected) {
+            let kind = MetadataKind::for_title(catalog, title);
+            let editor = metadata_editor(
+                title,
+                kind,
+                audio_only && catalog.titles.len() > 1,
+                on_info_action.clone(),
+            );
+            if selected_title_ids.len() == 1 {
+                self.rows.append(&editor);
+            } else {
+                let expander =
+                    gtk::Expander::new(Some(&format!("{} · {}", title.name, kind.label())));
+                expander.set_child(Some(&editor));
+                self.rows.append(&expander);
+            }
         }
 
         if let Some(context) = episode_context.filter(|context| !context.choices.is_empty()) {
             for title in catalog.titles.iter().filter(|title| {
                 title.selected
+                    && MetadataKind::for_title(catalog, title) == MetadataKind::Television
                     && assignment_ids.contains(&title.id)
                     && !suggested_ids.contains(&title.id)
             }) {
@@ -119,7 +246,7 @@ impl MetadataPanel {
             self.rows.append(&empty_state(
                 "The series was identified, but the season is unknown. Choose a season above and select Update to load its episodes.",
             ));
-        } else if suggestions.is_empty() && !selected_title_ids.is_empty() {
+        } else if has_episodes && suggestions.is_empty() && !selected_title_ids.is_empty() {
             self.rows.append(&empty_state(
                 "No episode metadata is available for this source.",
             ));
@@ -153,58 +280,115 @@ impl MetadataPanel {
     }
 }
 
-fn episode_assignment_title_ids(catalog: &MediaCatalog) -> BTreeSet<u32> {
-    const MIN_EPISODE_MS: u64 = 20 * 60_000;
-    const MAX_EPISODE_MS: u64 = 120 * 60_000;
-    const PLAY_ALL_TOLERANCE_MS: u64 = 3_000;
-
-    let episode_like = |title: &Title| {
-        (MIN_EPISODE_MS..=MAX_EPISODE_MS).contains(&title.duration_ms) && title.chapters.len() >= 2
-    };
-    let mut play_all_ids = BTreeSet::new();
-    for (play_all_index, play_all) in catalog.titles.iter().enumerate() {
-        let mut episode_count = 0;
-        let mut total_duration_ms = 0_u64;
-        for title in catalog.titles.iter().skip(play_all_index + 1) {
-            if !episode_like(title) {
-                if episode_count > 0 {
-                    break;
-                }
-                continue;
-            }
-            episode_count += 1;
-            total_duration_ms = total_duration_ms.saturating_add(title.duration_ms);
-            if episode_count >= 2
-                && total_duration_ms.abs_diff(play_all.duration_ms) <= PLAY_ALL_TOLERANCE_MS
-            {
-                play_all_ids.insert(play_all.id);
-                break;
-            }
-            if total_duration_ms > play_all.duration_ms.saturating_add(PLAY_ALL_TOLERANCE_MS)
-                || episode_count == 8
-            {
-                break;
-            }
-        }
+fn metadata_editor(
+    title: &Title,
+    kind: MetadataKind,
+    allow_bulk: bool,
+    on_action: Rc<dyn Fn(InfoAction)>,
+) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    row.add_css_class("metadata-review-row");
+    let heading = gtk::Label::new(Some(&format!("{} · {}", title.name, kind.label())));
+    heading.set_xalign(0.0);
+    heading.set_wrap(true);
+    row.append(&heading);
+    if let Some(metadata) = &title.video_metadata {
+        let attribution = &metadata.attribution;
+        row.append(&empty_state(&format!(
+            "{} · match score {}/100 · {}",
+            attribution.provider, attribution.confidence_percent, attribution.match_method
+        )));
     }
-
-    catalog
-        .titles
-        .iter()
-        .filter(|title| episode_like(title) && !play_all_ids.contains(&title.id))
-        .map(|title| title.id)
-        .collect()
+    if matches!(kind, MetadataKind::Music | MetadataKind::Audiobook) {
+        let chooser = gtk::DropDown::from_strings(&["Music", "Audiobook"]);
+        chooser.set_selected(u32::from(kind == MetadataKind::Audiobook));
+        chooser.set_tooltip_text(Some(
+            "Choose the fields for this track. Existing tags are preserved.",
+        ));
+        let callback = on_action.clone();
+        let title_id = title.id;
+        chooser.connect_selected_notify(move |chooser| {
+            callback(InfoAction::AddTag {
+                title_id,
+                key: "media_type".to_owned(),
+                value: if chooser.selected() == 1 {
+                    "audiobook"
+                } else {
+                    "music"
+                }
+                .to_owned(),
+                all_tracks: false,
+            });
+        });
+        row.append(&chooser);
+    }
+    let fields = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    for &(key, label) in kind.fields() {
+        let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let label = gtk::Label::new(Some(label));
+        label.set_width_chars(16);
+        label.set_xalign(0.0);
+        let entry = gtk::Entry::new();
+        entry.set_hexpand(true);
+        entry.set_tooltip_text(Some("Changes are saved as you type."));
+        entry.set_text(
+            title
+                .tags
+                .iter()
+                .find(|tag| tag.key.eq_ignore_ascii_case(key))
+                .map(|tag| tag.value.as_str())
+                .unwrap_or(if key == "title" { &title.name } else { "" }),
+        );
+        let callback = on_action.clone();
+        let title_id = title.id;
+        entry.connect_changed(move |entry| {
+            callback(InfoAction::SetTag {
+                title_id,
+                key: key.to_owned(),
+                value: entry.text().to_string(),
+                all_tracks: false,
+            })
+        });
+        line.append(&label);
+        line.append(&entry);
+        if allow_bulk
+            && matches!(
+                key,
+                "album" | "album_artist" | "author" | "narrator" | "discnumber" | "date" | "genre"
+            )
+        {
+            let apply = gtk::Button::with_label("Apply to all tracks");
+            let callback = on_action.clone();
+            apply.connect_clicked(move |_| {
+                callback(InfoAction::AddTag {
+                    title_id,
+                    key: key.to_owned(),
+                    value: entry.text().to_string(),
+                    all_tracks: true,
+                })
+            });
+            line.append(&apply);
+        }
+        fields.append(&line);
+    }
+    row.append(&fields);
+    row
 }
 
 fn render_controls(
     controls: &gtk::Box,
     suggestions: &[&VideoMetadataSuggestion],
     context: Option<&EpisodeMetadataContext>,
+    has_episodes: bool,
     on_content_action: Rc<dyn Fn(ContentAction)>,
     on_info_action: Rc<dyn Fn(InfoAction)>,
 ) {
     let summary = gtk::Label::new(Some(if suggestions.is_empty() {
-        "Episode assignments"
+        if has_episodes {
+            "Episode assignments"
+        } else {
+            "Edit metadata"
+        }
     } else {
         "Proposed metadata"
     }));
@@ -213,18 +397,25 @@ fn render_controls(
     summary.add_css_class("config-label");
     controls.append(&summary);
 
-    let configured_season = suggestions
+    let episode_suggestions = suggestions
+        .iter()
+        .copied()
+        .filter(|suggestion| {
+            MetadataKind::from_video(&suggestion.metadata) == Some(MetadataKind::Television)
+        })
+        .collect::<Vec<_>>();
+    let configured_season = episode_suggestions
         .iter()
         .find_map(|suggestion| suggestion.metadata.season)
         .or_else(|| context.and_then(|context| context.metadata.season));
-    if context.is_none() && configured_season.is_none() {
+    if !has_episodes || (context.is_none() && configured_season.is_none()) {
         return;
     }
     let season = number_entry(configured_season.unwrap_or(1));
     controls.append(&gtk::Label::new(Some("Season")));
     controls.append(&season);
 
-    let first_episode = suggestions
+    let first_episode = episode_suggestions
         .iter()
         .filter_map(|suggestion| suggestion.metadata.episode)
         .min();
@@ -233,7 +424,7 @@ fn render_controls(
         controls.append(&gtk::Label::new(Some("First episode")));
         controls.append(first);
     }
-    let has_suggestions = !suggestions.is_empty();
+    let has_suggestions = !episode_suggestions.is_empty();
     let update = gtk::Button::with_label("Update");
     update.connect_clicked(move |_| {
         let requested_season = positive_number(&season);
@@ -379,6 +570,8 @@ fn empty_state(message: &str) -> gtk::Box {
     state.set_valign(gtk::Align::Center);
     let label = gtk::Label::new(Some(message));
     label.add_css_class("row-detail");
+    label.set_wrap(true);
+    label.set_xalign(0.0);
     state.append(&label);
     state
 }
@@ -400,6 +593,7 @@ mod tests {
     #[test]
     fn manual_episode_candidates_exclude_play_all_and_short_extras() {
         let title = |id, name: &str, duration_ms| Title {
+            dvd: None,
             id,
             source_title_id: id.to_string(),
             disc_title_number: Some(id + 1),
@@ -451,6 +645,7 @@ mod tests {
             cover_art: None,
             track_cover_art: Default::default(),
             metadata_attributions: Vec::new(),
+            audio_metadata_candidates: Vec::new(),
             video_metadata_suggestions: Vec::new(),
             video_episode_context: None,
         };

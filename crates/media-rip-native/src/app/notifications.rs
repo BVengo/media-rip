@@ -25,18 +25,34 @@ pub(crate) fn publish_ntfy(
         .map_err(|error| format!("request failed: {error}"))
 }
 
-fn ntfy_endpoint(settings: &NotificationSettings) -> Result<String, String> {
+pub(super) fn ntfy_endpoint(settings: &NotificationSettings) -> Result<String, String> {
     let server = settings.ntfy_server_url.trim().trim_end_matches('/');
     if !(server.starts_with("http://") || server.starts_with("https://")) {
         return Err("ntfy server URL must begin with http:// or https://".into());
+    }
+
+    let uri = gtk::glib::Uri::parse(server, gtk::glib::UriFlags::NONE)
+        .map_err(|_| "ntfy server URL is invalid".to_owned())?;
+    if uri.host().is_none_or(|host| host.is_empty())
+        || uri.query().is_some()
+        || uri.fragment().is_some()
+        || uri.userinfo().is_some()
+    {
+        return Err(
+            "ntfy server URL needs a host and must not contain credentials, a query or a fragment"
+                .to_owned(),
+        );
     }
 
     let topic = settings.ntfy_topic.trim().trim_matches('/');
     if topic.is_empty() {
         return Err("ntfy topic is empty".into());
     }
-    if topic.contains('/') {
-        return Err("ntfy topic must not contain '/'".into());
+    if topic
+        .chars()
+        .any(|character| character.is_whitespace() || matches!(character, '/' | '?' | '#' | '%'))
+    {
+        return Err("ntfy topic must not contain whitespace, '/', '?', '#' or '%'".into());
     }
 
     Ok(format!("{server}/{topic}"))
@@ -45,6 +61,28 @@ fn ntfy_endpoint(settings: &NotificationSettings) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_incomplete_servers_and_topics_that_change_the_url() {
+        let mut settings = NotificationSettings {
+            ntfy_topic: "test-topic".into(),
+            ..NotificationSettings::default()
+        };
+        for server in [
+            "https://",
+            "https://example.com?topic=elsewhere",
+            "https://example.com#fragment",
+            "https://user:password@example.com",
+        ] {
+            settings.ntfy_server_url = server.to_owned();
+            assert!(ntfy_endpoint(&settings).is_err());
+        }
+        settings.ntfy_server_url = "https://example.com".to_owned();
+        for topic in ["foo/bar", "foo?bar", "foo#bar", "foo bar", "foo%2fbar"] {
+            settings.ntfy_topic = topic.to_owned();
+            assert!(ntfy_endpoint(&settings).is_err());
+        }
+    }
 
     #[test]
     fn builds_endpoint_from_server_and_topic() {

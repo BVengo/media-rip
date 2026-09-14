@@ -143,3 +143,146 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_millis(75));
     }
 }
+
+/// Capture finite discovery commands while draining both pipes. Cancellation,
+/// timeout and read failures all reap the child and join its reader threads.
+pub(crate) fn run_cancellable(
+    mut command: Command,
+    cancellation: &media_rip_core::ports::CancellationToken,
+) -> Result<std::process::Output, media_rip_core::MediaEngineError> {
+    capture_with_timeout(&mut command, cancellation, Duration::from_secs(120))
+}
+
+fn capture_with_timeout(
+    command: &mut Command,
+    cancellation: &media_rip_core::ports::CancellationToken,
+    timeout: Duration,
+) -> Result<std::process::Output, media_rip_core::MediaEngineError> {
+    use media_rip_core::MediaEngineError;
+    use std::process::Stdio;
+    if cancellation.is_cancelled() {
+        return Err(MediaEngineError::Cancelled);
+    }
+    let program = command.get_program().to_string_lossy().into_owned();
+    let failure = |error: io::Error| MediaEngineError::Process(format!("{program}: {error}"));
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    thread::scope(|scope| {
+        let mut process = ProcessSupervisor::spawn(command).map_err(|error| {
+            MediaEngineError::Process(format!("could not run {program}: {error}"))
+        })?;
+        let stdout = process
+            .take_stdout()
+            .ok_or_else(|| failure(io::Error::other("missing stdout")))?;
+        let stderr = process
+            .take_stderr()
+            .ok_or_else(|| failure(io::Error::other("missing stderr")))?;
+        let output_reader = scope.spawn(move || read_bounded(stdout, 16 * 1024 * 1024));
+        let error_reader = scope.spawn(move || read_diagnostic_tail(stderr));
+        let started = Instant::now();
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(MediaEngineError::Cancelled);
+            }
+            if started.elapsed() >= timeout {
+                return Err(MediaEngineError::Process(format!(
+                    "{program} timed out after {} seconds; check the source and retry",
+                    timeout.as_secs()
+                )));
+            }
+            if let Some(status) = process.try_wait().map_err(failure)? {
+                let stdout = output_reader
+                    .join()
+                    .map_err(|_| failure(io::Error::other("output reader stopped")))?
+                    .map_err(failure)?;
+                let stderr = error_reader
+                    .join()
+                    .map_err(|_| failure(io::Error::other("diagnostic reader stopped")))?
+                    .into_bytes();
+                return Ok(std::process::Output {
+                    status,
+                    stdout,
+                    stderr,
+                });
+            }
+            thread::sleep(POLL_INTERVAL);
+        }
+    })
+}
+
+fn read_bounded(mut reader: impl io::Read, limit: usize) -> io::Result<Vec<u8>> {
+    let mut output = Vec::new();
+    let mut buffer = [0; 8192];
+    let mut overflow = false;
+    loop {
+        let length = reader.read(&mut buffer)?;
+        if length == 0 {
+            break;
+        }
+        let remaining = limit.saturating_sub(output.len());
+        output.extend_from_slice(&buffer[..length.min(remaining)]);
+        overflow |= length > remaining;
+    }
+    if overflow {
+        return Err(io::Error::other("process output exceeded the 16 MiB limit"));
+    }
+    Ok(output)
+}
+
+pub(crate) fn read_diagnostic_tail(mut reader: impl io::Read) -> String {
+    use std::collections::VecDeque;
+    const LIMIT: usize = 64 * 1024;
+    let mut tail = VecDeque::new();
+    let mut buffer = [0; 8192];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(length) => {
+                tail.extend(&buffer[..length]);
+                if tail.len() > LIMIT {
+                    tail.drain(..tail.len() - LIMIT);
+                }
+            }
+            Err(error) => {
+                log::warn!("Could not read process diagnostics: {error}");
+                break;
+            }
+        }
+    }
+    String::from_utf8_lossy(tail.make_contiguous()).into_owned()
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+    use media_rip_core::{MediaEngineError, ports::CancellationToken};
+    #[test]
+    fn bounded_capture_drains_excess_output_and_reports_failure() {
+        assert!(read_bounded(&b"12345678"[..], 4).is_err());
+    }
+    #[test]
+    fn diagnostics_keep_the_end_of_long_output_and_tolerate_invalid_utf8() {
+        let mut data = vec![b'x'; 100_000];
+        data.extend_from_slice(b"\xfffinal error");
+        let tail = read_diagnostic_tail(data.as_slice());
+        assert!(tail.ends_with("final error"));
+        assert!(tail.len() <= 65538);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn timed_out_process_is_terminated() {
+        let started = Instant::now();
+        let error = capture_with_timeout(
+            Command::new("sleep").arg("20"),
+            &CancellationToken::default(),
+            Duration::from_millis(50),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, MediaEngineError::Process(message) if message.contains("timed out"))
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+}

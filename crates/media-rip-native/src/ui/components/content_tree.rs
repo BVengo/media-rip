@@ -22,6 +22,7 @@ pub(crate) enum ContentAction {
     },
     ToggleExpanded(u32),
     ApplySuggestions(Vec<u32>),
+    ApplyAudioCandidate(String),
     SkipMetadata,
     SetSuggestionSeason(u32),
     SetSuggestionFirstEpisode(u32),
@@ -190,6 +191,8 @@ impl ContentTree {
         self.title_box.append(&selection_row);
         *self.select_all.borrow_mut() = Some(select_all);
         let duplicate_originals = duplicate_originals(&catalog.titles);
+        let review_titles = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let mut review_count = 0;
         for title in &catalog.titles {
             let section = gtk::Box::new(gtk::Orientation::Vertical, 0);
             let (header, button, selected, check_state, name) = title_row(
@@ -218,7 +221,19 @@ impl ContentTree {
             }
             tracks.set_visible(expanded.contains(&title.id));
             section.append(&tracks);
-            self.title_box.append(&section);
+            let needs_review = catalog.source.kind == DiscKind::Dvd
+                && !title.selected
+                && (duplicate_originals.contains_key(&title.id)
+                    || title
+                        .dvd
+                        .as_ref()
+                        .is_some_and(|dvd| !dvd.warnings.is_empty()));
+            if needs_review {
+                review_titles.append(&section);
+                review_count += 1;
+            } else {
+                self.title_box.append(&section);
+            }
             self.expanded_rows.borrow_mut().insert(
                 title.id,
                 ExpandedRow {
@@ -233,6 +248,14 @@ impl ContentTree {
                     track_descriptions,
                 },
             );
+        }
+        if review_count > 0 {
+            let review = gtk::Expander::new(Some(&format!(
+                "{review_count} duplicate or unverified DVD title(s)"
+            )));
+            review.set_tooltip_text(Some("DVD titles are playback paths. Some reference the same video sectors; others have structural problems. These titles start unchecked."));
+            review.set_child(Some(&review_titles));
+            self.title_box.append(&review);
         }
         self.sync_view_selection(selection);
         self.stack.set_visible_child_name("titles");
@@ -433,7 +456,7 @@ fn title_row(
         let badge = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         badge.add_css_class("main-title-badge");
         badge.set_valign(gtk::Align::Center);
-        badge.set_tooltip_text(Some("Main title identified by the Blu-ray disc metadata"));
+        badge.set_tooltip_text(Some("Main title identified by disc metadata"));
         badge.append(&gtk::Label::new(Some("MAIN TITLE")));
         name_line.append(&badge);
     }
@@ -442,14 +465,25 @@ fn title_row(
         badge.add_css_class("duplicate-title-badge");
         badge.set_valign(gtk::Align::Center);
         badge.set_tooltip_text(Some(&format!(
-            "This playlist uses exactly the same authored clip ranges as playlist {original_playlist}",
+            "This title references the same ordered content ranges as title {original_playlist}",
         )));
         badge.append(&gtk::Label::new(Some(&format!(
             "DUPLICATE OF {original_playlist}",
         ))));
         name_line.append(&badge);
     }
-    let details = [
+    if let Some(dvd) = &title.dvd
+        && !dvd.warnings.is_empty()
+    {
+        let badge = gtk::Label::new(Some("CHECK DVD LAYOUT"));
+        badge.add_css_class("duplicate-title-badge");
+        badge.set_tooltip_text(Some(&dvd.warnings.join(
+            "
+",
+        )));
+        name_line.append(&badge);
+    }
+    let mut details = vec![
         format_duration(title.duration_ms),
         format!("{} chapter(s)", title.chapters.len()),
         title.size_bytes.map_or_else(
@@ -463,9 +497,21 @@ fn title_row(
                 }
             },
         ),
-    ]
-    .join("  •  ");
-    let detail = gtk::Label::new(Some(&details));
+    ];
+    if let Some(dvd) = &title.dvd {
+        details.push(format!(
+            "DVD title {} · VTS {:02} · {} cells",
+            title.source_title_id, dvd.title_set, dvd.cell_count
+        ));
+        if dvd.leading_padding_cells + dvd.trailing_padding_cells > 0 {
+            details.push(format!(
+                "padding: {} leading, {} trailing cells",
+                dvd.leading_padding_cells, dvd.trailing_padding_cells
+            ));
+        }
+    }
+    let detail = gtk::Label::new(Some(&details.join("  •  ")));
+    detail.set_wrap(true);
     detail.set_xalign(0.0);
     detail.add_css_class("row-detail");
     labels.append(&name_line);
@@ -744,6 +790,7 @@ mod tests {
             cover_art: None,
             track_cover_art: BTreeMap::new(),
             metadata_attributions: Vec::new(),
+            audio_metadata_candidates: Vec::new(),
             video_metadata_suggestions: Vec::new(),
             video_episode_context: None,
         }
@@ -751,6 +798,7 @@ mod tests {
 
     fn title_with_tracks(selected: &[bool]) -> media_rip_core::Title {
         media_rip_core::Title {
+            dvd: None,
             id: 0,
             source_title_id: "00001".into(),
             disc_title_number: None,
