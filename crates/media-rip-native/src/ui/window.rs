@@ -29,6 +29,12 @@ pub(crate) struct MainWindow {
     pub cancel: gtk::Button,
     pub status: gtk::Label,
     pub workflow_stack: gtk::Stack,
+    pub workflow_back: gtk::Button,
+    pub workflow_next: gtk::Button,
+    page_title: gtk::Label,
+    page_hint: gtk::Label,
+    source_summary: gtk::Label,
+
     pub workflow_identify_button: gtk::Button,
     pub workflow_select_button: gtk::Button,
     pub workflow_metadata_button: gtk::Button,
@@ -63,6 +69,25 @@ impl MainWindow {
         workflow.attach(&workflow_metadata_button, 2, 0, 1, 1);
         workflow.attach(&workflow_output_button, 3, 0, 1, 1);
         root.append(&workflow);
+
+        let page_header = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        page_header.add_css_class("workflow-header");
+        let source_summary = gtk::Label::new(None);
+        source_summary.set_xalign(0.0);
+        source_summary.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        source_summary.add_css_class("row-detail");
+        source_summary.set_visible(false);
+        let page_title = gtk::Label::new(Some("Open a source"));
+        page_title.set_xalign(0.0);
+        page_title.add_css_class("preflight-title");
+        let page_hint = gtk::Label::new(None);
+        page_hint.set_xalign(0.0);
+        page_hint.set_wrap(true);
+        page_hint.add_css_class("row-detail");
+        page_header.append(&source_summary);
+        page_header.append(&page_title);
+        page_header.append(&page_hint);
+        root.append(&page_header);
 
         let content = ContentTree::new();
         let sidebar = Sidebar::new();
@@ -118,6 +143,17 @@ impl MainWindow {
         output_page.append(&output_layout);
         workflow_stack.add_named(&output_page, Some("output"));
         root.append(&workflow_stack);
+        let navigation = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        navigation.add_css_class("workflow-navigation");
+        let workflow_back = gtk::Button::with_label("Back");
+        let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        spacer.set_hexpand(true);
+        let workflow_next = gtk::Button::with_label("Continue");
+        workflow_next.add_css_class("suggested-action");
+        navigation.append(&workflow_back);
+        navigation.append(&spacer);
+        navigation.append(&workflow_next);
+        root.append(&navigation);
         let messages = MessagesPanel::new();
         root.append(&messages.root);
 
@@ -171,6 +207,11 @@ impl MainWindow {
             cancel,
             status,
             workflow_stack,
+            workflow_back,
+            workflow_next,
+            page_title,
+            page_hint,
+            source_summary,
             workflow_identify_button,
             workflow_select_button,
             workflow_metadata_button,
@@ -186,6 +227,27 @@ impl MainWindow {
             WorkflowStep::Output => "output",
         };
         self.workflow_stack.set_visible_child_name(name);
+        let (title, hint) = match step {
+            WorkflowStep::Identify => (
+                "Open a source",
+                "Choose a disc, or use Open files or Open folder in the toolbar.",
+            ),
+            WorkflowStep::Select => (
+                "Choose what to rip",
+                "Select the items to save. Expand an item to choose its audio and subtitle streams.",
+            ),
+            WorkflowStep::Metadata => (
+                "Review metadata",
+                "Check the selected items. Review proposed changes or keep the current metadata.",
+            ),
+            WorkflowStep::Output => (
+                "Review and rip",
+                "Check filenames, choose a format and destination, then start the rip.",
+            ),
+        };
+        self.page_title.set_text(title);
+        self.page_hint.set_text(hint);
+        self.refresh_navigation();
         for (button, button_step) in [
             (&self.workflow_identify_button, WorkflowStep::Identify),
             (&self.workflow_select_button, WorkflowStep::Select),
@@ -200,7 +262,94 @@ impl MainWindow {
         }
     }
 
+    pub fn set_source_summary(&self, catalog: Option<&media_rip_core::MediaCatalog>) {
+        use media_rip_core::model::metadata::MetadataKind;
+        self.source_summary.set_visible(catalog.is_some());
+        if let Some(catalog) = catalog {
+            let mut kinds = catalog
+                .titles
+                .iter()
+                .filter(|title| title.selected)
+                .map(|title| MetadataKind::for_title(catalog, title));
+            let first = kinds.next();
+            let uniform = kinds.all(|kind| Some(kind) == first);
+            let first = first.filter(|_| uniform);
+            let kind = if uniform {
+                match first {
+                    Some(MetadataKind::Film) => "Film",
+                    Some(MetadataKind::Television) => "Television",
+                    Some(MetadataKind::Music) => "Music",
+                    Some(MetadataKind::Audiobook) => "Audiobook",
+                    Some(MetadataKind::Video) => "Video",
+                    None => "Nothing selected",
+                }
+            } else {
+                "Mixed content"
+            };
+            let summary = format!(
+                "{} · {} · {}",
+                catalog.source.name,
+                catalog.source.kind.display_name(),
+                kind
+            );
+            self.source_summary.set_text(&summary);
+            self.source_summary.set_tooltip_text(Some(&summary));
+            if self.workflow_stack.visible_child_name().as_deref() == Some("metadata") {
+                self.page_hint.set_text(if catalog.video_metadata_suggestions.is_empty() && catalog.audio_metadata_candidates.is_empty() {
+                    "Edit details if needed, then continue to output. Changes are saved as you type."
+                } else {
+                    "Review the proposed changes below. Apply a match or keep the current metadata to continue."
+                });
+            }
+            if self.workflow_stack.visible_child_name().as_deref() == Some("select") {
+                self.page_hint.set_text(match first {
+                    Some(MetadataKind::Music) => "Select the tracks to save. Review album and artist details in Metadata.",
+                    Some(MetadataKind::Audiobook) => "Select the audio items to save. Review book, author and narrator details in Metadata.",
+                    _ => "Select the items to save. Expand an item to choose its audio and subtitle streams.",
+                });
+            }
+        }
+    }
+
+    pub fn refresh_navigation(&self) {
+        let step = self.workflow_stack.visible_child_name();
+        let (back, next, label) = match step.as_deref() {
+            Some("select") => (
+                Some(&self.workflow_identify_button),
+                Some(&self.workflow_metadata_button),
+                "Continue to metadata",
+            ),
+            Some("metadata") => (
+                Some(&self.workflow_select_button),
+                Some(&self.workflow_output_button),
+                "Continue to output",
+            ),
+            Some("output") => (Some(&self.workflow_metadata_button), None, ""),
+            _ => (
+                None,
+                Some(&self.workflow_select_button),
+                "Continue to selection",
+            ),
+        };
+        self.workflow_back.set_visible(back.is_some());
+        self.workflow_back
+            .set_sensitive(back.is_some_and(|button| button.is_sensitive()));
+        self.workflow_next.set_visible(next.is_some());
+        self.workflow_next
+            .set_sensitive(next.is_some_and(|button| button.is_sensitive()));
+        self.workflow_next.set_label(label);
+        self.workflow_next.set_tooltip_text(Some(
+            if step.as_deref() == Some("metadata") && !self.workflow_output_button.is_sensitive() {
+                "Apply or keep the proposed metadata before continuing."
+            } else {
+                label
+            },
+        ));
+    }
+
     pub fn set_busy(&self, busy: bool) {
+        self.workflow_back.set_sensitive(!busy);
+        self.workflow_next.set_sensitive(!busy);
         self.toolbar.open_file.set_sensitive(!busy);
         self.toolbar.open_folder.set_sensitive(!busy);
         self.toolbar.refresh.set_sensitive(!busy);

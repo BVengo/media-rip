@@ -19,3 +19,5 @@ pub(crate) use settings_dialog::SettingsDialog;
 pub(crate) use sidebar::Sidebar;
 pub(crate) use source_bar::SourceBar;
 pub(crate) use toolbar::Toolbar;
+
+pub(crate) use sidebar::output_kind;

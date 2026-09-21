@@ -81,6 +81,29 @@ popover.menu modelbutton {
   font-weight: 700;
 }
 
+.workflow-header {
+  padding: 20px 24px 12px;
+  background-color: @theme_base_color;
+}
+
+.workflow-navigation {
+  padding: 10px 20px;
+  border-top: 1px solid @borders;
+  background-color: @theme_bg_color;
+}
+
+.metadata-editor {
+  padding: 18px;
+}
+
+.metadata-item {
+  margin: 8px;
+  padding: 12px;
+  border: 1px solid @borders;
+  border-radius: 8px;
+  background-color: @theme_bg_color;
+}
+
 .workflow-page {
   padding: 10px;
   background-color: @theme_base_color;

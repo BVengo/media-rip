@@ -104,6 +104,29 @@ impl Controller {
             let this = self.clone();
             button.connect_clicked(move |_| {
                 this.ui.set_workflow_step(step);
+                this.ui
+                    .set_source_summary(this.state.borrow().catalog.as_ref());
+            });
+        }
+        for (button, forward) in [
+            (&self.ui.workflow_back, false),
+            (&self.ui.workflow_next, true),
+        ] {
+            let this = self.clone();
+            button.connect_clicked(move |_| {
+                let current = this.ui.workflow_stack.visible_child_name();
+                let target = match (current.as_deref(), forward) {
+                    (Some("identify"), true) => &this.ui.workflow_select_button,
+                    (Some("select"), true) => &this.ui.workflow_metadata_button,
+                    (Some("metadata"), true) => &this.ui.workflow_output_button,
+                    (Some("select"), false) => &this.ui.workflow_identify_button,
+                    (Some("metadata"), false) => &this.ui.workflow_select_button,
+                    (Some("output"), false) => &this.ui.workflow_metadata_button,
+                    _ => return,
+                };
+                if target.is_sensitive() {
+                    target.emit_clicked();
+                }
             });
         }
         {
@@ -1022,9 +1045,8 @@ impl Controller {
                     .borrow()
                     .catalog
                     .as_ref()
-                    .expect("scan result was just stored")
-                    .source
-                    .kind;
+                    .map(crate::ui::output_kind)
+                    .expect("scan result was just stored");
                 self.ui
                     .sidebar
                     .configure_output_profiles(kind, output_profile);
@@ -1032,6 +1054,8 @@ impl Controller {
                     .set_status("Source opened successfully.", Some("status-success"));
                 self.render();
                 self.ui.set_workflow_step(WorkflowStep::Select);
+                self.ui
+                    .set_source_summary(self.state.borrow().catalog.as_ref());
                 if should_auto_save && metadata_required && !metadata_available {
                     self.ui.messages.append(
                         "Automatic save skipped because the Audio CD has no album metadata.",
@@ -1800,6 +1824,21 @@ impl Controller {
                 }
                 false
             }
+            InfoAction::SetSharedTag {
+                title_id,
+                key,
+                value,
+            } => {
+                media_rip_core::model::editing::set_shared_tag(
+                    catalog,
+                    title_id,
+                    &key,
+                    &value,
+                    &file_name_template,
+                    output_extension,
+                );
+                true
+            }
             InfoAction::SetTag {
                 title_id,
                 key,
@@ -2040,6 +2079,7 @@ impl Controller {
             Rc::new(move |action| this.handle_info_action(action)) as Rc<dyn Fn(InfoAction)>
         };
         let state = self.state.borrow();
+        self.ui.set_source_summary(state.catalog.as_ref());
         self.ui.metadata.render(
             state.catalog.as_ref(),
             state.episode_metadata.as_ref(),
@@ -2097,7 +2137,7 @@ impl Controller {
                     .map(|field| format!(" ({})", field.value))
                     .unwrap_or_default();
                 let pending = if pending > 0 {
-                    format!(" · {pending} proposed episode assignment(s)")
+                    format!(" · {pending} metadata change(s) to review")
                 } else {
                     String::new()
                 };
@@ -2106,7 +2146,7 @@ impl Controller {
                     catalog.source.name, attribution.provider, attribution.confidence_percent
                 )
             } else if pending > 0 {
-                format!("{pending} proposed episode assignment(s) to review")
+                format!("{pending} metadata change(s) to review")
             } else if applied > 0 {
                 format!("Metadata applied to {applied} item(s)")
             } else {
@@ -2234,7 +2274,7 @@ impl Controller {
             .borrow()
             .catalog
             .as_ref()
-            .map(|catalog| catalog.source.kind)
+            .map(crate::ui::output_kind)
         else {
             return;
         };
@@ -2389,6 +2429,7 @@ impl Controller {
 }
 
 fn update_workflow_controls(ui: &MainWindow, state: &AppState) {
+    ui.set_source_summary(state.catalog.as_ref());
     let has_catalog = state.catalog.is_some();
     ui.metadata
         .root
@@ -2400,6 +2441,7 @@ fn update_workflow_controls(ui: &MainWindow, state: &AppState) {
         .set_sensitive(has_catalog && !state.is_busy());
     ui.workflow_output_button
         .set_sensitive(has_catalog && state.metadata_step_complete && !state.is_busy());
+    ui.refresh_navigation();
 }
 
 fn drive_is_ready(drive: &Drive) -> bool {
@@ -2459,6 +2501,7 @@ fn info_action_title_id(action: &InfoAction) -> Option<u32> {
         | InfoAction::RemoveVideoMetadata { title_id }
         | InfoAction::SetTitleName { title_id, .. }
         | InfoAction::SetTrackName { title_id, .. }
+        | InfoAction::SetSharedTag { title_id, .. }
         | InfoAction::SetTag { title_id, .. }
         | InfoAction::AddTag { title_id, .. }
         | InfoAction::SetOutputFile { title_id, .. } => Some(*title_id),

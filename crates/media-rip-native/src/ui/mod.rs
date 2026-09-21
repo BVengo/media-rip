@@ -5,7 +5,7 @@ mod i18n;
 mod styling;
 mod window;
 
-pub(crate) use components::{ContentAction, DiscUiState, InfoAction};
+pub(crate) use components::{ContentAction, DiscUiState, InfoAction, output_kind};
 pub(crate) use components::{IdentificationDialog, SettingsDialog};
 pub(crate) use i18n::translate;
 pub(crate) use window::{MainWindow, WorkflowStep};

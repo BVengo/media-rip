@@ -28,6 +28,11 @@ pub(crate) enum InfoAction {
         stream_index: u32,
         name: String,
     },
+    SetSharedTag {
+        title_id: u32,
+        key: String,
+        value: String,
+    },
     SetTag {
         title_id: u32,
         key: String,
@@ -493,6 +498,10 @@ impl InfoPanel {
             self.render_metadata_unavailable("The selected video title is no longer available.");
             return;
         };
+        let episode_metadata = episode_metadata.filter(|_| {
+            media_rip_core::model::metadata::MetadataKind::for_title(catalog, title)
+                == media_rip_core::model::metadata::MetadataKind::Television
+        });
         if let Some(suggestion) = catalog
             .video_metadata_suggestions
             .iter()
@@ -523,7 +532,7 @@ impl InfoPanel {
             }
             self.metadata_content.append(&fields_grid(&fields));
             let guidance = gtk::Label::new(Some(
-                "Use Review metadata above the content list to compare and apply pending changes.",
+                "Use the Metadata step to compare and apply pending changes.",
             ));
             guidance.set_xalign(0.0);
             guidance.set_wrap(true);
@@ -571,7 +580,7 @@ impl InfoPanel {
             self.append_episode_assignment(catalog, title_id, context, on_action);
         } else {
             self.render_metadata_unavailable(
-                "No exact metadata or probable episode proposal is available for this title.",
+                "No metadata match is available for this item. Edit its fields in the Metadata step.",
             );
         }
     }
@@ -835,10 +844,16 @@ fn append_video_metadata_fields(fields: &mut Vec<InfoField>, metadata: &VideoMet
     if let Some(year) = metadata.year {
         fields.push(InfoField::new("Year", year.to_string()));
     }
-    if let Some(season) = metadata.season {
+    if media_rip_core::model::metadata::MetadataKind::from_video(metadata)
+        == Some(media_rip_core::model::metadata::MetadataKind::Television)
+        && let Some(season) = metadata.season
+    {
         fields.push(InfoField::new("Season", season.to_string()));
     }
-    if let Some(episode) = metadata.episode {
+    if media_rip_core::model::metadata::MetadataKind::from_video(metadata)
+        == Some(media_rip_core::model::metadata::MetadataKind::Television)
+        && let Some(episode) = metadata.episode
+    {
         fields.push(InfoField::new("Episode", episode.to_string()));
     }
     if let Some(tmdb_id) = metadata.tmdb_id {

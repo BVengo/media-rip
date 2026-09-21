@@ -1,5 +1,5 @@
 use gtk::prelude::*;
-use media_rip_core::{DiscKind, OutputProfile};
+use media_rip_core::{DiscKind, MediaCatalog, OutputProfile, StreamKind};
 
 use super::InfoPanel;
 
@@ -135,6 +135,26 @@ impl Sidebar {
             .copied()
             .or_else(|| profiles.first().copied())
             .unwrap_or_default()
+    }
+}
+
+/// Profile availability follows streams, not the physical source format.
+pub(crate) fn output_kind(catalog: &MediaCatalog) -> DiscKind {
+    if !catalog.titles.is_empty()
+        && catalog.titles.iter().all(|title| {
+            title
+                .tracks
+                .iter()
+                .any(|track| track.kind == StreamKind::Audio)
+                && !title
+                    .tracks
+                    .iter()
+                    .any(|track| track.kind == StreamKind::Video)
+        })
+    {
+        DiscKind::AudioCd
+    } else {
+        catalog.source.kind
     }
 }
 

@@ -372,11 +372,34 @@ fn gtk_workflows() {
 
     let mut film = catalog(DiscKind::Dvd);
     film.titles[0].video_metadata = Some(video_metadata("MainMovie"));
+    // A previous TV identity must not leak controls into a confirmed film.
+    film.titles[0]
+        .tags
+        .push(MediaTag::new("show", "Stale series"));
+    film.video_episode_context = Some(media_rip_core::VideoEpisodeContext {
+        metadata: video_metadata("Series"),
+        choices: vec![],
+    });
     controller.handle_event(EngineEvent::ScanFinished(Box::new(film)));
     controller.ui.workflow_metadata_button.emit_clicked();
     assert!(metadata_has_label(&controller, "Film metadata"));
     assert!(!metadata_has_label(&controller, "Episode assignments"));
     assert!(!metadata_has_label(&controller, "No episode metadata"));
+    capture_workflow(&controller, "film-metadata");
+    assert!(!metadata_has_label(&controller, "Season"));
+    assert!(!metadata_has_label(&controller, "Episode"));
+    assert!(controller.ui.workflow_next.is_sensitive());
+    controller.ui.workflow_next.emit_clicked();
+    assert_eq!(
+        controller.ui.workflow_stack.visible_child_name().as_deref(),
+        Some("output")
+    );
+    assert!(!controller.ui.workflow_next.is_visible());
+    controller.ui.workflow_back.emit_clicked();
+    assert_eq!(
+        controller.ui.workflow_stack.visible_child_name().as_deref(),
+        Some("metadata")
+    );
     let title_entry = widgets::<gtk::Entry>(&controller.ui.metadata.root)
         .into_iter()
         .find(|entry| entry.text() == "Original title")
@@ -392,14 +415,35 @@ fn gtk_workflows() {
     controller.ui.workflow_metadata_button.emit_clicked();
     assert!(metadata_has_label(&controller, "Album artist"));
     assert!(!metadata_has_label(&controller, "Narrator"));
+    capture_workflow(&controller, "music-metadata");
     widgets::<gtk::DropDown>(&controller.ui.metadata.root)[0].set_selected(1);
     assert!(metadata_has_label(&controller, "Narrator"));
     assert!(metadata_has_label(&controller, "Author"));
+    capture_workflow(&controller, "audiobook-metadata");
     assert!(!metadata_has_label(&controller, "Album artist"));
     controller.state.borrow_mut().busy = BusyState::Ripping;
     controller.render();
     assert!(!controller.ui.metadata.root.is_sensitive());
     controller.handle_event(EngineEvent::RipCancelled);
+
+    let mut audio_file = catalog(DiscKind::File);
+    audio_file.titles[0].tracks[0].kind = StreamKind::Audio;
+    controller.handle_event(EngineEvent::ScanFinished(Box::new(audio_file)));
+    assert_eq!(
+        controller
+            .ui
+            .sidebar
+            .output_profile
+            .model()
+            .unwrap()
+            .n_items(),
+        4
+    );
+    controller.ui.sidebar.output_profile.set_selected(2);
+    assert_eq!(
+        controller.state.borrow().output_profile,
+        OutputProfile::AudioOpus
+    );
 
     let mut cd = catalog(DiscKind::AudioCd);
     cd.audio_metadata_candidates.push(AudioMetadataCandidate {
@@ -421,6 +465,8 @@ fn gtk_workflows() {
     controller.handle_event(EngineEvent::ScanFinished(Box::new(cd.clone())));
     assert!(!controller.state.borrow().metadata_step_complete);
     assert!(!controller.ui.workflow_output_button.is_sensitive());
+    controller.ui.workflow_metadata_button.emit_clicked();
+    assert!(!controller.ui.workflow_next.is_sensitive());
     controller.handle_content_action(ContentAction::ApplyAudioCandidate("edition:1".into()));
     assert!(controller.state.borrow().metadata_step_complete);
     assert_eq!(
@@ -507,4 +553,110 @@ fn gtk_workflows() {
     );
     SettingsDialog::exercise_workflow(&controller.ui.window);
     controller.ui.window.close();
+}
+
+#[test]
+fn manual_video_type_overrides_disc_series_context() {
+    use media_rip_core::model::metadata::MetadataKind;
+    let mut source = catalog(DiscKind::Dvd);
+    source.video_episode_context = Some(media_rip_core::VideoEpisodeContext {
+        metadata: video_metadata("Series"),
+        choices: vec![],
+    });
+    for (value, expected) in [
+        ("video", MetadataKind::Video),
+        ("film", MetadataKind::Film),
+        ("television", MetadataKind::Television),
+    ] {
+        set_tag(&mut source, 0, "media_type", value, false, "", "mkv");
+        assert_eq!(
+            MetadataKind::for_title(&source, &source.titles[0]),
+            expected
+        );
+    }
+}
+
+#[test]
+fn shared_book_fields_respect_selection_and_content_type() {
+    use media_rip_core::model::editing::set_shared_tag;
+    let mut source = catalog(DiscKind::AudioCd);
+    source.titles[0]
+        .tags
+        .push(MediaTag::new("media_type", "audiobook"));
+    for id in 1..4 {
+        let mut title = source.titles[0].clone();
+        title.id = id;
+        title.selected = id != 2;
+        if id == 3 {
+            title.tags.clear();
+        }
+        source.titles.push(title);
+    }
+    set_shared_tag(&mut source, 0, "author", "Example author", "", "flac");
+    for title in &source.titles {
+        assert_eq!(
+            title.tags.iter().any(|tag| tag.key == "author"),
+            title.id < 2
+        );
+    }
+}
+
+#[test]
+fn manual_episode_fields_update_structured_metadata_including_specials() {
+    let mut source = catalog(DiscKind::Dvd);
+    source.titles[0].video_metadata = Some(video_metadata("Episode"));
+    set_tag(&mut source, 0, "season_number", "0", false, "", "mkv");
+    set_tag(&mut source, 0, "episode_id", "12", false, "", "mkv");
+    let metadata = source.titles[0].video_metadata.as_ref().unwrap();
+    assert_eq!(metadata.season, Some(0));
+    assert_eq!(metadata.episode, Some(12));
+    set_tag(&mut source, 0, "episode_id", "", false, "", "mkv");
+    assert_eq!(
+        source.titles[0].video_metadata.as_ref().unwrap().episode,
+        None
+    );
+}
+
+#[test]
+fn confirmed_film_and_extras_override_stale_television_tags() {
+    use media_rip_core::model::metadata::MetadataKind;
+    let mut source = catalog(DiscKind::Dvd);
+    source.titles[0].tags = vec![
+        MediaTag::new("show", "Old series"),
+        MediaTag::new("season_number", "2"),
+    ];
+    for (role, kind) in [
+        ("MainMovie", MetadataKind::Film),
+        ("extra", MetadataKind::Video),
+    ] {
+        source.titles[0].video_metadata = Some(video_metadata(role));
+        assert_eq!(MetadataKind::for_title(&source, &source.titles[0]), kind);
+    }
+}
+
+fn capture_workflow(controller: &Controller, name: &str) {
+    let Some(directory) = std::env::var_os("MEDIA_RIP_WORKFLOW_SCREENSHOTS") else {
+        return;
+    };
+    let directory = PathBuf::from(directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let window = &controller.ui.window;
+    let main_loop = gtk::glib::MainLoop::new(None, false);
+    let stop = main_loop.clone();
+    gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(200), move || stop.quit());
+    main_loop.run();
+    let paintable = gtk::WidgetPaintable::new(Some(window));
+    let snapshot = gtk::Snapshot::new();
+    paintable.snapshot(
+        &snapshot,
+        f64::from(window.width()),
+        f64::from(window.height()),
+    );
+    let node = snapshot.to_node().expect("workflow renders a node");
+    window
+        .renderer()
+        .unwrap()
+        .render_texture(&node, None)
+        .save_to_png(directory.join(format!("{name}.png")))
+        .unwrap();
 }

@@ -67,6 +67,26 @@ workflows with Xvfb. Set `MEDIA_RIP_SETTINGS_SCREENSHOTS` to a directory when ru
 to capture the rendered settings pages.
 
 
+## Metadata editing
+
+The Metadata tab uses content-specific fields. Video titles can be classified as films,
+television or video/extras independently of whether the source is DVD, Blu-ray or a file.
+TV fields include series, season and episode, including season 0 for specials, and can be
+edited without an online match. Music uses album and artist fields; audiobooks use book,
+author, narrator, book series and chapter fields. Changing content type preserves existing tags.
+
+"Apply to selected" shares a field with selected items of the same content type. Track,
+chapter and episode titles and numbers remain individual. The source-wide audio type chooser
+still explicitly applies to every track. Provider proposals remain available for review.
+
+The workflow keeps the source and content type visible, with Back and Continue controls
+between selection, metadata and output. Confirmed films and extras suppress TV assignment
+controls, even when an older series context remains. Audio-only files use audio output
+formats just like CDs. Optional audio numbering and release fields expand on demand.
+Set `MEDIA_RIP_WORKFLOW_SCREENSHOTS` to a directory with `make test-ui` to capture the
+film, music and audiobook metadata layouts.
+
+
 ## DVD title review
 
 DVD titles are playback paths, not necessarily separate films or copies of the video.

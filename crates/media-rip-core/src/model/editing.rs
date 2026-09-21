@@ -84,6 +84,39 @@ fn nonempty(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
+/// Share collection fields only with selected items of the same content type.
+pub fn set_shared_tag(
+    catalog: &mut MediaCatalog,
+    title_id: u32,
+    key: &str,
+    value: &str,
+    file_name_template: &str,
+    output_extension: &str,
+) {
+    use super::metadata::MetadataKind;
+    let Some(origin) = catalog.titles.iter().find(|title| title.id == title_id) else {
+        return;
+    };
+    let kind = MetadataKind::for_title(catalog, origin);
+    let ids = catalog
+        .titles
+        .iter()
+        .filter(|title| title.selected && MetadataKind::for_title(catalog, title) == kind)
+        .map(|title| title.id)
+        .collect::<Vec<_>>();
+    for id in ids {
+        set_tag(
+            catalog,
+            id,
+            key,
+            value,
+            false,
+            file_name_template,
+            output_extension,
+        );
+    }
+}
+
 pub fn set_tag(
     catalog: &mut crate::MediaCatalog,
     title_id: u32,
@@ -137,6 +170,19 @@ pub fn set_tag(
                 .next()
                 .and_then(|year| year.trim().parse::<u32>().ok())
                 .filter(|year| (1..=9999).contains(year));
+        }
+        if let Some(metadata) = &mut title.video_metadata {
+            match key.as_str() {
+                "season_number" => metadata.season = value.trim().parse().ok(),
+                "episode_id" => metadata.episode = value.trim().parse().ok(),
+                "media_type" => match value {
+                    "film" => metadata.content_type = Some("film".to_owned()),
+                    "television" => metadata.content_type = Some("tv".to_owned()),
+                    "video" => metadata.content_type = Some("video".to_owned()),
+                    _ => {}
+                },
+                _ => {}
+            }
         }
         if key == "artist"
             && is_audio_cd
@@ -200,6 +246,7 @@ fn clear_video_identity_tags(tags: &mut Vec<crate::MediaTag>) {
         !matches!(
             tag.key.to_ascii_lowercase().as_str(),
             "title"
+                | "media_type"
                 | "show"
                 | "date"
                 | "season_number"

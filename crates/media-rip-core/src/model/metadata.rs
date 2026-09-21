@@ -47,6 +47,30 @@ impl MetadataKind {
             });
             return if book { Self::Audiobook } else { Self::Music };
         }
+        if let Some(kind) = title.tags.iter().find_map(|tag| {
+            if !tag.key.eq_ignore_ascii_case("media_type") {
+                return None;
+            }
+            match tag.value.trim().to_ascii_lowercase().as_str() {
+                "video" => Some(Self::Video),
+                "film" | "movie" => Some(Self::Film),
+                "tv" | "television" => Some(Self::Television),
+                _ => None,
+            }
+        }) {
+            return kind;
+        }
+        if let Some(kind) = title.video_metadata.as_ref().and_then(Self::from_video) {
+            return kind;
+        }
+        if title.tags.iter().any(|tag| {
+            matches!(
+                tag.key.to_ascii_lowercase().as_str(),
+                "show" | "season_number" | "episode_id"
+            ) && !tag.value.trim().is_empty()
+        }) {
+            return Self::Television;
+        }
         // The title's confirmed identity takes precedence over pending proposals
         // and source-wide episode context, including mixed-content discs.
         title
@@ -78,6 +102,7 @@ impl MetadataKind {
         {
             Some("mainmovie" | "movie" | "film") => Some(Self::Film),
             Some("episode" | "probableepisode" | "series" | "tv") => Some(Self::Television),
+            Some("video" | "extra" | "extras" | "bonus") => Some(Self::Video),
             _ if metadata.season.is_some() || metadata.episode.is_some() => Some(Self::Television),
             _ => None,
         }
@@ -104,6 +129,9 @@ impl MetadataKind {
             Self::Television => &[
                 ("title", "Episode title"),
                 ("show", "Series"),
+                ("season_number", "Season"),
+                ("episode_id", "Episode"),
+                ("genre", "Genre"),
                 ("date", "Release date"),
                 ("comment", "Description"),
             ],
@@ -122,6 +150,9 @@ impl MetadataKind {
                 ("album", "Book"),
                 ("author", "Author"),
                 ("narrator", "Narrator"),
+                ("series", "Book series"),
+                ("series-part", "Book number"),
+                ("comment", "Description"),
                 ("track", "Chapter number"),
                 ("discnumber", "Disc number"),
                 ("date", "Release date"),
