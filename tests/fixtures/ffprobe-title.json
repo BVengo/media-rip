@@ -1,0 +1,15 @@
+{
+  "format": {
+    "duration": "7445.500", "size": "27487790694",
+    "tags": {"title": "Example Feature"}
+  },
+  "streams": [
+    {"index": 0, "codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080},
+    {"index": 1, "codec_type": "audio", "codec_name": "ac3", "channels": 6, "tags": {"language": "eng"}},
+    {"index": 2, "codec_type": "subtitle", "codec_name": "hdmv_pgs_subtitle", "disposition": {"forced": 1}, "tags": {"language": "eng"}}
+  ],
+  "chapters": [
+    {"id": 0, "start_time": "0.000", "end_time": "3600.000"},
+    {"id": 1, "start_time": "3600.000", "end_time": "7445.500"}
+  ]
+}

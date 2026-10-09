@@ -1,4 +1,5 @@
 pub(crate) use media_rip_core::model::editing::format_audio_cd_file_name;
+use media_rip_core::util::{DEFAULT_MOVIE_TEMPLATE, render_template};
 use std::{
     collections::BTreeMap,
     fs,
@@ -51,6 +52,7 @@ pub(crate) struct OutputSettings {
     pub dvd_directory: String,
     pub bluray_directory: String,
     pub minimum_title_seconds: u32,
+    pub movie_file_name_template: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +181,7 @@ impl Default for OutputSettings {
             dvd_directory: String::new(),
             bluray_directory: String::new(),
             minimum_title_seconds: 120,
+            movie_file_name_template: DEFAULT_MOVIE_TEMPLATE.into(),
         }
     }
 }
@@ -288,20 +291,39 @@ impl AppSettings {
             .ok_or_else(|| "settings path has no parent directory".to_owned())?;
         fs::create_dir_all(parent)
             .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
-        let contents = serde_json::to_string_pretty(self)
-            .map_err(|error| format!("could not encode settings: {error}"))?;
+        let contents = self.documented_json()?;
         media_rip_engine::atomic_write(&path, format!("{contents}\n").as_bytes())
             .map_err(|error| format!("could not save {}: {error}", path.display()))?;
         Ok(path)
     }
 
+    fn documented_json(&self) -> Result<String, String> {
+        let mut config = serde_json::to_value(self)
+            .map_err(|error| format!("could not encode settings: {error}"))?;
+        config["output"]["_movie_file_name_template_help"] = serde_json::json!([
+            "Fields: {movie name} (confirmed movie title), {movie year} (release year; empty when unknown).",
+            "Conditionals: {if:movie year} ... {end}, or {if:movie name} ... {end}. The entire group is included only when its field is non-empty. Groups may nest.",
+            "Put optional spaces, separators and brackets inside the conditional group. Punctuation outside groups is always literal.",
+            "Default (also used for an empty template): {movie name}{if:movie year} ({movie year}){end}",
+            "Example: {movie name}{if:movie year} - [{movie year}]{end}",
+            "Use / for folders. Absolute paths and parent traversal are forbidden. Metadata cannot create folders. The output format supplies the extension.",
+            "Only the listed fields, if and end are supported; unknown fields and unmatched braces or groups are errors."
+        ]);
+        serde_json::to_string_pretty(&config)
+            .map_err(|error| format!("could not encode settings: {error}"))
+    }
+
     pub fn apply_catalog_defaults(&self, catalog: &mut MediaCatalog) {
+        media_rip_core::model::dvd::infer_main_title(catalog);
         self.apply_audio_cd_metadata_preference(catalog);
         self.apply_audio_cd_file_names(catalog);
+        self.apply_movie_file_names(catalog, self.profile_for_catalog(catalog).extension());
         let had_multiple_titles = catalog.titles.len() > 1;
         let source_kind = catalog.source.kind;
-        let has_authored_main_title = source_kind == media_rip_core::DiscKind::BluRay
-            && catalog.titles.iter().any(|title| title.is_main_title);
+        let has_authored_main_title = matches!(
+            source_kind,
+            media_rip_core::DiscKind::Dvd | media_rip_core::DiscKind::BluRay
+        ) && catalog.titles.iter().any(|title| title.is_main_title);
         let duplicate_representatives = duplicate_representatives(catalog);
         let tv_title_preferences = tv_title_preferences(catalog);
         let minimum_duration_ms = u64::from(self.output.minimum_title_seconds) * 1_000;
@@ -426,6 +448,16 @@ impl AppSettings {
             super::notifications::ntfy_endpoint(&self.notifications)?;
         }
         validate_audio_template(&self.audio_cd.file_name_template)?;
+        let template = &self.output.movie_file_name_template;
+        let expanded =
+            render_template(template, &[("movie name", "movie"), ("movie year", "year")])?;
+        for path in [template.as_str(), expanded.as_str()] {
+            if Path::new(path).is_absolute() || path.split(['/', '\\']).any(|part| part == "..") {
+                return Err(
+                    "The movie filename template must stay within the output folder.".into(),
+                );
+            }
+        }
         Ok(())
     }
 
@@ -458,6 +490,111 @@ impl AppSettings {
         };
         self.bluray.select_only_main_title = policy == "main";
         self.bluray.select_duplicate_playlists = policy == "all";
+    }
+
+    pub fn apply_movie_file_names(&self, catalog: &mut MediaCatalog, extension: &str) {
+        use media_rip_core::{
+            model::metadata::MetadataKind,
+            util::{ensure_extension, sanitize_file_name},
+        };
+        for index in 0..catalog.titles.len() {
+            let title = &catalog.titles[index];
+            let kind = MetadataKind::for_title(catalog, title);
+            let explicit_type = title
+                .tags
+                .iter()
+                .any(|tag| tag.key.eq_ignore_ascii_case("media_type"));
+            let confirmed_film =
+                kind == MetadataKind::Film && (explicit_type || title.video_metadata.is_some());
+            let manual_feature = kind == MetadataKind::Video
+                && title.is_main_title
+                && !explicit_type
+                && title.video_metadata.is_none()
+                && title.tags.iter().any(|tag| {
+                    tag.key.eq_ignore_ascii_case("title") && !tag.value.trim().is_empty()
+                });
+            if !confirmed_film && !manual_feature {
+                continue;
+            }
+            let template = if self.output.movie_file_name_template.trim().is_empty() {
+                DEFAULT_MOVIE_TEMPLATE
+            } else {
+                &self.output.movie_file_name_template
+            };
+            let year = title
+                .tags
+                .iter()
+                .find(|tag| tag.key.eq_ignore_ascii_case("date"))
+                .map(|tag| {
+                    tag.value
+                        .split('-')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .parse::<u32>()
+                        .ok()
+                        .filter(|year| (1..=9999).contains(year))
+                })
+                .unwrap_or_else(|| {
+                    title
+                        .video_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.year)
+                })
+                .map(|year| year.to_string())
+                .unwrap_or_default();
+            let movie_name = if title.name.trim().is_empty() {
+                String::new()
+            } else {
+                sanitize_file_name(&title.name)
+            };
+            let fields = [
+                ("movie name", movie_name.as_str()),
+                ("movie year", year.as_str()),
+            ];
+            let expanded = render_template(template, &fields).unwrap_or_else(|_| {
+                render_template(DEFAULT_MOVIE_TEMPLATE, &fields)
+                    .expect("valid default movie template")
+            });
+            let mut name = ensure_extension(expanded.trim(), extension);
+            if catalog.titles.iter().enumerate().any(|(other, title)| {
+                other != index && title.output_file.eq_ignore_ascii_case(&name)
+            }) {
+                name = ensure_extension(
+                    &format!(
+                        "{} {}",
+                        expanded.trim(),
+                        sanitize_file_name(&title.source_title_id)
+                    ),
+                    extension,
+                );
+            }
+            catalog.titles[index].output_file = name;
+        }
+    }
+
+    pub fn refresh_movie_file_names(
+        &self,
+        catalog: &mut MediaCatalog,
+        previous: &MediaCatalog,
+        extension: &str,
+    ) {
+        let mut old_names = previous.clone();
+        self.apply_movie_file_names(&mut old_names, extension);
+        let mut new_names = catalog.clone();
+        self.apply_movie_file_names(&mut new_names, extension);
+        for ((title, old), (old_name, new_name)) in catalog
+            .titles
+            .iter_mut()
+            .zip(&previous.titles)
+            .zip(old_names.titles.iter().zip(&new_names.titles))
+        {
+            if (title.name != old.name || title.tags != old.tags)
+                && old.output_file == old_name.output_file
+            {
+                title.output_file.clone_from(&new_name.output_file);
+            }
+        }
     }
 
     fn apply_audio_cd_file_names(&self, catalog: &mut MediaCatalog) {
@@ -1245,6 +1382,133 @@ mod tests {
         settings.apply_catalog_defaults(&mut catalog);
 
         assert_eq!(catalog, expected);
+    }
+
+    #[test]
+    fn movie_names_use_confirmed_metadata_and_configured_format() {
+        let mut catalog = tv_catalog("Movie");
+        catalog.source.kind = DiscKind::Dvd;
+        catalog.titles.truncate(2);
+        let movie = &mut catalog.titles[1];
+        movie.name = "Film: One".into();
+        let metadata = movie.video_metadata.as_mut().unwrap();
+        metadata.content_type = Some("MainMovie".into());
+        metadata.year = Some(2024);
+        let untouched = catalog.titles[0].output_file.clone();
+        let mut settings = AppSettings::default();
+        settings.apply_movie_file_names(&mut catalog, "mkv");
+        assert_eq!(catalog.titles[1].output_file, "Film_ One (2024).mkv");
+        assert_eq!(catalog.titles[0].output_file, untouched);
+        settings.output.movie_file_name_template = "{movie year}/{movie name}".into();
+        settings.apply_movie_file_names(&mut catalog, "mp4");
+        assert_eq!(catalog.titles[1].output_file, "2024/Film_ One.mp4");
+        catalog.titles[1].video_metadata.as_mut().unwrap().year = None;
+        settings.output.movie_file_name_template.clear();
+        settings.apply_movie_file_names(&mut catalog, "mkv");
+        assert_eq!(catalog.titles[1].output_file, "Film_ One.mkv");
+    }
+
+    #[test]
+    fn dvd_dominant_feature_and_duplicate_respect_main_title_selection() {
+        let mut catalog = catalog_with_duplicate_playlists();
+        catalog.source.kind = DiscKind::Dvd;
+        catalog.titles[0].duration_ms = 7_200_000;
+        catalog.titles[0].size_bytes = Some(5_900_000_000);
+        catalog.titles[1].duration_ms = 7_200_000;
+        catalog.titles[2].duration_ms = 600_000;
+        let mut settings = AppSettings::default();
+        settings.bluray.select_only_main_title = true;
+        settings.apply_catalog_defaults(&mut catalog);
+        assert!(catalog.titles[0].is_main_title);
+        assert_eq!(
+            catalog
+                .titles
+                .iter()
+                .map(|title| title.selected)
+                .collect::<Vec<_>>(),
+            vec![true, false, false]
+        );
+        settings.bluray.select_only_main_title = false;
+        settings.apply_catalog_defaults(&mut catalog);
+        assert!(catalog.titles[2].selected);
+    }
+
+    #[test]
+    fn dvd_comparable_titles_and_play_all_are_not_assumed_to_be_movies() {
+        let mut catalog = catalog_with_duplicate_playlists();
+        catalog.source.kind = DiscKind::Dvd;
+        for (title, duration) in catalog
+            .titles
+            .iter_mut()
+            .zip([7_200_000, 3_600_000, 3_600_000])
+        {
+            title.duplicate_key = None;
+            title.duration_ms = duration;
+        }
+        AppSettings::default().apply_catalog_defaults(&mut catalog);
+        assert!(catalog.titles.iter().all(|title| !title.is_main_title));
+        catalog.titles.truncate(1);
+        catalog.titles[0].duration_ms = 600_000;
+        AppSettings::default().apply_catalog_defaults(&mut catalog);
+        assert!(!catalog.titles[0].is_main_title);
+    }
+
+    #[test]
+    fn manual_film_tags_use_the_template_and_keep_custom_output_names() {
+        let mut catalog = catalog_with_duplicate_playlists();
+        catalog.titles.truncate(1);
+        let mut settings = AppSettings::default();
+        settings.output.movie_file_name_template =
+            "{movie name}{if:movie year} [{movie year}]{end}".into();
+        catalog.titles[0].tags = vec![media_rip_core::MediaTag::new("media_type", "film")];
+        catalog.titles[0].name = "Manual film".into();
+        settings.apply_movie_file_names(&mut catalog, "mkv");
+        assert_eq!(catalog.titles[0].output_file, "Manual film.mkv");
+        let previous = catalog.clone();
+        catalog.titles[0]
+            .tags
+            .push(media_rip_core::MediaTag::new("date", "2024-05-12"));
+        settings.refresh_movie_file_names(&mut catalog, &previous, "mkv");
+        assert_eq!(catalog.titles[0].output_file, "Manual film [2024].mkv");
+        catalog.titles[0].output_file = "custom.mkv".into();
+        let previous = catalog.clone();
+        catalog.titles[0].name = "Changed".into();
+        settings.refresh_movie_file_names(&mut catalog, &previous, "mkv");
+        assert_eq!(catalog.titles[0].output_file, "custom.mkv");
+    }
+
+    #[test]
+    fn movie_config_contains_help_and_round_trips() {
+        let settings = AppSettings::default();
+        let json = settings.documented_json().unwrap();
+        assert!(json.contains("_movie_file_name_template_help"));
+        assert!(json.contains("{if:movie year}"));
+        assert_eq!(
+            serde_json::from_str::<AppSettings>(&json).unwrap(),
+            settings
+        );
+    }
+
+    #[test]
+    fn movie_template_defaults_and_validation() {
+        let mut settings: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            settings.output.movie_file_name_template,
+            super::DEFAULT_MOVIE_TEMPLATE
+        );
+        assert!(settings.validate().is_ok());
+        for template in [
+            "{title}",
+            "{movie name",
+            "../{movie name}",
+            "/{movie name}",
+            "{if:movie year}x",
+            "{end}",
+            "{if:unknown}x{end}",
+        ] {
+            settings.output.movie_file_name_template = template.into();
+            assert!(settings.validate().is_err(), "{template}");
+        }
     }
 
     #[test]

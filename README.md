@@ -74,6 +74,11 @@ television or video/extras independently of whether the source is DVD, Blu-ray o
 TV fields include series, season and episode, including season 0 for specials, and can be
 edited without an online match. Music uses album and artist fields; audiobooks use book,
 author, narrator, book series and chapter fields. Changing content type preserves existing tags.
+Manual film titles and release dates use the configured movie filename template. The
+same applies to an unidentified main feature once its title is entered. An
+explicitly edited output filename is retained when metadata changes. During ripping,
+workflow tabs remain available for review while editing controls are locked. Ejecting
+a disc returns the workflow to Identify.
 
 "Apply to selected" shares a field with selected items of the same content type. Track,
 chapter and episode titles and numbers remain individual. The source-wide audio type chooser
@@ -94,6 +99,13 @@ MediaRip analyses chapter and cell tables in authored order, checks sector addre
 VOB extents, and falls back to BUP tables when the corresponding IFO is unreadable. It retains
 the original title numbers and uses the same chapter boundaries for probing and ripping.
 Padding-only boundary chapters are excluded; cell-derived sizes are shown as estimates.
+
+A DVD feature lasting at least 40 minutes is marked as the main title when its duration
+is at least twice the next longest path and exceeds the combined duration of the other
+distinct, valid playback paths. Known
+TV discs and ambiguous collections keep their existing defaults. The "Select only the
+main title" setting applies to DVDs and Blu-rays; the saved configuration retains the
+existing `bluray.select_only_main_title` key.
 
 Duplicate paths and structurally suspect titles start unchecked in a separate review group.
 The title details show the VTS location, cells, padding and validation concerns. Suspect paths

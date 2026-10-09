@@ -69,6 +69,11 @@ pub(crate) struct InfoPanel {
 }
 
 impl InfoPanel {
+    pub fn set_read_only(&self, read_only: bool) {
+        self.tags_content.set_sensitive(!read_only);
+        self.metadata_content.set_sensitive(!read_only);
+    }
+
     pub fn new() -> Self {
         let info_grid = gtk::Grid::builder()
             .column_spacing(14)
@@ -217,7 +222,7 @@ impl InfoPanel {
                 if title.is_main_title {
                     fields.push(InfoField::new(
                         "Blu-ray role",
-                        "Main title (identified by disc metadata)",
+                        "Main title (disc metadata or dominant DVD playback path)",
                     ));
                 }
                 if let Some(original) = catalog

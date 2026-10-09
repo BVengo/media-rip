@@ -348,26 +348,23 @@ impl MainWindow {
     }
 
     pub fn set_busy(&self, busy: bool) {
-        self.workflow_back.set_sensitive(!busy);
-        self.workflow_next.set_sensitive(!busy);
         self.toolbar.open_file.set_sensitive(!busy);
         self.toolbar.open_folder.set_sensitive(!busy);
         self.toolbar.refresh.set_sensitive(!busy);
         self.toolbar.preferences.set_sensitive(!busy);
+        self.source.drives.set_sensitive(!busy);
         self.source.metadata_url.set_sensitive(!busy);
         self.source.identify.set_sensitive(!busy);
         self.sidebar.rip.set_sensitive(!busy);
+        self.sidebar.output_entry.set_sensitive(!busy);
         self.sidebar.browse_output.set_sensitive(!busy);
         self.sidebar.output_profile.set_sensitive(!busy);
         self.progress_area.set_visible(busy);
         self.cancel.set_sensitive(busy);
-        self.workflow_stack.set_sensitive(!busy);
-        if busy {
-            self.workflow_identify_button.set_sensitive(false);
-            self.workflow_select_button.set_sensitive(false);
-            self.workflow_metadata_button.set_sensitive(false);
-            self.workflow_output_button.set_sensitive(false);
-        }
+        self.sidebar.info.set_read_only(busy);
+        self.content.set_read_only(busy);
+        self.metadata.set_read_only(busy);
+        self.refresh_navigation();
     }
 
     pub fn set_status(&self, message: &str, class: Option<&str>) {

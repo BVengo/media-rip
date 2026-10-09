@@ -423,7 +423,12 @@ fn gtk_workflows() {
     assert!(!metadata_has_label(&controller, "Album artist"));
     controller.state.borrow_mut().busy = BusyState::Ripping;
     controller.render();
-    assert!(!controller.ui.metadata.root.is_sensitive());
+    assert!(controller.ui.metadata.root.is_sensitive());
+    assert!(
+        widgets::<gtk::Entry>(&controller.ui.metadata.root)
+            .iter()
+            .all(|entry| !entry.is_sensitive())
+    );
     controller.handle_event(EngineEvent::RipCancelled);
 
     let mut audio_file = catalog(DiscKind::File);
@@ -551,6 +556,113 @@ fn gtk_workflows() {
             .count(),
         1
     );
+    // Unidentified DVDs can be named entirely through the manual editor.
+    controller.handle_event(EngineEvent::ScanFinished(Box::new(catalog(DiscKind::Dvd))));
+    controller
+        .state
+        .borrow_mut()
+        .settings
+        .output
+        .movie_file_name_template = "{movie name}{if:movie year} [{movie year}]{end}".into();
+    for (key, value) in [("title", "Manual Film"), ("date", "2023-06-12")] {
+        controller.handle_info_action(InfoAction::SetTag {
+            title_id: 0,
+            key: key.into(),
+            value: value.into(),
+            all_tracks: false,
+        });
+    }
+    assert_eq!(
+        controller.state.borrow().catalog.as_ref().unwrap().titles[0].output_file,
+        "Manual Film [2023].mkv"
+    );
+
+    controller.state.borrow_mut().busy = BusyState::Ripping;
+    controller.ui.set_busy(true);
+    controller.render_metadata();
+    controller.render_info();
+    assert!(!controller.ui.sidebar.output_entry.is_sensitive());
+    assert!(
+        widgets::<gtk::Entry>(&controller.ui.metadata.root)
+            .iter()
+            .any(|entry| entry.text() == "Manual Film")
+    );
+    update_workflow_controls(&controller.ui, &controller.state.borrow());
+    for (button, step) in [
+        (&controller.ui.workflow_identify_button, "identify"),
+        (&controller.ui.workflow_select_button, "select"),
+        (&controller.ui.workflow_metadata_button, "metadata"),
+        (&controller.ui.workflow_output_button, "output"),
+    ] {
+        assert!(button.is_sensitive());
+        button.emit_clicked();
+        assert_eq!(
+            controller.ui.workflow_stack.visible_child_name().as_deref(),
+            Some(step)
+        );
+    }
+    assert!(controller.ui.workflow_stack.is_sensitive());
+    assert!(
+        widgets::<gtk::CheckButton>(&controller.ui.content.stack)
+            .iter()
+            .all(|check| !check.is_sensitive())
+    );
+    assert!(
+        widgets::<gtk::Entry>(&controller.ui.metadata.root)
+            .iter()
+            .all(|entry| !entry.is_sensitive())
+    );
+    controller.handle_info_action(InfoAction::SetTitleName {
+        title_id: 0,
+        name: "Blocked".into(),
+    });
+    controller.handle_content_action(ContentAction::SetTitleChecked {
+        title_id: 0,
+        selected: false,
+    });
+    assert_eq!(
+        controller.state.borrow().catalog.as_ref().unwrap().titles[0].name,
+        "Manual Film"
+    );
+    assert!(controller.state.borrow().catalog.as_ref().unwrap().titles[0].selected);
+    controller.ui.workflow_metadata_button.emit_clicked();
+    capture_workflow(&controller, "ripping-metadata");
+    controller.ui.workflow_select_button.emit_clicked();
+    controller.handle_content_action(ContentAction::ToggleExpanded(0));
+    assert!(controller.state.borrow().expanded_titles.contains(&0));
+    assert!(
+        widgets::<gtk::CheckButton>(&controller.ui.content.stack)
+            .iter()
+            .all(|check| !check.is_sensitive())
+    );
+    capture_workflow(&controller, "ripping-selection");
+    controller.finish_busy();
+    controller.render();
+    assert!(
+        widgets::<gtk::Entry>(&controller.ui.metadata.root)
+            .iter()
+            .all(|entry| entry.is_sensitive())
+    );
+
+    for kind in [DiscKind::Dvd, DiscKind::AudioCd] {
+        let mut source = catalog(kind);
+        let mut drive = Drive::empty("/dev/test-disc", "Test drive");
+        drive.media_present = true;
+        drive.media_kind = kind;
+        source.source.drive = Some(drive.clone());
+        controller.handle_event(EngineEvent::ScanFinished(Box::new(source)));
+        controller.ui.workflow_output_button.emit_clicked();
+        let (_, pending) = controller.state.borrow_mut().begin_metadata_refresh(1);
+        drive.media_present = false;
+        controller.handle_drive_snapshot(vec![drive], false);
+        assert!(pending.is_cancelled());
+        assert!(controller.state.borrow().catalog.is_none());
+        assert!(!controller.state.borrow().metadata_step_complete);
+        assert_eq!(
+            controller.ui.workflow_stack.visible_child_name().as_deref(),
+            Some("identify")
+        );
+    }
     SettingsDialog::exercise_workflow(&controller.ui.window);
     controller.ui.window.close();
 }

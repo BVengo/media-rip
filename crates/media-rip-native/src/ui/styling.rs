@@ -6,6 +6,15 @@ window {
   color: @theme_fg_color;
 }
 
+/* Explicit application colours otherwise override the theme's disabled text.
+   Remove inherited text shadows so every glyph uses the same disabled colour. */
+window label:disabled,
+window entry:disabled,
+window text:disabled {
+  color: @insensitive_fg_color;
+  text-shadow: none;
+}
+
 window scrollbar.vertical slider {
   min-width: 10px;
 }

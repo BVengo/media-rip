@@ -401,14 +401,20 @@ impl Controller {
             let mut state = self.state.borrow_mut();
             state.drives.clone_from(&drives);
             if ejected {
+                state.cancel_metadata_refresh();
                 state.catalog = None;
                 state.episode_metadata = None;
+                state.video_metadata_backups.clear();
+                state.reidentification_backup = None;
+                state.metadata_step_complete = false;
+                state.metadata_skipped = false;
                 state.expanded_titles.clear();
                 state.selection = Selection::Source;
             }
         }
 
         if ejected {
+            self.ui.set_workflow_step(WorkflowStep::Identify);
             self.ui.source.set_drives(&drives);
             self.ui
                 .messages
@@ -697,6 +703,7 @@ impl Controller {
         }
         self.ui.set_busy(true);
         self.ui.output_review.clear_job();
+        update_workflow_controls(&self.ui, &self.state.borrow());
         self.update_disc_controls();
         self.ui.sidebar.profile_panel.set_visible(false);
         self.ui.progress.set_fraction(0.0);
@@ -826,6 +833,9 @@ impl Controller {
         self.ui.progress_title.set_text("Preparing selected items");
         self.ui.progress_detail.set_text("");
         self.ui.output_review.start_job(&request);
+        self.render_metadata();
+        self.render_info();
+        update_workflow_controls(&self.ui, &self.state.borrow());
         self.ui.set_status("Ready", None);
 
         let engine = self.engine.clone();
@@ -1399,7 +1409,14 @@ impl Controller {
     }
 
     fn handle_content_action(&self, action: ContentAction) {
-        if self.state.borrow().is_busy() {
+        if self.state.borrow().is_busy()
+            && !matches!(
+                action,
+                ContentAction::SelectTitle(_)
+                    | ContentAction::SelectTrack { .. }
+                    | ContentAction::ToggleExpanded(_)
+            )
+        {
             return;
         }
         if matches!(action, ContentAction::ApplySuggestions(_))
@@ -1466,6 +1483,7 @@ impl Controller {
                     expanded_change = Some((id, expanded));
                 }
                 ContentAction::ApplySuggestions(title_ids) => {
+                    let settings = state.settings.clone();
                     for title_id in &title_ids {
                         remember_video_metadata_state(&mut state, *title_id);
                     }
@@ -1477,6 +1495,7 @@ impl Controller {
                                 output_extension,
                             ));
                         }
+                        settings.apply_movie_file_names(catalog, output_extension);
                         catalog.video_metadata_suggestions.clear();
                         catalog.audio_metadata_candidates.clear();
                         update_probable_suggestion_count(catalog);
@@ -1764,6 +1783,7 @@ impl Controller {
             self.render_info();
             self.update_rip_sensitivity();
         }
+        self.ui.content.set_read_only(self.state.borrow().is_busy());
     }
 
     fn handle_info_action(&self, action: InfoAction) {
@@ -1779,7 +1799,18 @@ impl Controller {
             return;
         }
         let mut state = self.state.borrow_mut();
-        let file_name_template = state.settings.audio_cd.file_name_template.clone();
+        let settings = state.settings.clone();
+        let file_name_template = settings.audio_cd.file_name_template.clone();
+        let update_movie_names = match &action {
+            InfoAction::SetTitleName { .. } => true,
+            InfoAction::SetTag { key, .. }
+            | InfoAction::SetSharedTag { key, .. }
+            | InfoAction::AddTag { key, .. } => matches!(
+                key.to_ascii_lowercase().as_str(),
+                "title" | "date" | "media_type"
+            ),
+            _ => false,
+        };
         let output_extension = state.output_profile.extension();
         let episode_metadata = state.episode_metadata.clone();
         if let Some(title_id) = info_action_title_id(&action)
@@ -1796,6 +1827,7 @@ impl Controller {
         let Some(catalog) = state.catalog.as_mut() else {
             return;
         };
+        let previous_movie_names = update_movie_names.then(|| catalog.clone());
         let mut renamed_title = None;
         let mut renamed_track = None;
         let mut assigned_episode = None;
@@ -1912,6 +1944,9 @@ impl Controller {
             InfoAction::ChooseCoverArt { .. } => unreachable!(),
             InfoAction::SetEpisodeSeason(_) => unreachable!(),
         };
+        if let Some(previous) = previous_movie_names.as_ref() {
+            settings.refresh_movie_file_names(catalog, previous, output_extension);
+        }
         if assigned_episode.is_some() && catalog.video_metadata_suggestions.is_empty() {
             state.metadata_step_complete = true;
             state.metadata_skipped = false;
@@ -1940,6 +1975,7 @@ impl Controller {
             self.render_info();
             self.render_metadata();
         }
+        self.update_rip_sensitivity();
     }
 
     fn refresh_episode_context_season(&self, requested_season: u32) {
@@ -2067,6 +2103,7 @@ impl Controller {
             can_undo_metadata,
             callback,
         );
+        self.ui.sidebar.info.set_read_only(state.is_busy());
     }
 
     fn render_metadata(&self) {
@@ -2086,6 +2123,7 @@ impl Controller {
             content_callback,
             info_callback,
         );
+        self.ui.metadata.set_read_only(state.is_busy());
     }
 
     fn render(&self) {
@@ -2168,6 +2206,7 @@ impl Controller {
         } else {
             self.ui.content.clear();
         }
+        self.ui.content.set_read_only(state.is_busy());
         drop(state);
         self.render_metadata();
         self.render_info();
@@ -2431,16 +2470,18 @@ impl Controller {
 fn update_workflow_controls(ui: &MainWindow, state: &AppState) {
     ui.set_source_summary(state.catalog.as_ref());
     let has_catalog = state.catalog.is_some();
-    ui.metadata
-        .root
-        .set_sensitive(has_catalog && !state.is_busy());
-    ui.workflow_identify_button.set_sensitive(!state.is_busy());
+    let ripping = state.busy == BusyState::Ripping;
+    ui.metadata.set_read_only(state.is_busy());
+    ui.content.set_read_only(state.is_busy());
+    ui.workflow_identify_button
+        .set_sensitive(!state.is_busy() || ripping);
     ui.workflow_select_button
-        .set_sensitive(has_catalog && !state.is_busy());
+        .set_sensitive(has_catalog && (!state.is_busy() || ripping));
     ui.workflow_metadata_button
-        .set_sensitive(has_catalog && !state.is_busy());
-    ui.workflow_output_button
-        .set_sensitive(has_catalog && state.metadata_step_complete && !state.is_busy());
+        .set_sensitive(has_catalog && (!state.is_busy() || ripping));
+    ui.workflow_output_button.set_sensitive(
+        has_catalog && state.metadata_step_complete && (!state.is_busy() || ripping),
+    );
     ui.refresh_navigation();
 }
 

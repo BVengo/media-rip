@@ -44,6 +44,12 @@ impl MetadataPanel {
         }
     }
 
+    pub fn set_read_only(&self, read_only: bool) {
+        self.controls.set_sensitive(!read_only);
+        self.rows.set_sensitive(!read_only);
+        self.actions.set_sensitive(!read_only);
+    }
+
     pub fn render(
         &self,
         catalog: Option<&MediaCatalog>,

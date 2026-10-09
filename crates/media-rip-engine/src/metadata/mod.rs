@@ -2793,6 +2793,66 @@ pub(crate) fn assign_output_names(titles: &mut [Title], fallback_stem: &str) {
     }
 }
 
+/// Resolve a feature without relying on Blu-ray authored playlist flags.
+/// Ambiguous cuts stay unresolved; exact duplicates count as one candidate.
+fn primary_movie_title(titles: &[Title], runtime_ms: Option<u64>) -> Option<usize> {
+    let mut candidates: Vec<usize> = Vec::new();
+    for (index, title) in titles.iter().enumerate() {
+        if title.duration_ms == 0
+            || title
+                .dvd
+                .as_ref()
+                .is_some_and(|dvd| !dvd.warnings.is_empty())
+        {
+            continue;
+        }
+        if let Some(position) = candidates.iter().position(|other| {
+            title.duplicate_key.is_some() && title.duplicate_key == titles[*other].duplicate_key
+        }) {
+            if title.is_main_title {
+                candidates[position] = index;
+            }
+        } else {
+            candidates.push(index);
+        }
+    }
+    if let Some(runtime) = runtime_ms {
+        let compatible: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|index| titles[*index].duration_ms.abs_diff(runtime) <= 5 * 60_000)
+            .collect();
+        if compatible.len() == 1 {
+            return compatible.first().copied();
+        }
+        if !compatible.is_empty() {
+            candidates = compatible;
+        }
+    }
+    let authored: Vec<_> = candidates
+        .iter()
+        .copied()
+        .filter(|index| titles[*index].is_main_title)
+        .collect();
+    if authored.len() == 1 {
+        return authored.first().copied();
+    }
+    candidates.sort_by_key(|index| std::cmp::Reverse(titles[*index].duration_ms));
+    let first = *candidates.first()?;
+    let duration = titles[first].duration_ms;
+    // A dominant feature must be at least 40 minutes and 50% longer than
+    // its runner-up, avoiding arbitrary choices among episodes or editions.
+    if duration >= 40 * 60_000
+        && candidates.get(1).is_none_or(|second| {
+            duration.saturating_mul(2) >= titles[*second].duration_ms.saturating_mul(3)
+        })
+    {
+        Some(first)
+    } else {
+        None
+    }
+}
+
 fn apply_movie_match(
     titles: &mut [Title],
     matched: &VideoMatch,
@@ -2805,19 +2865,9 @@ fn apply_movie_match(
         .runtime_minutes
         .filter(|minutes| *minutes > 0)
         .and_then(|minutes| minutes.checked_mul(60_000));
-    let candidates = titles
-        .iter()
-        .enumerate()
-        .filter(|(_, title)| {
-            runtime_ms.is_some_and(|runtime| title.duration_ms.abs_diff(runtime) <= 5 * 60_000)
-                || (runtime_ms.is_none() && title.is_main_title)
-        })
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    if candidates.len() != 1 {
-        return None;
-    }
-    let title = &mut titles[candidates[0]];
+    let index = primary_movie_title(titles, runtime_ms)?;
+    let title = &mut titles[index];
+    title.is_main_title = true;
     let tags = video_tags(
         &matched.title,
         &matched.title,
@@ -2826,7 +2876,9 @@ fn apply_movie_match(
         None,
         VideoProviderIds::from(matched),
     );
-    let automatic = runtime_ms.is_some() && (explicit_identity || matched.providers.len() > 1);
+    let automatic = runtime_ms
+        .is_some_and(|runtime| title.duration_ms.abs_diff(runtime) <= 5 * 60_000)
+        && (explicit_identity || matched.providers.len() > 1);
     let metadata = VideoMetadata {
         attribution: MetadataAttribution::new(
             matched.providers.join(" + "),
@@ -2856,10 +2908,12 @@ fn apply_movie_match(
             tags,
             metadata,
             evidence: vec![
-                if runtime_ms.is_some() {
-                    "One disc title has a compatible runtime"
+                if runtime_ms
+                    .is_some_and(|runtime| title.duration_ms.abs_diff(runtime) <= 5 * 60_000)
+                {
+                    "The selected main feature has a compatible runtime"
                 } else {
-                    "The disc marks this as its main title; the provider supplied no runtime"
+                    "The main feature was identified from disc structure and duration"
                 }
                 .to_owned(),
             ],
@@ -3798,6 +3852,36 @@ mod tests {
                 .confidence_percent,
             76
         );
+    }
+
+    #[test]
+    fn movie_feature_detection_handles_unauthored_duplicates_and_ambiguity() {
+        let mut titles = vec![title("Feature", false), title("Bonus", false)];
+        titles[0].duration_ms = 120 * 60_000;
+        titles[1].duration_ms = 20 * 60_000;
+        assert_eq!(super::primary_movie_title(&titles, None), Some(0));
+        let mut duplicate = titles[0].clone();
+        duplicate.duplicate_key = Some("feature".into());
+        titles[0].duplicate_key = duplicate.duplicate_key.clone();
+        titles.push(duplicate);
+        assert_eq!(
+            super::primary_movie_title(&titles, Some(120 * 60_000)),
+            Some(0)
+        );
+        titles[2].duplicate_key = None;
+        assert_eq!(
+            super::primary_movie_title(&titles, Some(120 * 60_000)),
+            None
+        );
+        titles[2].duration_ms = 180 * 60_000;
+        assert_eq!(
+            super::primary_movie_title(&titles, Some(120 * 60_000)),
+            Some(0)
+        );
+        for title in &mut titles {
+            title.duration_ms = 45 * 60_000;
+        }
+        assert_eq!(super::primary_movie_title(&titles, None), None);
     }
 
     #[test]

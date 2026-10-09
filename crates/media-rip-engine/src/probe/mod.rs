@@ -508,7 +508,7 @@ pub(crate) fn scan_source(
         ),
     );
 
-    let catalog = MediaCatalog {
+    let mut catalog = MediaCatalog {
         source: MediaSource {
             id: media_path.to_string_lossy().into_owned(),
             name: source_name,
@@ -533,6 +533,7 @@ pub(crate) fn scan_source(
             .unwrap_or_default(),
         video_episode_context: video_enrichment.and_then(|enrichment| enrichment.episode_context),
     };
+    media_rip_core::model::dvd::infer_main_title(&mut catalog);
     diagnostics::catalog(&catalog);
     Ok(catalog)
 }

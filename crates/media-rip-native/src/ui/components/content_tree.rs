@@ -123,6 +123,18 @@ impl ContentTree {
         }
     }
 
+    pub fn set_read_only(&self, read_only: bool) {
+        if let Some(check) = self.select_all.borrow().as_ref() {
+            check.set_sensitive(!read_only);
+        }
+        for row in self.expanded_rows.borrow().values() {
+            row.selected.set_sensitive(!read_only);
+            for check in row.track_buttons.values() {
+                check.set_sensitive(!read_only);
+            }
+        }
+    }
+
     pub fn set_disc_state(&self, state: DiscUiState, enabled: bool) {
         self.idle_open.set_sensitive(enabled);
         match state {
@@ -456,7 +468,9 @@ fn title_row(
         let badge = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         badge.add_css_class("main-title-badge");
         badge.set_valign(gtk::Align::Center);
-        badge.set_tooltip_text(Some("Main title identified by disc metadata"));
+        badge.set_tooltip_text(Some(
+            "Main title from disc metadata or a dominant DVD playback path",
+        ));
         badge.append(&gtk::Label::new(Some("MAIN TITLE")));
         name_line.append(&badge);
     }

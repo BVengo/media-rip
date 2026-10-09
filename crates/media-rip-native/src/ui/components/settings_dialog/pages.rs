@@ -87,6 +87,9 @@ fn output(form: &Rc<SettingsForm>, dialog: &gtk::Dialog, s: &AppSettings) -> Pag
             |s, value| s.audio_cd.output_format = value,
         ),
     );
+    let movies = page.section("Movie filenames", "Applied when movie metadata is confirmed. The selected video format determines the extension.");
+    movies.row("Movie path template", "Fields: {movie name}, {movie year}. Use {if:movie year} ... {end} (or if:movie name) to include a group only when that field is present. Groups may nest. Put optional punctuation inside the group. Use / for folders. Leave empty for: {movie name}{if:movie year} ({movie year}){end}.",
+        &form.entry(&s.output.movie_file_name_template, |s, value| s.output.movie_file_name_template = value));
     let naming = page.section("Audio CD filenames", "The selected audio format determines the file extension. Metadata characters cannot create extra folders.");
     naming.row("Track path template", "Fields: {artist}, {album}, {disc}, {track}, {track:02}, {title}. Use / to create folders. Leave empty for the default.",
         &form.entry(&s.audio_cd.file_name_template, |s, value| s.audio_cd.file_name_template = value));
@@ -151,14 +154,18 @@ fn selection(form: &Rc<SettingsForm>, s: &AppSettings) -> Page {
             s.selection.select_tv_non_episodic = value
         }),
     );
-    let bluray = page.section("Blu-ray playlists", "These options affect Blu-rays only.");
-    bluray.row(
-        "Select only the authored main title",
-        "Use the disc's main-title flag when present. Otherwise use the other selection defaults.",
+    let main_title = page.section(
+        "DVD and Blu-ray main title",
+        "Choose the default selection for movie discs.",
+    );
+    main_title.row(
+        "Select only the main title",
+        "Use authored Blu-ray flags or a clearly dominant DVD feature. Otherwise use the other selection defaults.",
         &form.toggle(s.bluray.select_only_main_title, |s, value| {
             s.bluray.select_only_main_title = value
         }),
     );
+    let bluray = page.section("Blu-ray playlists", "These options affect Blu-rays only.");
     bluray.row("Select exact duplicate playlists", "Include playlists with identical clip ranges. Otherwise only one representative starts checked.", &form.toggle(s.bluray.select_duplicate_playlists, |s, value| s.bluray.select_duplicate_playlists = value));
     page
 }
