@@ -6,7 +6,7 @@ metadata, then preserve or encode them in your chosen output format.
 
 ## Disclaimer
 This is a purely personal-driven project, being written with heavy usage of AI
-and no absolutely no consideration for good software practices. Things **will**
+and absolutely no consideration for good software practices. Things **will**
 break, I *will* push huge breaking commits, and the code *will* (probably) be
 awful. Perhaps I'll have some free time to write this properly one day, but
 **today is not that day.**
