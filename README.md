@@ -4,6 +4,15 @@ MediaRip is a Linux desktop application built with Rust and GTK4 for inspecting 
 ripping DVDs, Blu-rays, Audio CDs, disc folders and media files. Select tracks, review
 metadata, then preserve or encode them in your chosen output format.
 
+## Disclaimer
+This is a purely personal-driven project, being written with heavy usage of AI
+and no absolutely no consideration for good software practices. Things **will**
+break, I *will* push huge breaking commits, and the code *will* (probably) be
+awful. Perhaps I'll have some free time to write this properly one day, but
+**today is not that day.**
+
+Treat this as what it is - a personal project that I decided to open source!
+
 ## Features
 
 - Optical drive, DVD title, Blu-ray playlist and Audio CD track discovery
@@ -66,22 +75,6 @@ Unencrypted DVDs and Blu-rays are supported. Encrypted disc support depends on t
 libraries and keys installed for your system's FFmpeg, libdvdread and libbluray stack.
 MediaRip does not download keys or bypass protection. Use it only with media you are
 legally permitted to copy in your jurisdiction.
-
-## AI Disclosure
-Development of this project is being done with heavy usage of AI.
-
-It was designed as a personal project first, to address the frustrations I had with my current
-setup, requiring many different pieces of software and general lack of automation where it should
-be possible.
-- DVDs and BluRays
-- Audiobooks
-- CDs
-- Metadata analysis / gathering
-
-I wanted a complete yet quick solution to these problems, since I don't have much free time to
-develop one from scratch. At some stage I do intend on going through and thoroughly cleaning up the
-codebase, fully rewriting anything that the AI did suboptimally, however **today is not that day**.
-Treat this as what it is - a personal project that I decided to open source!
 
 ## Licence
 
