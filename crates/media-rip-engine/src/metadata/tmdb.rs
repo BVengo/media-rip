@@ -248,7 +248,7 @@ impl<'a> TmdbClient<'a> {
         if self.cancellation.is_cancelled() {
             return Err("TMDB artwork lookup cancelled".to_owned());
         }
-        let response = ureq::get(&format!("{IMAGE_ROOT}/{}", key))
+        let response = ureq::get(&format!("{IMAGE_ROOT}/{key}"))
             .set(
                 "User-Agent",
                 concat!("MediaRip/", env!("CARGO_PKG_VERSION")),
