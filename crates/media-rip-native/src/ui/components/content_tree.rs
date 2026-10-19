@@ -98,8 +98,10 @@ impl ContentTree {
 
         let title_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
         title_box.add_css_class("content-surface");
+        title_box.set_margin_end(8);
         let scroll = gtk::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
+            .overlay_scrolling(false)
+            .hscrollbar_policy(gtk::PolicyType::Automatic)
             .vscrollbar_policy(gtk::PolicyType::Automatic)
             .child(&title_box)
             .build();
@@ -194,14 +196,15 @@ impl ContentTree {
         self.expanded_rows.borrow_mut().clear();
         self.select_all.borrow_mut().take();
         clear_box(&self.title_box);
-        let (selection_row, select_all) = select_all_row(
+        let select_all = select_all_checkbox(
             catalog,
             on_action.clone(),
             self.select_all_state.clone(),
             self.updating_checks.clone(),
         );
-        self.title_box.append(&selection_row);
-        *self.select_all.borrow_mut() = Some(select_all);
+        *self.select_all.borrow_mut() = Some(select_all.clone());
+        let columns = TitleColumns::new();
+        self.title_box.append(&columns.header(&select_all));
         let duplicate_originals = duplicate_originals(&catalog.titles);
         let review_titles = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let mut review_count = 0;
@@ -209,6 +212,8 @@ impl ContentTree {
             let section = gtk::Box::new(gtk::Orientation::Vertical, 0);
             let (header, button, selected, check_state, name) = title_row(
                 title,
+                catalog,
+                &columns,
                 duplicate_originals.get(&title.id).map(String::as_str),
                 expanded.contains(&title.id),
                 on_action.clone(),
@@ -333,6 +338,7 @@ impl ContentTree {
     pub fn sync_title_name(&self, title_id: u32, name: &str) {
         if let Some(row) = self.expanded_rows.borrow().get(&title_id) {
             row.name.set_text(name);
+            row.name.set_tooltip_text(Some(name));
         }
     }
 
@@ -399,8 +405,65 @@ pub(crate) enum DiscUiState {
     },
 }
 
+/// Shared column widths keep headers and rows aligned as the window resizes.
+struct TitleColumns {
+    controls: gtk::SizeGroup,
+    kind: gtk::SizeGroup,
+    duration: gtk::SizeGroup,
+    size: gtk::SizeGroup,
+    chapters: gtk::SizeGroup,
+}
+
+impl TitleColumns {
+    fn new() -> Self {
+        Self {
+            controls: gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal),
+            kind: gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal),
+            duration: gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal),
+            size: gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal),
+            chapters: gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal),
+        }
+    }
+
+    fn cell(&self, value: &str, group: &gtk::SizeGroup, numeric: bool) -> gtk::Label {
+        let label = gtk::Label::new(Some(value));
+        label.set_xalign(if numeric { 1.0 } else { 0.0 });
+        label.set_margin_start(12);
+        label.set_margin_end(8);
+        if numeric {
+            label.add_css_class("numeric-cell");
+        }
+        group.add_widget(&label);
+        label
+    }
+
+    fn header(&self, select_all: &gtk::CheckButton) -> gtk::Box {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        row.add_css_class("content-table-heading");
+        let controls = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        spacer.set_size_request(28, -1);
+        controls.append(&spacer);
+        controls.append(select_all);
+        self.controls.add_widget(&controls);
+        row.append(&controls);
+        let name = gtk::Label::new(Some("Title / track"));
+        name.set_xalign(0.0);
+        name.set_hexpand(true);
+        name.set_width_chars(12);
+        row.append(&name);
+        row.append(&self.cell("Type", &self.kind, false));
+        row.append(&self.cell("Length", &self.duration, true));
+        row.append(&self.cell("Size", &self.size, true));
+        row.append(&self.cell("Chapters", &self.chapters, true));
+        row
+    }
+}
+
 fn title_row(
     title: &Title,
+    catalog: &MediaCatalog,
+    columns: &TitleColumns,
     duplicate_of: Option<&str>,
     expanded: bool,
     on_action: Rc<dyn Fn(ContentAction)>,
@@ -427,7 +490,9 @@ fn title_row(
     expander.add_css_class("title-expander");
     expander.set_valign(gtk::Align::Center);
     expander.set_size_request(28, 28);
-    row.append(&expander);
+    let controls = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    controls.set_valign(gtk::Align::Center);
+    controls.append(&expander);
     let title_id = title.id;
     let callback = on_action.clone();
     expander.connect_clicked(move |_| callback(ContentAction::ToggleExpanded(title_id)));
@@ -438,7 +503,7 @@ fn title_row(
     selected.set_active(check_state == CheckState::All);
     selected.set_inconsistent(check_state == CheckState::Some);
     selected.set_tooltip_text(Some(check_state.tooltip()));
-    row.append(&selected);
+    controls.append(&selected);
     let callback = on_action.clone();
     let state = current_check_state.clone();
     selected.connect_toggled(move |_| {
@@ -453,15 +518,20 @@ fn title_row(
 
     let image = gtk::Image::from_icon_name("media-optical-symbolic");
     image.set_pixel_size(24);
-    row.append(&image);
+    controls.append(&image);
+    columns.controls.add_widget(&controls);
+    row.append(&controls);
 
     let labels = gtk::Box::new(gtk::Orientation::Vertical, 2);
     labels.set_hexpand(true);
+    labels.set_valign(gtk::Align::Center);
     let name_line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let name = gtk::Label::new(Some(&title.name));
     name.set_xalign(0.0);
     name.set_ellipsize(gtk::pango::EllipsizeMode::End);
     name.set_hexpand(true);
+    name.set_width_chars(12);
+    name.set_tooltip_text(Some(&title.name));
     name.add_css_class("row-title");
     name_line.append(&name);
     if title.is_main_title {
@@ -491,46 +561,37 @@ fn title_row(
     {
         let badge = gtk::Label::new(Some("CHECK DVD LAYOUT"));
         badge.add_css_class("duplicate-title-badge");
+        badge.set_valign(gtk::Align::Center);
         badge.set_tooltip_text(Some(&dvd.warnings.join(
             "
 ",
         )));
         name_line.append(&badge);
     }
-    let mut details = vec![
-        format_duration(title.duration_ms),
-        format!("{} chapter(s)", title.chapters.len()),
-        title.size_bytes.map_or_else(
-            || "size unavailable".to_owned(),
-            |size| {
-                let size = format_bytes(size);
-                if title.size_is_estimate {
-                    format!("≈ {size}")
-                } else {
-                    size
-                }
-            },
-        ),
-    ];
-    if let Some(dvd) = &title.dvd {
-        details.push(format!(
-            "DVD title {} · VTS {:02} · {} cells",
-            title.source_title_id, dvd.title_set, dvd.cell_count
-        ));
-        if dvd.leading_padding_cells + dvd.trailing_padding_cells > 0 {
-            details.push(format!(
-                "padding: {} leading, {} trailing cells",
-                dvd.leading_padding_cells, dvd.trailing_padding_cells
-            ));
-        }
-    }
-    let detail = gtk::Label::new(Some(&details.join("  •  ")));
-    detail.set_wrap(true);
-    detail.set_xalign(0.0);
-    detail.add_css_class("row-detail");
     labels.append(&name_line);
-    labels.append(&detail);
     row.append(&labels);
+    let kind = media_rip_core::model::metadata::MetadataKind::for_title(catalog, title);
+    let kind_name = match kind {
+        media_rip_core::model::metadata::MetadataKind::Film => "Film",
+        media_rip_core::model::metadata::MetadataKind::Television => "Television",
+        media_rip_core::model::metadata::MetadataKind::Music => "Music",
+        media_rip_core::model::metadata::MetadataKind::Audiobook => "Audiobook",
+        media_rip_core::model::metadata::MetadataKind::Video => "Video",
+        media_rip_core::model::metadata::MetadataKind::Extras => "Extras",
+    };
+    row.append(&columns.cell(kind_name, &columns.kind, false));
+    row.append(&columns.cell(&format_duration(title.duration_ms), &columns.duration, true));
+    let size = title
+        .size_bytes
+        .map_or_else(|| "Unknown".to_owned(), format_bytes);
+    let size_cell = columns.cell(&size, &columns.size, true);
+    size_cell.set_tooltip_text(Some(if title.size_is_estimate {
+        "Estimated source size from the disc layout; output size depends on format and selected streams."
+    } else {
+        "Source size; output size depends on format and selected streams."
+    }));
+    row.append(&size_cell);
+    row.append(&columns.cell(&title.chapters.len().to_string(), &columns.chapters, true));
 
     let click = gtk::GestureClick::new();
     let callback = on_action.clone();
@@ -612,16 +673,15 @@ fn check_toggle_target(state: CheckState) -> bool {
     state == CheckState::None
 }
 
-fn select_all_row(
+fn select_all_checkbox(
     catalog: &MediaCatalog,
     on_action: Rc<dyn Fn(ContentAction)>,
     current_check_state: Rc<Cell<CheckState>>,
     updating_checks: Rc<Cell<bool>>,
-) -> (gtk::Box, gtk::CheckButton) {
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    row.add_css_class("select-all-row");
-
+) -> gtk::CheckButton {
     let selected = gtk::CheckButton::new();
+    selected.set_widget_name("select-all-content");
+    selected.update_property(&[gtk::accessible::Property::Label("Select all content")]);
     current_check_state.set(select_all_check_state(catalog));
     set_check_button_state(&selected, current_check_state.get());
     let callback = on_action.clone();
@@ -633,28 +693,7 @@ fn select_all_row(
             )));
         }
     });
-    row.append(&selected);
-
-    let labels = gtk::Box::new(gtk::Orientation::Vertical, 1);
-    labels.set_hexpand(true);
-    let label = gtk::Label::new(Some("Select all content"));
-    label.set_xalign(0.0);
-    label.add_css_class("row-title");
-    let detail = gtk::Label::new(Some("Select or deselect every title and track at once"));
-    detail.set_xalign(0.0);
-    detail.add_css_class("row-detail");
-    labels.append(&label);
-    labels.append(&detail);
-    let click = gtk::GestureClick::new();
-    click.connect_released(move |_, _, _, _| {
-        on_action(ContentAction::SetAllChecked(check_toggle_target(
-            current_check_state.get(),
-        )));
-    });
-    labels.add_controller(click);
-    row.append(&labels);
-
-    (row, selected)
+    selected
 }
 
 fn track_row(
@@ -668,6 +707,7 @@ fn track_row(
 
     let selected = gtk::CheckButton::new();
     selected.set_active(track.selected);
+    selected.set_valign(gtk::Align::Center);
     let stream_index = track.index;
     let callback = on_action.clone();
     selected.connect_toggled(move |button| {
@@ -684,10 +724,12 @@ fn track_row(
 
     let image = gtk::Image::from_icon_name(track.kind.icon_name());
     image.set_pixel_size(18);
+    image.set_valign(gtk::Align::Center);
     row.append(&image);
 
     let description = gtk::Label::new(Some(&track_description(track)));
     description.set_xalign(0.0);
+    description.set_valign(gtk::Align::Center);
     description.set_ellipsize(gtk::pango::EllipsizeMode::End);
     description.set_hexpand(true);
     row.append(&description);

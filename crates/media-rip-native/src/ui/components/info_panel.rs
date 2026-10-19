@@ -11,6 +11,7 @@ use crate::app::{EpisodeMetadataContext, Selection};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InfoAction {
+    AssignEpisodes(Vec<(u32, u32)>),
     AssignEpisode {
         title_id: u32,
         episode: u32,

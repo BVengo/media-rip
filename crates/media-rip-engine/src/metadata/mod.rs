@@ -1,9 +1,11 @@
 mod cache;
 mod discdb;
 mod embedded;
+mod identify;
 pub(crate) mod musicbrainz;
 mod pagination;
 mod report;
+mod search;
 mod tmdb;
 mod tvdb;
 mod tvmaze;
@@ -23,8 +25,18 @@ use tvmaze::{TvmazeClient, TvmazeMatch};
 
 use crate::diagnostics;
 
+pub use identify::identify_loaded_catalog;
+
+pub use search::{
+    VideoSearchCandidate, VideoSearchKind, load_video_search_artwork, search_video_metadata,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum VideoMetadataLink {
+    Tmdb {
+        id: u64,
+        media_type: MediaType,
+    },
     Tvmaze {
         show_id: u64,
     },
@@ -38,6 +50,7 @@ enum VideoMetadataLink {
 impl VideoMetadataLink {
     fn provider(&self) -> &'static str {
         match self {
+            Self::Tmdb { .. } => "TMDB",
             Self::Tvmaze { .. } => "TVMaze",
             Self::Tvdb { .. } => "TVDB",
         }
@@ -46,12 +59,13 @@ impl VideoMetadataLink {
     fn season(&self) -> Option<u32> {
         match self {
             Self::Tvdb { season, .. } => *season,
-            Self::Tvmaze { .. } => None,
+            Self::Tvmaze { .. } | Self::Tmdb { .. } => None,
         }
     }
 
     fn is_series(&self) -> bool {
         match self {
+            Self::Tmdb { media_type, .. } => *media_type == MediaType::Tv,
             Self::Tvmaze { .. } => true,
             Self::Tvdb { media_type, .. } => *media_type == TvdbMediaType::Tv,
         }
@@ -202,7 +216,7 @@ fn parse_video_metadata_link(value: &str) -> Result<VideoMetadataLink, String> {
     let value = value.trim();
     let remainder = value
         .strip_prefix("https://")
-        .ok_or_else(|| "Metadata link must be an HTTPS TVMaze or TheTVDB URL.".to_owned())?;
+        .ok_or_else(|| "Metadata link must be an HTTPS TMDB, TVMaze or TheTVDB URL.".to_owned())?;
     let (authority, path) = remainder.split_once('/').unwrap_or((remainder, ""));
     if authority.contains('@') || authority.contains(':') {
         return Err("Metadata link must use the standard HTTPS provider address.".to_owned());
@@ -217,6 +231,20 @@ fn parse_video_metadata_link(value: &str) -> Result<VideoMetadataLink, String> {
         .collect::<Vec<_>>();
 
     match host.as_str() {
+        "themoviedb.org" => {
+            let media_type = match segments.first().copied() {
+                Some("movie") => MediaType::Movie,
+                Some("tv") => MediaType::Tv,
+                _ => return Err("TMDB link must point to a movie or TV page.".to_owned()),
+            };
+            let id = segments
+                .get(1)
+                .and_then(|segment| segment.split('-').next())
+                .and_then(|id| id.parse::<u64>().ok())
+                .filter(|id| *id > 0)
+                .ok_or_else(|| "TMDB link must include a valid movie or TV ID.".to_owned())?;
+            Ok(VideoMetadataLink::Tmdb { id, media_type })
+        }
         "tvmaze.com" | "api.tvmaze.com" => {
             let show_position = segments
                 .iter()
@@ -260,7 +288,9 @@ fn parse_video_metadata_link(value: &str) -> Result<VideoMetadataLink, String> {
                 season,
             })
         }
-        _ => Err("Metadata link must be from tvmaze.com or thetvdb.com.".to_owned()),
+        _ => {
+            Err("Metadata link must be from themoviedb.org, tvmaze.com or thetvdb.com.".to_owned())
+        }
     }
 }
 
@@ -841,7 +871,8 @@ fn enrich_video_titles(
     let provider_lookup_report = [
         provider_lookup_report(
             "TMDB",
-            metadata_link.is_none()
+            (metadata_link.is_none()
+                || matches!(metadata_link, Some(VideoMetadataLink::Tmdb { .. })))
                 && options
                     .tmdb_access_token
                     .as_deref()
@@ -886,6 +917,19 @@ fn enrich_video_titles(
             .to_owned(),
         );
     }
+    // A title-only series search must not turn a dominant feature into TV.
+    // Explicit links, disc fingerprints and authored season hints take priority.
+    let structural_film = hint.is_none()
+        && discdb_match.is_none()
+        && metadata_link.is_none()
+        && titles.iter().any(|title| {
+            media_rip_core::model::metadata::inferred_video_kind(titles, title)
+                == Some(media_rip_core::model::metadata::MetadataKind::Film)
+        });
+    let tmdb_lookup = check_structural_identity(tmdb_lookup, structural_film, &mut result.warnings);
+    let tvdb_lookup = check_structural_identity(tvdb_lookup, structural_film, &mut result.warnings);
+    let tvmaze_lookup =
+        check_structural_identity(tvmaze_lookup, structural_film, &mut result.warnings);
     let (resolved, artwork, mut attributions, warnings) = reconcile_provider_lookups(
         tmdb_lookup,
         tvdb_lookup,
@@ -1454,10 +1498,11 @@ fn parallel_provider_lookups(
         .filter(|value| !value.is_empty());
 
     std::thread::scope(|scope| {
-        let tmdb_handle = metadata_link
-            .is_none()
-            .then_some(tmdb_token)
-            .flatten()
+        let tmdb_handle = tmdb_token
+            .filter(|_| {
+                metadata_link.is_none()
+                    || matches!(metadata_link, Some(VideoMetadataLink::Tmdb { .. }))
+            })
             .map(|token| {
                 scope.spawn(move || {
                     lookup_tmdb(
@@ -1467,6 +1512,7 @@ fn parallel_provider_lookups(
                         metadata_query,
                         hint,
                         discdb_match,
+                        metadata_link,
                     )
                 })
             });
@@ -1502,11 +1548,17 @@ fn parallel_provider_lookups(
                     )
                 })
             });
-        let tmdb = tmdb_handle.map_or(Ok(None), |handle| {
-            handle
-                .join()
-                .unwrap_or_else(|_| Err("TMDB lookup worker panicked".to_owned()))
-        });
+        let tmdb = if matches!(metadata_link, Some(VideoMetadataLink::Tmdb { .. }))
+            && tmdb_token.is_none()
+        {
+            Err("A TMDB read access token is required to use a TMDB metadata link.".to_owned())
+        } else {
+            tmdb_handle.map_or(Ok(None), |handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| Err("TMDB lookup worker panicked".to_owned()))
+            })
+        };
         let tvdb = if matches!(metadata_link, Some(VideoMetadataLink::Tvdb { .. }))
             && tvdb_key.is_none()
         {
@@ -1534,11 +1586,16 @@ fn lookup_tmdb(
     metadata_query: &str,
     hint: Option<DiscHint>,
     discdb_match: Option<&discdb::DiscDbMatch>,
+    metadata_link: Option<&VideoMetadataLink>,
 ) -> Result<Option<ProviderLookup>, String> {
     let client = TmdbClient::new(token, cache, cancellation);
     let mut episodes = Vec::new();
     let mut exact_review_title = true;
-    let matched = if let Some(disc) = discdb_match {
+    let matched = if let Some(VideoMetadataLink::Tmdb { id, media_type }) = metadata_link {
+        client.details(*id, *media_type)?
+    } else if metadata_link.is_some() {
+        return Ok(None);
+    } else if let Some(disc) = discdb_match {
         let Some(id) = disc.tmdb_id else {
             return Ok(None);
         };
@@ -1573,6 +1630,20 @@ fn lookup_tmdb(
         };
         found
     };
+    if episodes.is_empty()
+        && matched.media_type == MediaType::Tv
+        && let Some(hint) = hint
+    {
+        episodes = client
+            .season(matched.id, hint.season)?
+            .into_iter()
+            .map(|episode| VideoEpisode {
+                episode_number: episode.episode_number,
+                name: episode.name,
+                runtime: episode.runtime,
+            })
+            .collect();
+    }
     let mut warnings = Vec::new();
     let artwork = matched.poster_path.as_deref().and_then(|path| {
         client
@@ -1583,7 +1654,9 @@ fn lookup_tmdb(
             .ok()
     });
     Ok(Some(ProviderLookup {
-        match_method: if discdb_match.is_some() {
+        match_method: if metadata_link.is_some() {
+            "User-selected TMDB identity"
+        } else if discdb_match.is_some() {
             "TheDiscDB external ID"
         } else if hint.is_some() && exact_review_title {
             "Exact normalized title + authored season"
@@ -1801,6 +1874,24 @@ fn lookup_tvmaze(
         artwork,
         warnings,
     }))
+}
+
+fn check_structural_identity(
+    lookup: ProviderLookupResult,
+    structural_film: bool,
+    warnings: &mut Vec<String>,
+) -> ProviderLookupResult {
+    if structural_film
+        && let Ok(Some(candidate)) = &lookup
+        && candidate.matched.media_type == MediaType::Tv
+    {
+        warnings.push(format!(
+            "{} found series {:?}, but the source has a dominant film-length feature. Series metadata was withheld; use an explicit metadata link if this is television.",
+            candidate.matched.providers.join(" + "), candidate.matched.title
+        ));
+        return Ok(None);
+    }
+    lookup
 }
 
 fn reconcile_provider_lookups(
@@ -3038,6 +3129,51 @@ mod tests {
     };
 
     #[test]
+    fn structural_film_evidence_blocks_title_only_series_results() {
+        let lookup = |media_type| ProviderLookup {
+            match_method: "Exact title",
+            matched: VideoMatch {
+                providers: vec!["TVMaze"],
+                media_type,
+                title: "Same name".into(),
+                year: Some(2020),
+                runtime_minutes: Some(42),
+                tmdb_id: None,
+                tvdb_id: None,
+                tvmaze_id: Some(1),
+            },
+            episodes: Vec::new(),
+            artwork: None,
+            warnings: Vec::new(),
+        };
+        let mut warnings = Vec::new();
+        assert!(
+            super::check_structural_identity(Ok(Some(lookup(MediaType::Tv))), true, &mut warnings)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            super::check_structural_identity(
+                Ok(Some(lookup(MediaType::Movie))),
+                true,
+                &mut warnings
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert!(
+            super::check_structural_identity(Ok(Some(lookup(MediaType::Tv))), false, &mut warnings)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            super::check_structural_identity(Err("offline".into()), true, &mut warnings).is_err()
+        );
+    }
+
+    #[test]
     fn duplicate_and_suspect_dvd_paths_are_not_episode_matching_evidence() {
         let mut first = title("DVD title 65", false);
         first.duplicate_key = Some("same physical cells".to_owned());
@@ -3265,9 +3401,80 @@ mod tests {
     }
 
     #[test]
+    fn selected_tmdb_identity_bypasses_disc_title_search_and_loads_the_season() {
+        let root =
+            std::env::temp_dir().join(format!("mediarip-selected-tmdb-{}", std::process::id()));
+        let cache = super::MetadataCache::at(root.clone());
+        cache.write(
+            "tmdb-raw-v1",
+            "/movie/841?[]",
+            &serde_json::json!({
+                "id": 841, "title": "Dune", "release_date": "1984-12-14", "runtime": 137
+            }),
+        );
+        let token = media_rip_core::ports::CancellationToken::default();
+        let movie = parse_video_metadata_link("https://www.themoviedb.org/movie/841-dune").unwrap();
+        assert_eq!(movie.provider(), "TMDB");
+        assert!(!movie.is_series());
+        let matched = super::lookup_tmdb(
+            "test-token",
+            &cache,
+            &token,
+            "UNMATCHED_DISC",
+            None,
+            None,
+            Some(&movie),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(matched.matched.title, "Dune");
+        assert_eq!(matched.matched.year, Some(1984));
+        assert_eq!(matched.matched.tmdb_id, Some(841));
+        assert_eq!(matched.match_method, "User-selected TMDB identity");
+        cache.write("tmdb-raw-v1", "/tv/1399?[]", &serde_json::json!({
+            "id": 1399, "name": "Game of Thrones", "first_air_date": "2011-04-17", "episode_run_time": [60]
+        }));
+        cache.write(
+            "tmdb-raw-v1",
+            &format!(
+                "/tv/1399/season/2?{}",
+                serde_json::to_string(&[("language", "en-US")]).unwrap()
+            ),
+            &serde_json::json!({
+                "episodes": [{"episode_number": 1, "name": "The North Remembers", "runtime": 53}]
+            }),
+        );
+        let series =
+            parse_video_metadata_link("https://www.themoviedb.org/tv/1399-game-of-thrones")
+                .unwrap();
+        assert!(series.is_series());
+        let matched = super::lookup_tmdb(
+            "test-token",
+            &cache,
+            &token,
+            "UNMATCHED_DISC",
+            Some(DiscHint {
+                season: 2,
+                volume: None,
+                disc: 1,
+            }),
+            None,
+            Some(&series),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(matched.matched.tmdb_id, Some(1399));
+        assert_eq!(matched.episodes[0].name, "The North Remembers");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn metadata_links_reject_insecure_or_lookalike_hosts() {
         for value in [
             "http://www.tvmaze.com/shows/82/game-of-thrones",
+            "https://themoviedb.org.example/movie/841",
+            "https://www.themoviedb.org/movie/0",
+            "https://www.themoviedb.org/movie/not-a-number",
             "https://tvmaze.com.example/shows/82/game-of-thrones",
             "https://thetvdb.com@example.com/series/game-of-thrones",
             "https://thetvdb.com/search?q=game-of-thrones",

@@ -38,19 +38,6 @@ popover.menu modelbutton {
   padding: 6px 10px;
 }
 
-.main-toolbar {
-  min-height: 45px;
-  padding: 3px 7px;
-  background-color: @theme_bg_color;
-  border-bottom: 1px solid @borders;
-}
-
-.toolbar-button {
-  min-width: 34px;
-  min-height: 34px;
-  padding: 2px;
-}
-
 .workflow-bar {
   padding: 0;
   background-color: alpha(@theme_bg_color, 0.7);
@@ -91,36 +78,108 @@ popover.menu modelbutton {
 }
 
 .workflow-header {
-  padding: 20px 24px 12px;
+  padding: 10px 12px;
   background-color: @theme_base_color;
 }
 
 .workflow-navigation {
-  padding: 10px 20px;
+  padding: 8px 12px;
   border-top: 1px solid @borders;
   background-color: @theme_bg_color;
 }
 
 .metadata-editor {
-  padding: 18px;
+  padding: 14px 0;
+}
+
+.metadata-editor,
+.metadata-release,
+.metadata-item,
+.metadata-intro,
+.metadata-sequence-note {
+  margin-left: 12px;
+  margin-right: 12px;
+}
+
+.metadata-intro {
+  margin-top: 18px;
+  margin-bottom: 12px;
+}
+
+.metadata-release {
+  padding: 14px 0;
+  border-bottom: 1px solid alpha(@borders, 0.35);
+}
+
+.metadata-release:last-child {
+  border-bottom: 0;
 }
 
 .metadata-item {
-  margin: 8px;
-  padding: 12px;
-  border: 1px solid @borders;
-  border-radius: 8px;
+  padding: 14px 0;
+  border-bottom: 1px solid alpha(@borders, 0.35);
+}
+
+.metadata-item:last-child {
+  border-bottom: 0;
+}
+
+.metadata-item .metadata-review-row {
+  padding: 0 0 8px;
+  border-bottom: 0;
+}
+
+.metadata-sequence-controls {
+  padding: 0;
+}
+
+.metadata-sequence-note {
+  margin-top: 12px;
+}
+
+.episode-assignment-table {
+  margin: 0;
+}
+
+.episode-column-heading {
+  padding: 8px 12px;
+  min-height: 26px;
+  font-weight: 600;
+  color: @theme_fg_color;
   background-color: @theme_bg_color;
+  border-bottom: 1px solid @borders;
+}
+
+.episode-source {
+  min-width: 80px;
+  padding: 8px 12px;
+}
+
+.episode-name {
+  padding: 8px 12px;
+}
+
+.episode-details {
+  padding: 12px 32px;
+}
+
+.episode-chooser {
+  margin: 10px 0;
+}
+
+.episode-row-separator {
+  background-color: alpha(@borders, 0.3);
+  min-height: 1px;
 }
 
 .workflow-page {
-  padding: 10px;
+  padding: 0;
   background-color: @theme_base_color;
   color: @theme_text_color;
 }
 
 .source-picker {
-  min-width: 620px;
+  min-width: 0;
   padding: 24px;
 }
 
@@ -163,20 +222,19 @@ popover.menu modelbutton {
 .metadata-controls,
 .metadata-actions {
   min-height: 44px;
-  padding: 6px 10px;
-  background-color: @theme_bg_color;
+  padding: 6px 12px;
 }
 
 .metadata-controls {
-  border-bottom: 1px solid @borders;
+  border-bottom: 1px solid alpha(@borders, 0.35);
 }
 
 .metadata-actions {
-  border-top: 1px solid @borders;
+  border-top: 1px solid alpha(@borders, 0.35);
 }
 
 .metadata-scroll {
-  margin-right: 4px;
+  margin-right: 0;
 }
 
 .inline-empty-state {
@@ -191,13 +249,10 @@ popover.menu modelbutton {
 
 .output-layout {
   background-color: @theme_base_color;
-  border: 1px solid @borders;
-  border-radius: 6px;
 }
 
 .output-config {
   background-color: @theme_bg_color;
-  border-radius: 0 5px 5px 0;
 }
 
 .output-layout > separator {
@@ -209,7 +264,6 @@ popover.menu modelbutton {
   padding: 12px;
   border-top: 1px solid @borders;
   background-color: @theme_bg_color;
-  border-radius: 0 0 5px 0;
 }
 
 .source-label {
@@ -260,18 +314,28 @@ popover.menu modelbutton {
   border-bottom: 1px solid alpha(@borders, 0.55);
 }
 
+.content-table-heading,
+.output-table-heading {
+  min-height: 26px;
+  padding: 8px 7px;
+  font-weight: 600;
+  background-color: @theme_bg_color;
+  color: @theme_fg_color;
+  border-bottom: 1px solid @borders;
+}
+
+.output-table-heading {
+  padding: 8px 10px;
+}
+
+.numeric-cell {
+  font-feature-settings: "tnum";
+}
+
 .title-expander {
   min-width: 28px;
   min-height: 28px;
   padding: 0;
-}
-
-.select-all-row {
-  min-height: 40px;
-  padding: 4px 11px;
-  color: @theme_text_color;
-  background-color: alpha(@theme_bg_color, 0.7);
-  border-bottom: 1px solid @borders;
 }
 
 .title-row:hover,
@@ -293,7 +357,7 @@ popover.menu modelbutton {
 
 .track-row {
   min-height: 30px;
-  padding: 1px 5px 1px 37px;
+  padding: 5px 12px 5px 37px;
   color: @theme_text_color;
   background-color: @theme_base_color;
   border-bottom: 1px solid alpha(@borders, 0.4);
@@ -325,7 +389,7 @@ popover.menu modelbutton {
 }
 
 .row-detail {
-  color: alpha(@theme_text_color, 0.72);
+  color: alpha(currentColor, 0.78);
   font-size: 0.92em;
 }
 
@@ -434,14 +498,10 @@ popover.menu modelbutton {
 }
 
 .activity-panel {
-  margin-bottom: 4px;
-  border: 1px solid @borders;
-  border-radius: 5px;
+  background-color: @theme_base_color;
 }
 
 .activity-toggle {
-  min-height: 30px;
-  margin: 4px;
   padding: 3px 9px;
   font-weight: 600;
 }
@@ -467,8 +527,6 @@ popover.menu modelbutton {
 }
 
 .preflight-files {
-  border: 1px solid @borders;
-  border-radius: 6px;
   background-color: @theme_base_color;
 }
 
@@ -481,33 +539,8 @@ popover.menu modelbutton {
   border-bottom: 0;
 }
 
-.preflight-file-row:first-child {
-  border-radius: 5px 5px 0 0;
-}
-
-.preflight-file-row:last-child {
-  border-radius: 0 0 5px 5px;
-}
-
-.preflight-file-row:only-child {
-  border-radius: 5px;
-}
-
 .output-review {
-  padding: 12px;
   background-color: @theme_base_color;
-  border-radius: 5px 0 0 5px;
-}
-
-.output-job {
-  padding: 10px 12px;
-  border: 1px solid @borders;
-  border-radius: 6px;
-  background-color: @theme_bg_color;
-}
-
-.output-job-status {
-  font-weight: 700;
 }
 
 .output-file-status {
@@ -519,9 +552,33 @@ popover.menu modelbutton {
   background-color: alpha(@success_color, 0.08);
 }
 
-.output-cancel {
-  min-height: 28px;
-  padding: 2px 10px;
+.metadata-suggestions {
+  padding: 0;
+}
+
+.metadata-table-heading {
+  min-height: 26px;
+  padding: 8px 10px;
+  font-weight: 600;
+  color: @theme_fg_color;
+  background-color: @theme_bg_color;
+  border-bottom: 1px solid @borders;
+}
+
+.metadata-suggestion {
+  border-bottom: 1px solid alpha(@borders, 0.55);
+}
+
+.metadata-suggestion:last-child {
+  border-bottom: 0;
+}
+
+.metadata-suggestion .metadata-review-row {
+  border-bottom: 0;
+}
+
+.metadata-suggestion-details {
+  padding: 6px 16px 14px;
 }
 
 .metadata-review-row {
@@ -587,7 +644,7 @@ popover.menu modelbutton {
 
 .settings-nav-button:checked {
   background-color: alpha(@theme_selected_bg_color, 0.23);
-  color: @theme_selected_fg_color;
+  color: @theme_fg_color;
 }
 
 .settings-nav-title {
@@ -620,7 +677,7 @@ popover.menu modelbutton {
   padding: 3px 8px;
   border-radius: 999px;
   color: @theme_selected_fg_color;
-  background-color: alpha(@theme_selected_bg_color, 0.75);
+  background-color: @theme_selected_bg_color;
   font-size: 0.82em;
   font-weight: 700;
 }

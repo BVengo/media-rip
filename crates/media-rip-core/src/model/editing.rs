@@ -179,6 +179,7 @@ pub fn set_tag(
                     "film" => metadata.content_type = Some("film".to_owned()),
                     "television" => metadata.content_type = Some("tv".to_owned()),
                     "video" => metadata.content_type = Some("video".to_owned()),
+                    "extras" => metadata.content_type = Some("extras".to_owned()),
                     _ => {}
                 },
                 _ => {}

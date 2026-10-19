@@ -504,15 +504,17 @@ impl AppSettings {
                 .tags
                 .iter()
                 .any(|tag| tag.key.eq_ignore_ascii_case("media_type"));
-            let confirmed_film =
-                kind == MetadataKind::Film && (explicit_type || title.video_metadata.is_some());
+            let has_entered_title = title
+                .tags
+                .iter()
+                .any(|tag| tag.key.eq_ignore_ascii_case("title") && !tag.value.trim().is_empty());
+            let confirmed_film = kind == MetadataKind::Film
+                && (explicit_type || title.video_metadata.is_some() || has_entered_title);
             let manual_feature = kind == MetadataKind::Video
                 && title.is_main_title
                 && !explicit_type
                 && title.video_metadata.is_none()
-                && title.tags.iter().any(|tag| {
-                    tag.key.eq_ignore_ascii_case("title") && !tag.value.trim().is_empty()
-                });
+                && has_entered_title;
             if !confirmed_film && !manual_feature {
                 continue;
             }
@@ -1475,6 +1477,44 @@ mod tests {
         catalog.titles[0].name = "Changed".into();
         settings.refresh_movie_file_names(&mut catalog, &previous, "mkv");
         assert_eq!(catalog.titles[0].output_file, "custom.mkv");
+    }
+
+    #[test]
+    fn inferred_film_names_follow_entered_title_and_release_date() {
+        use media_rip_core::{MediaTag, model::editing::set_tag};
+        let mut catalog = catalog_with_duplicate_playlists();
+        catalog.titles.truncate(1);
+        catalog.titles[0].duration_ms = 90 * 60_000;
+        catalog.titles[0].is_main_title = false;
+        catalog.titles[0].video_metadata = None;
+        catalog.titles[0].tags.clear();
+        let settings = AppSettings::default();
+        let previous = catalog.clone();
+        set_tag(&mut catalog, 0, "title", "Entered film", false, "", "mkv");
+        settings.refresh_movie_file_names(&mut catalog, &previous, "mkv");
+        assert_eq!(catalog.titles[0].output_file, "Entered film.mkv");
+        let previous = catalog.clone();
+        set_tag(&mut catalog, 0, "date", "2025-04-12", false, "", "mkv");
+        settings.refresh_movie_file_names(&mut catalog, &previous, "mkv");
+        assert_eq!(catalog.titles[0].output_file, "Entered film (2025).mkv");
+        let previous = catalog.clone();
+        set_tag(&mut catalog, 0, "title", "Corrected film", false, "", "mkv");
+        settings.refresh_movie_file_names(&mut catalog, &previous, "mkv");
+        assert_eq!(catalog.titles[0].output_file, "Corrected film (2025).mkv");
+        catalog.titles[0].output_file = "My filename.mkv".into();
+        let previous = catalog.clone();
+        set_tag(&mut catalog, 0, "date", "2026", false, "", "mkv");
+        settings.refresh_movie_file_names(&mut catalog, &previous, "mkv");
+        assert_eq!(catalog.titles[0].output_file, "My filename.mkv");
+        // Explicit video and extras classifications still suppress film naming.
+        for kind in ["video", "extras"] {
+            catalog.titles[0].tags = vec![
+                MediaTag::new("media_type", kind),
+                MediaTag::new("title", "Generic video"),
+            ];
+            settings.apply_movie_file_names(&mut catalog, "mkv");
+            assert_eq!(catalog.titles[0].output_file, "My filename.mkv");
+        }
     }
 
     #[test]

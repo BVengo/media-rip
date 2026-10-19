@@ -303,6 +303,77 @@ fn dvd_defaults_only_select_unique_structurally_checked_paths() {
     assert_eq!(serde_json::from_str::<MediaCatalog>(&json).unwrap(), source);
 }
 
+#[test]
+fn unidentified_video_uses_playback_evidence_without_assigning_identity() {
+    use media_rip_core::model::metadata::{MetadataKind, inferred_video_kind};
+    let mut source = catalog(DiscKind::Dvd);
+    source.titles[0].duration_ms = 120 * 60_000;
+    let mut bonus = source.titles[0].clone();
+    bonus.id = 1;
+    bonus.duration_ms = 10 * 60_000;
+    source.titles.push(bonus);
+    assert_eq!(
+        MetadataKind::for_title(&source, &source.titles[0]),
+        MetadataKind::Film
+    );
+    assert_eq!(
+        MetadataKind::for_title(&source, &source.titles[1]),
+        MetadataKind::Video
+    );
+    assert!(source.titles[0].video_metadata.is_none());
+    assert!(source.titles[0].tags.is_empty());
+
+    // A duplicate feature does not obscure the comparison.
+    source.titles[0].duplicate_key = Some("feature".into());
+    let mut duplicate = source.titles[0].clone();
+    duplicate.id = 2;
+    source.titles.push(duplicate);
+    assert_eq!(
+        inferred_video_kind(&source.titles, &source.titles[2]),
+        Some(MetadataKind::Film)
+    );
+
+    // Explicit user classification overrides structural guesses.
+    source.titles[0]
+        .tags
+        .push(MediaTag::new("media_type", "video"));
+    assert_eq!(
+        MetadataKind::for_title(&source, &source.titles[0]),
+        MetadataKind::Video
+    );
+
+    // Play-all is not a film; comparable episode paths get TV fields.
+    source.titles[0].tags.clear();
+    source.titles[0].duplicate_key = None;
+    source.titles[2].duplicate_key = None;
+    source.titles[0].duration_ms = 84 * 60_000;
+    source.titles[1].duration_ms = 42 * 60_000;
+    source.titles[2].duration_ms = 42 * 60_000;
+    assert_eq!(
+        MetadataKind::for_title(&source, &source.titles[0]),
+        MetadataKind::Video
+    );
+    assert_eq!(
+        MetadataKind::for_title(&source, &source.titles[1]),
+        MetadataKind::Television
+    );
+    assert_eq!(
+        MetadataKind::for_title(&source, &source.titles[2]),
+        MetadataKind::Television
+    );
+
+    source.titles[0].duration_ms += 30_000;
+    assert_eq!(
+        MetadataKind::for_title(&source, &source.titles[0]),
+        MetadataKind::Video
+    );
+
+    // Repeated paths do not constitute evidence of an episode collection.
+    source.titles[1].duplicate_key = Some("episode".into());
+    source.titles[2].duplicate_key = Some("episode".into());
+    assert_eq!(inferred_video_kind(&source.titles, &source.titles[1]), None);
+}
+
 fn widgets<W: IsA<gtk::Widget> + Clone + 'static>(root: &impl IsA<gtk::Widget>) -> Vec<W> {
     let root = root.as_ref();
     let mut found = root
@@ -345,6 +416,246 @@ fn gtk_workflows() {
     };
     controller.bind_controls();
     controller.ui.window.present();
+    crate::ui::IdentificationDialog::test_selection(&controller.ui.window);
+    let identified = catalog(DiscKind::Dvd);
+    let output_directory = PathBuf::from("/tmp/custom-movie-output");
+    {
+        let mut state = controller.state.borrow_mut();
+        state.catalog = Some(identified.clone());
+        state.busy = BusyState::Scanning;
+        state.output_directory = output_directory.clone();
+        state.selection = Selection::Track {
+            title_id: 0,
+            stream_index: 0,
+        };
+        state.expanded_titles.insert(0);
+    }
+    controller.handle_event(EngineEvent::MetadataIdentified(Box::new(
+        identified.clone(),
+    )));
+    {
+        let state = controller.state.borrow();
+        assert_eq!(state.catalog.as_ref().unwrap().titles, identified.titles);
+        assert_eq!(state.output_directory, output_directory);
+        assert_eq!(
+            state.selection,
+            Selection::Track {
+                title_id: 0,
+                stream_index: 0
+            }
+        );
+        assert!(state.expanded_titles.contains(&0));
+        assert!(!state.is_busy());
+    }
+    // Failed automatic identification asks before leaving Identify.
+    controller.handle_event(EngineEvent::ScanFinished(Box::new(catalog(DiscKind::Dvd))));
+    assert_eq!(
+        controller.ui.workflow_stack.visible_child_name().as_deref(),
+        Some("identify")
+    );
+    assert!(
+        controller
+            .ui
+            .source
+            .identity_status
+            .text()
+            .contains("No metadata found")
+    );
+
+    let unidentified_dialog = || {
+        gtk::Window::list_toplevels()
+            .into_iter()
+            .filter_map(|widget| widget.downcast::<gtk::MessageDialog>().ok())
+            .find(|dialog| dialog.widget_name() == "unidentified-source" && dialog.is_visible())
+            .unwrap()
+    };
+    unidentified_dialog().response(gtk::ResponseType::Accept);
+    let search = gtk::Window::list_toplevels()
+        .into_iter()
+        .filter_map(|widget| widget.downcast::<gtk::Dialog>().ok())
+        .find(|dialog| {
+            dialog.title().as_deref() == Some("Change identification") && dialog.is_visible()
+        })
+        .unwrap();
+    search.response(gtk::ResponseType::Cancel);
+    assert_eq!(
+        controller.ui.workflow_stack.visible_child_name().as_deref(),
+        Some("select")
+    );
+    controller.handle_event(EngineEvent::ScanFinished(Box::new(catalog(DiscKind::Dvd))));
+    unidentified_dialog().response(gtk::ResponseType::Cancel);
+    assert_eq!(
+        controller.ui.workflow_stack.visible_child_name().as_deref(),
+        Some("select")
+    );
+    let checks = widgets::<gtk::CheckButton>(&controller.ui.content.stack);
+    let select_all = checks
+        .iter()
+        .find(|check| check.widget_name() == "select-all-content")
+        .unwrap();
+    assert!(
+        select_all
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .has_css_class("content-table-heading")
+    );
+
+    let mut series = catalog(DiscKind::Dvd);
+    series.source.name = "Orphan Black".into();
+    series.titles[0].name = "DVD title 3 · VTS 01, title 3".into();
+    series.titles[0].disc_title_number = Some(3);
+    let mut second = series.titles[0].clone();
+    second.id = 1;
+    second.disc_title_number = Some(4);
+    second.source_title_id = "2".into();
+    second.name = "DVD title 4 · VTS 01, title 4".into();
+    second.output_file = "second.mkv".into();
+    series.titles.push(second);
+    let mut identity = video_metadata("Episode");
+    identity.season = Some(2);
+    series.video_episode_context = Some(media_rip_core::VideoEpisodeContext {
+        metadata: identity,
+        choices: [
+            "Variable and Full of Perturbation",
+            "Things Which Have Never Yet Been Done",
+            "By Means Which Have Never Yet Been Tried",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let episode = index as u32 + 8;
+            media_rip_core::VideoEpisodeChoice {
+                episode,
+                name: format!("Orphan Black - S02E{episode:02} - {name}"),
+                tags: vec![
+                    MediaTag::new("title", name),
+                    MediaTag::new("episode_id", episode.to_string()),
+                ],
+            }
+        })
+        .collect(),
+    });
+    let context = series.video_episode_context.as_ref().unwrap();
+    series.video_metadata_suggestions = series
+        .titles
+        .iter()
+        .zip(&context.choices)
+        .map(|(title, choice)| {
+            let mut metadata = context.metadata.clone();
+            metadata.episode = Some(choice.episode);
+            VideoMetadataSuggestion {
+                title_id: title.id,
+                name: choice.name.clone(),
+                tags: choice.tags.clone(),
+                metadata,
+                evidence: vec!["Compatible runtime".into()],
+                assumptions: vec!["Disc titles are in episode order".into()],
+                episode_choices: context.choices.clone(),
+            }
+        })
+        .collect();
+    controller.handle_event(EngineEvent::ScanFinished(Box::new(series)));
+    controller.ui.workflow_metadata_button.emit_clicked();
+    let chooser = |id: u32| {
+        widgets::<gtk::DropDown>(&controller.ui.metadata.root)
+            .into_iter()
+            .find(|widget| widget.widget_name() == format!("episode-assignment-{id}"))
+            .unwrap()
+    };
+    assert_eq!(chooser(0).selected(), 1);
+    assert_eq!(chooser(1).selected(), 2);
+    capture_workflow(&controller, "episode-proposals");
+    capture_workflow(&controller, "episode-proposals-narrow");
+    assert!(!controller.ui.workflow_next.is_visible());
+    let details = |id: u32| {
+        widgets::<gtk::ToggleButton>(&controller.ui.metadata.root)
+            .into_iter()
+            .find(|button| button.widget_name() == format!("episode-details-{id}"))
+            .unwrap()
+    };
+    let editor = |id: u32| {
+        widgets::<gtk::Box>(&controller.ui.metadata.root)
+            .into_iter()
+            .find(|editor| editor.widget_name() == format!("episode-editor-{id}"))
+            .unwrap()
+    };
+    assert!(!details(0).is_active());
+    assert!(!editor(0).is_visible());
+    details(0).set_active(true);
+    assert!(editor(0).is_visible());
+    assert!(!editor(1).is_visible());
+    capture_workflow(&controller, "episode-row-details");
+    details(0).set_active(false);
+    assert!(!editor(0).is_visible());
+    chooser(1).set_selected(3);
+    assert_eq!(
+        widgets::<gtk::Label>(&controller.ui.metadata.root)
+            .into_iter()
+            .find(|label| label.widget_name() == "episode-name-1")
+            .unwrap()
+            .text(),
+        "By Means Which Have Never Yet Been Tried"
+    );
+    chooser(0).set_selected(1);
+    controller.handle_info_action(InfoAction::AssignEpisode {
+        title_id: 0,
+        episode: 8,
+    });
+    assert_eq!(
+        chooser(1).selected(),
+        3,
+        "assigning one title preserves another title's pending choice"
+    );
+    let first = widgets::<gtk::Entry>(&controller.ui.metadata.root)
+        .into_iter()
+        .find(|entry| entry.widget_name() == "sequence-first-episode")
+        .unwrap();
+    first.set_text("10");
+    widgets::<gtk::Button>(&controller.ui.metadata.root)
+        .into_iter()
+        .find(|button| button.label().as_deref() == Some("Fill in disc order"))
+        .unwrap()
+        .emit_clicked();
+    assert_eq!(
+        chooser(1).selected(),
+        3,
+        "an incomplete sequence must preserve pending choices"
+    );
+    assert!(metadata_has_label(&controller, "enough remaining episodes"));
+    first.set_text("8");
+    widgets::<gtk::Button>(&controller.ui.metadata.root)
+        .into_iter()
+        .find(|button| button.label().as_deref() == Some("Fill in disc order"))
+        .unwrap()
+        .emit_clicked();
+    assert_eq!(chooser(0).selected(), 1);
+    assert_eq!(chooser(1).selected(), 2);
+    assert!(metadata_has_label(
+        &controller,
+        "Things Which Have Never Yet Been Done"
+    ));
+    assert!(!metadata_has_label(&controller, "No episode assigned"));
+    assert!(
+        widgets::<gtk::Button>(&controller.ui.metadata.root)
+            .iter()
+            .all(|button| button.label().as_deref() != Some("Assign"))
+    );
+    capture_workflow(&controller, "episode-assignment-review");
+    widgets::<gtk::Button>(&controller.ui.metadata.root)
+        .into_iter()
+        .find(|button| button.label().as_deref() == Some("Apply episode metadata"))
+        .unwrap()
+        .emit_clicked();
+    {
+        let state = controller.state.borrow();
+        let titles = &state.catalog.as_ref().unwrap().titles;
+        assert_eq!(titles[0].video_metadata.as_ref().unwrap().episode, Some(8));
+        assert_eq!(titles[1].video_metadata.as_ref().unwrap().episode, Some(9));
+    }
+    capture_workflow(&controller, "episode-assignments");
+    *controller.state.borrow_mut() = AppState::default();
     for kind in [
         DiscKind::Dvd,
         DiscKind::BluRay,
@@ -353,6 +664,13 @@ fn gtk_workflows() {
     ] {
         controller.state.borrow_mut().busy = BusyState::Scanning;
         controller.handle_event(EngineEvent::ScanFinished(Box::new(catalog(kind))));
+        for dialog in gtk::Window::list_toplevels()
+            .into_iter()
+            .filter_map(|widget| widget.downcast::<gtk::MessageDialog>().ok())
+            .filter(|dialog| dialog.widget_name() == "unidentified-source" && dialog.is_visible())
+        {
+            dialog.response(gtk::ResponseType::Cancel);
+        }
         assert!(!controller.state.borrow().is_busy());
         assert!(controller.state.borrow().metadata_step_complete);
         controller.ui.workflow_metadata_button.emit_clicked();
@@ -370,6 +688,23 @@ fn gtk_workflows() {
         );
     }
 
+    let mut table_source = catalog(DiscKind::Dvd);
+    table_source.titles[0].duration_ms = 120 * 60_000;
+    table_source.titles[0].size_bytes = Some(4_000_000_000);
+    table_source.titles[0].name =
+        "A long film title that must shrink without pushing the length and size off the screen"
+            .into();
+    controller.handle_event(EngineEvent::ScanFinished(Box::new(table_source)));
+    controller.ui.workflow_select_button.emit_clicked();
+    let labels = widgets::<gtk::Label>(&controller.ui.content.stack);
+    for text in ["Length", "Size", "Chapters", "Type", "Film", "2:00:00"] {
+        assert!(
+            labels.iter().any(|label| label.text() == text),
+            "Missing table value: {text}"
+        );
+    }
+    capture_workflow(&controller, "selection-table");
+
     let mut film = catalog(DiscKind::Dvd);
     film.titles[0].video_metadata = Some(video_metadata("MainMovie"));
     // A previous TV identity must not leak controls into a confirmed film.
@@ -383,6 +718,12 @@ fn gtk_workflows() {
     controller.handle_event(EngineEvent::ScanFinished(Box::new(film)));
     controller.ui.workflow_metadata_button.emit_clicked();
     assert!(metadata_has_label(&controller, "Film metadata"));
+    assert!(
+        !widgets::<gtk::Grid>(&controller.ui.metadata.root)
+            .iter()
+            .any(|grid| grid.has_css_class("episode-assignment-table"))
+    );
+    assert!(controller.ui.workflow_next.is_visible());
     assert!(!metadata_has_label(&controller, "Episode assignments"));
     assert!(!metadata_has_label(&controller, "No episode metadata"));
     capture_workflow(&controller, "film-metadata");
@@ -414,6 +755,12 @@ fn gtk_workflows() {
     ))));
     controller.ui.workflow_metadata_button.emit_clicked();
     assert!(metadata_has_label(&controller, "Album artist"));
+    assert!(controller.ui.workflow_next.is_visible());
+    assert!(
+        !widgets::<gtk::Grid>(&controller.ui.metadata.root)
+            .iter()
+            .any(|grid| grid.has_css_class("episode-assignment-table"))
+    );
     assert!(!metadata_has_label(&controller, "Narrator"));
     capture_workflow(&controller, "music-metadata");
     widgets::<gtk::DropDown>(&controller.ui.metadata.root)[0].set_selected(1);
@@ -421,6 +768,16 @@ fn gtk_workflows() {
     assert!(metadata_has_label(&controller, "Author"));
     capture_workflow(&controller, "audiobook-metadata");
     assert!(!metadata_has_label(&controller, "Album artist"));
+    widgets::<gtk::Entry>(&controller.ui.metadata.root)
+        .into_iter()
+        .find(|entry| entry.text() == "Original title")
+        .unwrap()
+        .set_text("Chapter Two");
+    assert_eq!(
+        controller.state.borrow().catalog.as_ref().unwrap().titles[0].name,
+        "Chapter Two"
+    );
+    assert!(controller.ui.workflow_next.is_sensitive());
     controller.state.borrow_mut().busy = BusyState::Ripping;
     controller.render();
     assert!(controller.ui.metadata.root.is_sensitive());
@@ -430,6 +787,67 @@ fn gtk_workflows() {
             .all(|entry| !entry.is_sensitive())
     );
     controller.handle_event(EngineEvent::RipCancelled);
+
+    // Shared editing on music CDs remains available alongside the TV redesign.
+    let mut music_cd = catalog(DiscKind::AudioCd);
+    let base_track = music_cd.titles[0].clone();
+    music_cd.titles = (0..3)
+        .map(|id| {
+            let mut title = base_track.clone();
+            title.id = id;
+            title.name = format!("Track {}", id + 1);
+            title.source_title_id = (id + 1).to_string();
+            title.output_file = format!("track-{id}.flac");
+            title.tags = vec![MediaTag::new("album", "Test album")];
+            title
+        })
+        .collect();
+    controller.handle_event(EngineEvent::ScanFinished(Box::new(music_cd)));
+    controller.ui.workflow_metadata_button.emit_clicked();
+    let first_track = widgets::<gtk::Expander>(&controller.ui.metadata.root)
+        .into_iter()
+        .find(|expander| {
+            expander
+                .label()
+                .is_some_and(|label| label.contains("Track 1"))
+        })
+        .unwrap();
+    first_track.set_expanded(true);
+    let album = widgets::<gtk::Entry>(&controller.ui.metadata.root)
+        .into_iter()
+        .find(|entry| entry.text() == "Test album")
+        .unwrap();
+    album.set_text("Corrected album");
+    widgets::<gtk::Button>(&album.parent().unwrap())
+        .into_iter()
+        .find(|button| button.label().as_deref() == Some("Apply to selected"))
+        .unwrap()
+        .emit_clicked();
+    assert!(
+        controller
+            .state
+            .borrow()
+            .catalog
+            .as_ref()
+            .unwrap()
+            .titles
+            .iter()
+            .all(|title| title
+                .tags
+                .contains(&MediaTag::new("album", "Corrected album")))
+    );
+    assert!(controller.ui.workflow_next.is_visible());
+    assert!(controller.ui.workflow_next.is_sensitive());
+    widgets::<gtk::Expander>(&controller.ui.metadata.root)
+        .into_iter()
+        .find(|expander| {
+            expander
+                .label()
+                .is_some_and(|label| label.contains("Track 1"))
+        })
+        .unwrap()
+        .set_expanded(true);
+    capture_workflow(&controller, "music-metadata-multiple");
 
     let mut audio_file = catalog(DiscKind::File);
     audio_file.titles[0].tracks[0].kind = StreamKind::Audio;
@@ -472,7 +890,13 @@ fn gtk_workflows() {
     assert!(!controller.ui.workflow_output_button.is_sensitive());
     controller.ui.workflow_metadata_button.emit_clicked();
     assert!(!controller.ui.workflow_next.is_sensitive());
-    controller.handle_content_action(ContentAction::ApplyAudioCandidate("edition:1".into()));
+    assert!(!controller.ui.workflow_next.is_visible());
+    capture_workflow(&controller, "cd-release-choice");
+    widgets::<gtk::Button>(&controller.ui.metadata.root)
+        .into_iter()
+        .find(|button| button.label().as_deref() == Some("Use this release"))
+        .unwrap()
+        .emit_clicked();
     assert!(controller.state.borrow().metadata_step_complete);
     assert_eq!(
         controller.state.borrow().catalog.as_ref().unwrap().titles[0].name,
@@ -509,6 +933,42 @@ fn gtk_workflows() {
         });
     controller.handle_event(EngineEvent::ScanFinished(Box::new(dvd)));
     assert!(!controller.state.borrow().metadata_step_complete);
+    controller.ui.workflow_metadata_button.emit_clicked();
+    assert!(metadata_has_label(&controller, "Current"));
+    assert!(metadata_has_label(&controller, "Proposed"));
+    assert!(
+        widgets::<gtk::Label>(&controller.ui.metadata.root)
+            .iter()
+            .all(|label| !label.text().contains('→'))
+    );
+    capture_workflow(&controller, "metadata-suggestions");
+    let details = widgets::<gtk::ToggleButton>(&controller.ui.metadata.root)
+        .into_iter()
+        .find(|button| button.widget_name() == "metadata-details-0")
+        .unwrap();
+    let evidence = widgets::<gtk::Box>(&controller.ui.metadata.root)
+        .into_iter()
+        .find(|widget| widget.has_css_class("metadata-suggestion-details"))
+        .unwrap();
+    assert!(!evidence.is_visible());
+    details.set_active(true);
+    assert!(evidence.is_visible());
+    capture_workflow(&controller, "metadata-suggestion-details");
+    let proposal_catalog = controller.state.borrow().catalog.clone().unwrap();
+    let proposal_check = widgets::<gtk::CheckButton>(&controller.ui.metadata.root)[0].clone();
+    proposal_check.set_active(false);
+    widgets::<gtk::Button>(&controller.ui.metadata.root)
+        .into_iter()
+        .find(|button| button.label().as_deref() == Some("Apply selected changes"))
+        .unwrap()
+        .emit_clicked();
+    assert!(
+        controller.state.borrow().catalog.as_ref().unwrap().titles[0]
+            .video_metadata
+            .is_none()
+    );
+    // Reload the proposal to verify both rejecting and accepting it.
+    controller.handle_event(EngineEvent::ScanFinished(Box::new(proposal_catalog)));
     controller.handle_content_action(ContentAction::ApplySuggestions(vec![0]));
     assert_eq!(
         controller.state.borrow().catalog.as_ref().unwrap().titles[0]
@@ -663,6 +1123,66 @@ fn gtk_workflows() {
             Some("identify")
         );
     }
+    let mut source = catalog(DiscKind::File);
+    let mut second = source.titles[0].clone();
+    second.id = 1;
+    second.output_file = "second.mkv".into();
+    source.titles.push(second);
+    controller.handle_event(EngineEvent::ScanFinished(Box::new(source.clone())));
+    controller.ui.workflow_output_button.emit_clicked();
+    let request = RipRequest::from_catalog(source, PathBuf::from("/tmp/ui-rip-progress"), false);
+    controller.state.borrow_mut().busy = BusyState::Ripping;
+    controller.ui.set_busy(true);
+    controller.ui.output_review.start_job(&request);
+    controller.handle_event(EngineEvent::TitleFinished(media_rip_core::RipTitleResult {
+        title_id: 0,
+        title_name: "First file".into(),
+        destination: request
+            .output_directory
+            .join(&request.selections[0].output_file),
+        bytes_written: Some(2_000_000),
+    }));
+    controller.handle_event(EngineEvent::RipProgress(media_rip_core::RipProgress {
+        current_title: 2,
+        title_count: 2,
+        title_name: "Second file".into(),
+        fraction: 0.5,
+        bytes_written: Some(1_000_000),
+        read_rate_bytes: None,
+        elapsed_seconds: 30,
+        remaining_seconds: None,
+        destination: request.output_directory.join("second.mkv"),
+    }));
+    assert_eq!(controller.ui.progress.fraction(), 0.75);
+    let file_bars = widgets::<gtk::ProgressBar>(&controller.ui.output_review.root);
+    assert_eq!(file_bars.len(), 2);
+    assert_eq!(file_bars.iter().filter(|bar| bar.is_visible()).count(), 1);
+    assert!(
+        !widgets::<gtk::Button>(&controller.ui.output_review.root)
+            .iter()
+            .any(|button| button.label().as_deref() == Some("Cancel"))
+    );
+    capture_workflow(&controller, "ripping-output");
+    controller.handle_event(EngineEvent::RipPhaseChanged {
+        phase: media_rip_core::RipPhase::Finalising,
+        title_name: "Second file".into(),
+    });
+    assert_eq!(controller.ui.progress.fraction(), 0.75);
+    controller
+        .ui
+        .output_review
+        .finish_file(&media_rip_core::RipTitleResult {
+            title_id: 1,
+            title_name: "Second file".into(),
+            destination: request.output_directory.join("second.mkv"),
+            bytes_written: Some(2_000_000),
+        });
+    assert!(file_bars.iter().all(|bar| !bar.is_visible()));
+    controller
+        .ui
+        .output_review
+        .interrupt_job("Cancelled", false);
+    controller.finish_busy();
     SettingsDialog::exercise_workflow(&controller.ui.window);
     controller.ui.window.close();
 }
@@ -679,6 +1199,7 @@ fn manual_video_type_overrides_disc_series_context() {
         ("video", MetadataKind::Video),
         ("film", MetadataKind::Film),
         ("television", MetadataKind::Television),
+        ("extras", MetadataKind::Extras),
     ] {
         set_tag(&mut source, 0, "media_type", value, false, "", "mkv");
         assert_eq!(
@@ -739,7 +1260,7 @@ fn confirmed_film_and_extras_override_stale_television_tags() {
     ];
     for (role, kind) in [
         ("MainMovie", MetadataKind::Film),
-        ("extra", MetadataKind::Video),
+        ("extra", MetadataKind::Extras),
     ] {
         source.titles[0].video_metadata = Some(video_metadata(role));
         assert_eq!(MetadataKind::for_title(&source, &source.titles[0]), kind);
@@ -753,6 +1274,15 @@ fn capture_workflow(controller: &Controller, name: &str) {
     let directory = PathBuf::from(directory);
     std::fs::create_dir_all(&directory).unwrap();
     let window = &controller.ui.window;
+    let width = if name.ends_with("-narrow") {
+        820
+    } else if name.starts_with("episode-") {
+        1010
+    } else {
+        1120
+    };
+    window.set_size_request(width, 700);
+    window.set_default_size(width, 700);
     let main_loop = gtk::glib::MainLoop::new(None, false);
     let stop = main_loop.clone();
     gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(200), move || stop.quit());

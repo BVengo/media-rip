@@ -132,27 +132,6 @@ impl Controller {
         {
             let this = self.clone();
             self.ui
-                .toolbar
-                .open_file
-                .connect_clicked(move |_| this.choose_source(false));
-        }
-        {
-            let this = self.clone();
-            self.ui
-                .toolbar
-                .open_folder
-                .connect_clicked(move |_| this.choose_source(true));
-        }
-        {
-            let this = self.clone();
-            self.ui
-                .toolbar
-                .open_disc
-                .connect_clicked(move |_| this.open_selected_disc());
-        }
-        {
-            let this = self.clone();
-            self.ui
                 .source
                 .open
                 .connect_clicked(move |_| this.open_selected_disc());
@@ -177,27 +156,6 @@ impl Controller {
                 .content
                 .idle_open
                 .connect_clicked(move |_| this.open_selected_disc());
-        }
-        {
-            let this = self.clone();
-            self.ui
-                .toolbar
-                .refresh
-                .connect_clicked(move |_| this.refresh_drives());
-        }
-        {
-            let this = self.clone();
-            self.ui
-                .toolbar
-                .eject
-                .connect_clicked(move |_| this.eject_selected_disc());
-        }
-        {
-            let this = self.clone();
-            self.ui
-                .toolbar
-                .preferences
-                .connect_clicked(move |_| this.show_preferences());
         }
         {
             let this = self.clone();
@@ -309,6 +267,8 @@ impl Controller {
         for (action, accelerators) in [
             ("win.open-file", &["<Primary>o"][..]),
             ("win.open-folder", &["<Primary><Shift>o"][..]),
+            ("win.open-disc", &["<Primary>d"][..]),
+            ("win.eject", &["<Primary>e"][..]),
             ("win.refresh", &["F5"][..]),
             ("win.preferences", &["<Primary>comma"][..]),
             ("win.cancel", &["Escape"][..]),
@@ -518,11 +478,6 @@ impl Controller {
         let drive = self.selected_drive();
         let busy = self.state.borrow().is_busy();
         let ready = drive.as_ref().is_some_and(drive_is_ready);
-        let icon = drive
-            .as_ref()
-            .filter(|_| ready)
-            .map(|drive| drive.media_kind.icon_name())
-            .unwrap_or("media-optical-symbolic");
         let ui_state = match drive.as_ref() {
             Some(drive) if drive_is_ready(drive) => DiscUiState::Ready {
                 kind: drive.media_kind,
@@ -534,8 +489,6 @@ impl Controller {
         let enabled = ready && !busy;
         self.ui.content.set_disc_state(ui_state.clone(), enabled);
         self.ui.source.set_disc_state(ui_state, enabled);
-        self.ui.toolbar.open_disc.set_icon_name(icon);
-        self.ui.toolbar.open_disc.set_sensitive(enabled);
         let open_tooltip = if ready {
             drive
                 .as_ref()
@@ -548,17 +501,21 @@ impl Controller {
         };
         self.ui.source.open.set_tooltip_text(Some(&open_tooltip));
         self.ui.source.open.set_sensitive(enabled);
-        self.ui
-            .toolbar
-            .eject
-            .set_sensitive(!busy && drive.as_ref().is_some_and(|drive| drive.media_present));
-        if let Some(action) = self
-            .ui
-            .window
-            .lookup_action("open-disc")
-            .and_then(|action| action.downcast::<gio::SimpleAction>().ok())
-        {
-            action.set_enabled(enabled);
+        for (name, enabled) in [
+            ("open-disc", enabled),
+            (
+                "eject",
+                !busy && drive.as_ref().is_some_and(|drive| drive.media_present),
+            ),
+        ] {
+            if let Some(action) = self
+                .ui
+                .window
+                .lookup_action(name)
+                .and_then(|action| action.downcast::<gio::SimpleAction>().ok())
+            {
+                action.set_enabled(enabled);
+            }
         }
     }
 
@@ -629,7 +586,7 @@ impl Controller {
         self.start_scan_with_origin(path, true);
     }
 
-    fn identify_from_metadata_link(&self) {
+    fn identify_from_metadata_link(&self, reload: bool) {
         if self.state.borrow().is_busy() {
             return;
         }
@@ -641,47 +598,169 @@ impl Controller {
                 return;
             }
         };
-        let path =
-            {
-                let state = self.state.borrow();
-                let Some(catalog) = state.catalog.as_ref().filter(|catalog| {
-                    matches!(catalog.source.kind, DiscKind::Dvd | DiscKind::BluRay)
-                }) else {
-                    self.show_error(
-                        "No video disc is open",
-                        "Open a DVD or Blu-ray before applying a metadata link.",
-                    );
-                    return;
-                };
-                catalog.source.path.clone()
+        let path = {
+            let state = self.state.borrow();
+            let Some(catalog) = state.catalog.as_ref().filter(|catalog| {
+                matches!(catalog.source.kind, DiscKind::Dvd | DiscKind::BluRay)
+                    || catalog.titles.iter().any(|title| {
+                        title
+                            .tracks
+                            .iter()
+                            .any(|track| track.kind == media_rip_core::StreamKind::Video)
+                    })
+            }) else {
+                self.show_error(
+                    "No video disc is open",
+                    "Open a DVD or Blu-ray before applying a metadata link.",
+                );
+                return;
             };
-        let backup = self.state.borrow().catalog.clone().map(Box::new);
-        self.state.borrow_mut().reidentification_backup = backup;
+            catalog.source.path.clone()
+        };
         self.ui.messages.append(&format!(
             "Refreshing metadata using the selected {provider} identity."
         ));
-        self.start_scan_with_origin(path, true);
+        if reload {
+            let backup = self.state.borrow().catalog.clone().map(Box::new);
+            self.state.borrow_mut().reidentification_backup = backup;
+            self.start_scan_with_origin(path, true);
+        } else {
+            self.identify_loaded_source();
+        }
+    }
+
+    fn identify_loaded_source(&self) {
+        let token = CancellationToken::default();
+        let (catalog, options) = {
+            let mut state = self.state.borrow_mut();
+            let Some(catalog) = state.catalog.clone() else {
+                return;
+            };
+            let options = ScanOptions {
+                allow_online_access: state.settings.general.allow_online_access,
+                tvmaze_enabled: state.settings.integrations.tvmaze_enabled,
+                tmdb_access_token: nonempty_owned(&state.settings.integrations.tmdb_access_token),
+                tvdb_api_key: nonempty_owned(&state.settings.integrations.tvdb_api_key),
+                tvdb_subscriber_pin: nonempty_owned(
+                    &state.settings.integrations.tvdb_subscriber_pin,
+                ),
+                video_metadata_url: Some(self.ui.source.metadata_url.text().trim().to_owned()),
+                ..Default::default()
+            };
+            state.cancel_metadata_refresh();
+            state.busy = BusyState::Scanning;
+            state.cancellation = Some(token.clone());
+            (catalog, options)
+        };
+        self.ui.set_busy(true);
+        self.ui.progress.set_fraction(0.0);
+        self.ui.progress.set_text(Some("Loading metadata…"));
+        self.ui.progress_title.set_text("Identifying loaded source");
+        self.ui.progress_detail.set_text("");
+        self.ui.set_status("Loading metadata…", None);
+        self.update_disc_controls();
+        update_workflow_controls(&self.ui, &self.state.borrow());
+        let (events, receiver) = mpsc::channel();
+        *self.worker_events.borrow_mut() = Some(receiver);
+        thread::spawn(move || {
+            let result = media_rip_engine::identify_loaded_catalog(catalog, &options, &token);
+            let event = if token.is_cancelled() {
+                EngineEvent::ScanCancelled
+            } else {
+                match result {
+                    Ok(catalog) => EngineEvent::MetadataIdentified(Box::new(catalog)),
+                    Err(error) => EngineEvent::MetadataIdentificationFailed(error),
+                }
+            };
+            let _ = events.send(event);
+        });
+    }
+
+    fn show_unidentified_dialog(&self) {
+        let dialog = gtk::MessageDialog::builder()
+            .transient_for(&self.ui.window)
+            .modal(true)
+            .message_type(gtk::MessageType::Question)
+            .text("Not identified")
+            .secondary_text("No metadata match was found. Search for a title, or continue to selection without metadata.")
+            .build();
+        dialog.set_widget_name("unidentified-source");
+        dialog.add_button("Continue without metadata", gtk::ResponseType::Cancel);
+        dialog.add_button("Search", gtk::ResponseType::Accept);
+        dialog.set_default_response(gtk::ResponseType::Accept);
+        crate::ui::space_dialog_actions(
+            &dialog,
+            &[gtk::ResponseType::Cancel, gtk::ResponseType::Accept],
+        );
+        let this = self.clone();
+        dialog.connect_response(move |dialog, response| {
+            dialog.close();
+            if this.state.borrow().is_busy() || this.state.borrow().catalog.is_none() {
+                return;
+            }
+            if response == gtk::ResponseType::Accept {
+                this.open_identification_dialog(true);
+            } else {
+                this.ui.set_workflow_step(WorkflowStep::Select);
+                this.ui
+                    .set_source_summary(this.state.borrow().catalog.as_ref());
+            }
+        });
+        dialog.present();
     }
 
     fn show_identification_dialog(&self) {
+        self.open_identification_dialog(false);
+    }
+
+    fn open_identification_dialog(&self, continue_on_cancel: bool) {
         if self.state.borrow().is_busy() {
             return;
         }
         let current_query = self.ui.source.metadata_url.text().to_string();
-        let identification = IdentificationDialog::new(&self.ui.window, &current_query);
+        let (initial_kind, options) = {
+            let state = self.state.borrow();
+            let initial_kind = if state.catalog.as_ref().is_some_and(|catalog| {
+                catalog.titles.iter().any(|title| {
+                    title.selected
+                        && media_rip_core::model::metadata::MetadataKind::for_title(catalog, title)
+                            == media_rip_core::model::metadata::MetadataKind::Television
+                })
+            }) {
+                media_rip_engine::VideoSearchKind::Television
+            } else {
+                media_rip_engine::VideoSearchKind::Movie
+            };
+            let settings = &state.settings;
+            let options = ScanOptions {
+                allow_online_access: settings.general.allow_online_access,
+                tvmaze_enabled: settings.integrations.tvmaze_enabled,
+                tmdb_access_token: nonempty_owned(&settings.integrations.tmdb_access_token),
+                tvdb_api_key: nonempty_owned(&settings.integrations.tvdb_api_key),
+                tvdb_subscriber_pin: nonempty_owned(&settings.integrations.tvdb_subscriber_pin),
+                ..Default::default()
+            };
+            (initial_kind, options)
+        };
+        let identification =
+            IdentificationDialog::new(&self.ui.window, &current_query, initial_kind, options);
         identification.query.grab_focus();
         let dialog = identification.dialog.clone();
         let this = self.clone();
         dialog.connect_response(move |dialog, response| {
             if response == gtk::ResponseType::Accept {
-                this.ui
-                    .source
-                    .metadata_url
-                    .set_text(identification.query.text().trim());
-                dialog.close();
-                this.identify_from_metadata_link();
+                if let Some(url) = identification.selected_metadata_url() {
+                    this.ui.source.metadata_url.set_text(&url);
+                    dialog.close();
+                    this.identify_from_metadata_link(identification.reload_requested());
+                }
             } else {
                 dialog.close();
+                if continue_on_cancel {
+                    this.ui.set_workflow_step(WorkflowStep::Select);
+                    this.ui
+                        .set_source_summary(this.state.borrow().catalog.as_ref());
+                }
             }
         });
         dialog.present();
@@ -850,7 +929,7 @@ impl Controller {
             self.ui.cancel.set_sensitive(false);
             let ripping = self.state.borrow().busy == BusyState::Ripping;
             if ripping {
-                self.ui.output_review.set_cancelling();
+                self.ui.progress_title.set_text("Cancelling…");
                 self.ui.set_status("Cancelling…", None);
             } else {
                 self.ui.set_status("Cancelling…", None);
@@ -938,6 +1017,41 @@ impl Controller {
                     .set_text(Some(&format!("Title {current_title} of {title_count}")));
                 self.ui.progress_title.set_text("Reading source content");
                 self.ui.progress_detail.set_text("");
+            }
+            EngineEvent::MetadataIdentified(catalog) => {
+                {
+                    let mut state = self.state.borrow_mut();
+                    state.episode_metadata = episode_metadata_context(&catalog);
+                    state.metadata_step_complete = catalog.video_metadata_suggestions.is_empty();
+                    state.metadata_skipped = false;
+                    state.catalog = Some(*catalog);
+                }
+                if self.finish_busy() {
+                    return;
+                }
+                if let Some(catalog) = self.state.borrow().catalog.as_ref() {
+                    self.ui
+                        .source
+                        .show_open_source(&catalog.source.path, &catalog.source.name);
+                }
+                self.render();
+                self.ui.set_workflow_step(WorkflowStep::Metadata);
+                self.ui.set_status(
+                    "Metadata loaded. Review the proposed changes.",
+                    Some("status-success"),
+                );
+            }
+            EngineEvent::MetadataIdentificationFailed(error) => {
+                if self.finish_busy() {
+                    return;
+                }
+                self.show_error("Could not identify source", &error);
+                self.render();
+                self.ui.set_workflow_step(WorkflowStep::Identify);
+                self.ui
+                    .source
+                    .identity_status
+                    .set_text("Identification failed. Search again or continue without metadata.");
             }
             EngineEvent::ScanFinished(catalog) => {
                 let mut catalog = *catalog;
@@ -1063,7 +1177,34 @@ impl Controller {
                 self.ui
                     .set_status("Source opened successfully.", Some("status-success"));
                 self.render();
-                self.ui.set_workflow_step(WorkflowStep::Select);
+                let unidentified_video =
+                    self.state.borrow().catalog.as_ref().is_some_and(|catalog| {
+                        catalog.titles.iter().any(|title| {
+                            title
+                                .tracks
+                                .iter()
+                                .any(|track| track.kind == media_rip_core::StreamKind::Video)
+                        }) && catalog.video_metadata_suggestions.is_empty()
+                            && catalog.video_episode_context.is_none()
+                            && catalog
+                                .titles
+                                .iter()
+                                .all(|title| title.video_metadata.is_none())
+                    });
+                self.ui.set_workflow_step(if unidentified_video {
+                    WorkflowStep::Identify
+                } else {
+                    WorkflowStep::Select
+                });
+                if unidentified_video {
+                    self.ui.source.identity_status.set_text("No metadata found. Search for a title, or choose tracks to continue without metadata.");
+                    self.ui.source.identify.set_label("Search for metadata…");
+                    self.ui.set_status(
+                        "Source loaded. Search for metadata or continue without it.",
+                        None,
+                    );
+                    self.show_unidentified_dialog();
+                }
                 self.ui
                     .set_source_summary(self.state.borrow().catalog.as_ref());
                 if should_auto_save && metadata_required && !metadata_available {
@@ -1187,8 +1328,6 @@ impl Controller {
                     .append(&format!("Saving {title_count} selected item(s)."));
             }
             EngineEvent::RipPhaseChanged { phase, title_name } => {
-                self.ui.progress.set_fraction(0.0);
-                self.ui.progress.set_text(Some(phase.description()));
                 self.ui
                     .progress_title
                     .set_text(&format!("{}: {title_name}", phase.description()));
@@ -1196,12 +1335,16 @@ impl Controller {
             }
             EngineEvent::RipProgress(progress) => {
                 self.ui.output_review.update_progress(&progress);
-                self.ui.progress.set_fraction(progress.fraction);
+                let completed = progress.current_title.saturating_sub(1) as f64;
+                let overall = ((completed + progress.fraction)
+                    / progress.title_count.max(1) as f64)
+                    .clamp(0.0, 1.0);
+                self.ui.progress.set_fraction(overall);
                 self.ui
                     .progress
-                    .set_text(Some(&format!("{:.0}%", progress.fraction * 100.0)));
+                    .set_text(Some(&format!("{:.0}% complete", overall * 100.0)));
                 self.ui.progress_title.set_text(&format!(
-                    "Saving item {} of {} — {}",
+                    "Ripping file {} of {} · {}",
                     progress.current_title, progress.title_count, progress.title_name
                 ));
                 let mut details = vec![
@@ -1798,6 +1941,41 @@ impl Controller {
             self.refresh_episode_context_season(season);
             return;
         }
+        if let InfoAction::AssignEpisodes(assignments) = action {
+            let mut state = self.state.borrow_mut();
+            let Some(context) = state.episode_metadata.clone() else {
+                return;
+            };
+            let extension = state.output_profile.extension();
+            for (title_id, _) in &assignments {
+                remember_video_metadata_state(&mut state, *title_id);
+            }
+            let Some(catalog) = state.catalog.as_mut() else {
+                return;
+            };
+            let mut count = 0;
+            for (title_id, episode) in assignments {
+                if catalog
+                    .titles
+                    .iter()
+                    .any(|title| title.id == title_id && title.selected)
+                    && assign_video_episode(catalog, &context, title_id, episode, extension)
+                {
+                    count += 1;
+                }
+            }
+            if count > 0 && catalog.video_metadata_suggestions.is_empty() {
+                state.metadata_step_complete = true;
+                state.metadata_skipped = false;
+            }
+            drop(state);
+            self.render();
+            self.ui.set_status(
+                &format!("Assigned metadata to {count} episode(s)."),
+                Some("status-success"),
+            );
+            return;
+        }
         let mut state = self.state.borrow_mut();
         let settings = state.settings.clone();
         let file_name_template = settings.audio_cd.file_name_template.clone();
@@ -1942,7 +2120,7 @@ impl Controller {
                 true
             }
             InfoAction::ChooseCoverArt { .. } => unreachable!(),
-            InfoAction::SetEpisodeSeason(_) => unreachable!(),
+            InfoAction::SetEpisodeSeason(_) | InfoAction::AssignEpisodes(_) => unreachable!(),
         };
         if let Some(previous) = previous_movie_names.as_ref() {
             settings.refresh_movie_file_names(catalog, previous, output_extension);
@@ -2549,7 +2727,7 @@ fn info_action_title_id(action: &InfoAction) -> Option<u32> {
         InfoAction::ChooseCoverArt { title_id } | InfoAction::RemoveCoverArt { title_id } => {
             *title_id
         }
-        InfoAction::SetEpisodeSeason(_) => None,
+        InfoAction::SetEpisodeSeason(_) | InfoAction::AssignEpisodes(_) => None,
     }
 }
 

@@ -1,7 +1,7 @@
-use gtk::prelude::*;
+use gtk::{gio, prelude::*};
 
 use super::components::{
-    ContentTree, MessagesPanel, MetadataPanel, OutputReview, Sidebar, SourceBar, Toolbar,
+    ContentTree, MessagesPanel, MetadataPanel, OutputReview, Sidebar, SourceBar, menu_bar,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,7 +15,6 @@ pub(crate) enum WorkflowStep {
 #[derive(Debug, Clone)]
 pub(crate) struct MainWindow {
     pub window: gtk::ApplicationWindow,
-    pub toolbar: Toolbar,
     pub source: SourceBar,
     pub content: ContentTree,
     pub metadata: MetadataPanel,
@@ -53,8 +52,7 @@ impl MainWindow {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         window.set_child(Some(&root));
 
-        let toolbar = Toolbar::new();
-        root.append(&toolbar.root);
+        root.append(&menu_bar());
         let source = SourceBar::new();
 
         let workflow = gtk::Grid::new();
@@ -70,67 +68,73 @@ impl MainWindow {
         workflow.attach(&workflow_output_button, 3, 0, 1, 1);
         root.append(&workflow);
 
-        let page_header = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        let page_header = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         page_header.add_css_class("workflow-header");
         let source_summary = gtk::Label::new(None);
-        source_summary.set_xalign(0.0);
+        source_summary.set_xalign(1.0);
+        source_summary.set_max_width_chars(28);
         source_summary.set_ellipsize(gtk::pango::EllipsizeMode::End);
         source_summary.add_css_class("row-detail");
         source_summary.set_visible(false);
         let page_title = gtk::Label::new(Some("Open a source"));
         page_title.set_xalign(0.0);
-        page_title.add_css_class("preflight-title");
-        let page_hint = gtk::Label::new(None);
+        page_title.add_css_class("workflow-card-title");
+        let page_hint = gtk::Label::new(Some("Choose a disc, file or folder."));
         page_hint.set_xalign(0.0);
         page_hint.set_wrap(true);
+        page_hint.set_hexpand(true);
         page_hint.add_css_class("row-detail");
-        page_header.append(&source_summary);
         page_header.append(&page_title);
         page_header.append(&page_hint);
+        page_header.append(&source_summary);
         root.append(&page_header);
 
         let content = ContentTree::new();
         let sidebar = Sidebar::new();
         let workflow_stack = gtk::Stack::builder()
+            .hhomogeneous(false)
+            .vhomogeneous(false)
             .transition_type(gtk::StackTransitionType::SlideLeftRight)
             .transition_duration(160)
             .hexpand(true)
             .vexpand(true)
             .build();
 
-        let identify_page = workflow_page();
         source.root.set_halign(gtk::Align::Center);
         source.root.set_valign(gtk::Align::Center);
-        identify_page.append(&source.root);
-        workflow_stack.add_named(&identify_page, Some("identify"));
+        let source_scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Automatic)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .hexpand(true)
+            .vexpand(true)
+            .child(&source.root)
+            .build();
+        source_scroll.add_css_class("workflow-page");
+        workflow_stack.add_named(&source_scroll, Some("identify"));
 
-        content.stack.add_css_class("panel");
-        let select_page = workflow_page();
-        select_page.append(&content.stack);
-        workflow_stack.add_named(&select_page, Some("select"));
+        content.stack.add_css_class("workflow-page");
+        workflow_stack.add_named(&content.stack, Some("select"));
 
         let metadata = MetadataPanel::new();
-        let metadata_page = workflow_page();
-        metadata_page.append(&metadata.root);
-        workflow_stack.add_named(&metadata_page, Some("metadata"));
+        metadata.root.add_css_class("workflow-page");
+        workflow_stack.add_named(&metadata.root, Some("metadata"));
 
         let output_review = OutputReview::new();
-        let output_page = workflow_page();
         let output_layout = gtk::Paned::new(gtk::Orientation::Horizontal);
         output_layout.add_css_class("output-layout");
         output_layout.set_hexpand(true);
         output_layout.set_vexpand(true);
         output_layout.set_wide_handle(false);
         output_layout.set_resize_start_child(true);
-        output_layout.set_shrink_start_child(false);
+        output_layout.set_shrink_start_child(true);
         output_layout.set_resize_end_child(false);
         output_layout.set_shrink_end_child(false);
         output_layout.set_position(700);
-        output_review.root.set_size_request(500, -1);
+        output_review.root.set_size_request(240, -1);
         output_layout.set_start_child(Some(&output_review.root));
         let output_config = gtk::Box::new(gtk::Orientation::Vertical, 0);
         output_config.add_css_class("output-config");
-        output_config.set_size_request(340, -1);
+        output_config.set_size_request(300, -1);
         sidebar.root.set_halign(gtk::Align::Fill);
         sidebar.root.set_vexpand(true);
         output_config.append(&sidebar.root);
@@ -140,8 +144,8 @@ impl MainWindow {
         output_actions.append(&sidebar.rip);
         output_config.append(&output_actions);
         output_layout.set_end_child(Some(&output_config));
-        output_page.append(&output_layout);
-        workflow_stack.add_named(&output_page, Some("output"));
+        output_layout.add_css_class("workflow-page");
+        workflow_stack.add_named(&output_layout, Some("output"));
         root.append(&workflow_stack);
         let navigation = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         navigation.add_css_class("workflow-navigation");
@@ -150,12 +154,12 @@ impl MainWindow {
         spacer.set_hexpand(true);
         let workflow_next = gtk::Button::with_label("Continue");
         workflow_next.add_css_class("suggested-action");
+        let messages = MessagesPanel::new();
         navigation.append(&workflow_back);
+        navigation.append(&messages.toggle);
         navigation.append(&spacer);
         navigation.append(&workflow_next);
         root.append(&navigation);
-        let messages = MessagesPanel::new();
-        root.append(&messages.root);
 
         let progress_area = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         progress_area.add_css_class("progress-area");
@@ -185,6 +189,7 @@ impl MainWindow {
         progress_area.append(&progress_labels);
         progress_area.append(&cancel);
         root.append(&progress_area);
+        root.append(&messages.root);
 
         let status = gtk::Label::new(Some("Ready"));
         status.set_xalign(0.0);
@@ -193,7 +198,6 @@ impl MainWindow {
 
         Self {
             window,
-            toolbar,
             source,
             content,
             metadata,
@@ -228,23 +232,26 @@ impl MainWindow {
         };
         self.workflow_stack.set_visible_child_name(name);
         let (title, hint) = match step {
-            WorkflowStep::Identify => (
-                "Open a source",
-                "Choose a disc, or use Open files or Open folder in the toolbar.",
-            ),
+            WorkflowStep::Identify => ("Open a source", "Choose a disc, file or folder."),
             WorkflowStep::Select => (
                 "Choose what to rip",
-                "Select the items to save. Expand an item to choose its audio and subtitle streams.",
+                "Select items and expand them to choose streams.",
             ),
             WorkflowStep::Metadata => (
                 "Review metadata",
-                "Check the selected items. Review proposed changes or keep the current metadata.",
+                "Review proposed changes or edit current metadata.",
             ),
             WorkflowStep::Output => (
                 "Review and rip",
-                "Check filenames, choose a format and destination, then start the rip.",
+                "Check filenames, format and destination, then rip.",
             ),
         };
+        self.workflow_next.set_label(match step {
+            WorkflowStep::Identify => "Choose tracks",
+            WorkflowStep::Select => "Review metadata",
+            WorkflowStep::Metadata => "Review output",
+            WorkflowStep::Output => "Continue",
+        });
         self.page_title.set_text(title);
         self.page_hint.set_text(hint);
         self.refresh_navigation();
@@ -281,6 +288,7 @@ impl MainWindow {
                     Some(MetadataKind::Music) => "Music",
                     Some(MetadataKind::Audiobook) => "Audiobook",
                     Some(MetadataKind::Video) => "Video",
+                    Some(MetadataKind::Extras) => "Extras",
                     None => "Nothing selected",
                 }
             } else {
@@ -295,17 +303,32 @@ impl MainWindow {
             self.source_summary.set_text(&summary);
             self.source_summary.set_tooltip_text(Some(&summary));
             if self.workflow_stack.visible_child_name().as_deref() == Some("metadata") {
-                self.page_hint.set_text(if catalog.video_metadata_suggestions.is_empty() && catalog.audio_metadata_candidates.is_empty() {
-                    "Edit details if needed, then continue to output. Changes are saved as you type."
-                } else {
-                    "Review the proposed changes below. Apply a match or keep the current metadata to continue."
-                });
+                self.page_hint.set_text(
+                    if first == Some(MetadataKind::Television)
+                        && catalog
+                            .video_episode_context
+                            .as_ref()
+                            .is_some_and(|context| !context.choices.is_empty())
+                    {
+                        "Match disc titles to episodes, then apply metadata."
+                    } else if catalog.video_metadata_suggestions.is_empty()
+                        && catalog.audio_metadata_candidates.is_empty()
+                    {
+                        "Edit details, then continue. Changes save as you type."
+                    } else {
+                        "Apply proposed changes or keep current metadata."
+                    },
+                );
             }
             if self.workflow_stack.visible_child_name().as_deref() == Some("select") {
                 self.page_hint.set_text(match first {
-                    Some(MetadataKind::Music) => "Select the tracks to save. Review album and artist details in Metadata.",
-                    Some(MetadataKind::Audiobook) => "Select the audio items to save. Review book, author and narrator details in Metadata.",
-                    _ => "Select the items to save. Expand an item to choose its audio and subtitle streams.",
+                    Some(MetadataKind::Music) => {
+                        "Select tracks to save. Edit album details in Metadata."
+                    }
+                    Some(MetadataKind::Audiobook) => {
+                        "Select audio to save. Edit book details in Metadata."
+                    }
+                    _ => "Select items and expand them to choose streams.",
                 });
             }
         }
@@ -334,7 +357,10 @@ impl MainWindow {
         self.workflow_back.set_visible(back.is_some());
         self.workflow_back
             .set_sensitive(back.is_some_and(|button| button.is_sensitive()));
-        self.workflow_next.set_visible(next.is_some());
+        let awaiting_metadata =
+            step.as_deref() == Some("metadata") && !self.workflow_output_button.is_sensitive();
+        self.workflow_next
+            .set_visible(next.is_some() && !awaiting_metadata);
         self.workflow_next
             .set_sensitive(next.is_some_and(|button| button.is_sensitive()));
         self.workflow_next.set_label(label);
@@ -348,10 +374,15 @@ impl MainWindow {
     }
 
     pub fn set_busy(&self, busy: bool) {
-        self.toolbar.open_file.set_sensitive(!busy);
-        self.toolbar.open_folder.set_sensitive(!busy);
-        self.toolbar.refresh.set_sensitive(!busy);
-        self.toolbar.preferences.set_sensitive(!busy);
+        for name in ["open-file", "open-folder", "refresh", "preferences"] {
+            if let Some(action) = self
+                .window
+                .lookup_action(name)
+                .and_then(|action| action.downcast::<gio::SimpleAction>().ok())
+            {
+                action.set_enabled(!busy);
+            }
+        }
         self.source.drives.set_sensitive(!busy);
         self.source.metadata_url.set_sensitive(!busy);
         self.source.identify.set_sensitive(!busy);
@@ -395,10 +426,4 @@ fn workflow_stage(number: &str, title: &str) -> gtk::Button {
     stage.append(&title);
     button.set_child(Some(&stage));
     button
-}
-
-fn workflow_page() -> gtk::Box {
-    let page = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    page.add_css_class("workflow-page");
-    page
 }

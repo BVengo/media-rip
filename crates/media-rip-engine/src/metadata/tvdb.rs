@@ -67,6 +67,8 @@ struct SearchResult {
     title: Option<String>,
     name_translated: Option<String>,
     tvdb_id: String,
+    slug: Option<String>,
+    image_url: Option<String>,
     #[serde(rename = "type")]
     media_type: String,
     year: Option<String>,
@@ -119,6 +121,42 @@ impl<'a> TvdbClient<'a> {
             cache,
             cancellation,
         }
+    }
+
+    pub(super) fn search_choices(
+        &self,
+        query: &str,
+        kind: super::search::VideoSearchKind,
+    ) -> Result<Vec<super::search::VideoSearchCandidate>, String> {
+        use super::search::{VideoSearchCandidate, VideoSearchKind};
+        let (media_type, prefix) = match kind {
+            VideoSearchKind::Movie => (TvdbMediaType::Movie, "movies"),
+            VideoSearchKind::Television => (TvdbMediaType::Tv, "series"),
+        };
+        Ok(self
+            .search_results(query, None, Some(media_type))?
+            .into_iter()
+            .filter_map(|result| {
+                if result.media_type != media_type.search_type() {
+                    return None;
+                }
+                let slug = result.slug?;
+                let metadata_url = format!("https://thetvdb.com/{prefix}/{slug}");
+                super::parse_video_metadata_link(&metadata_url).ok()?;
+                let title = result.name_translated.or(result.name).or(result.title)?;
+                if title.trim().is_empty() {
+                    return None;
+                }
+                Some(VideoSearchCandidate {
+                    title,
+                    year: result.year.and_then(|year| year.parse().ok()),
+                    kind,
+                    provider: "TVDB",
+                    metadata_url,
+                    artwork_path: result.image_url,
+                })
+            })
+            .collect())
     }
 
     pub(super) fn search_exact(&self, query: &str) -> Result<Option<TvdbMatch>, String> {
@@ -551,6 +589,8 @@ mod tests {
             title: None,
             name_translated: None,
             tvdb_id: "movie-1".into(),
+            slug: None,
+            image_url: None,
             media_type: "movie".into(),
             year: Some("2008".into()),
         };

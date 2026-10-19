@@ -4,10 +4,68 @@ use super::{DiscKind, MediaCatalog, StreamKind, Title, VideoMetadata};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetadataKind {
     Video,
+    Extras,
     Film,
     Television,
     Music,
     Audiobook,
+}
+
+/// Structural hints choose an editor, never a provider identity or episode number.
+/// Ignore repeated paths and suspect DVD layouts when comparing durations.
+pub fn inferred_video_kind(titles: &[Title], title: &Title) -> Option<MetadataKind> {
+    if title
+        .dvd
+        .as_ref()
+        .is_some_and(|dvd| !dvd.warnings.is_empty())
+    {
+        return None;
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut distinct = titles
+        .iter()
+        .filter(|item| {
+            item.duration_ms > 0
+                && item.dvd.as_ref().is_none_or(|dvd| dvd.warnings.is_empty())
+                && item
+                    .duplicate_key
+                    .as_ref()
+                    .is_none_or(|key| seen.insert(key))
+        })
+        .collect::<Vec<_>>();
+    distinct.sort_by_key(|item| std::cmp::Reverse(item.duration_ms));
+    if let Some(feature) = distinct.first() {
+        let remaining = distinct
+            .iter()
+            .skip(1)
+            .fold(0_u64, |sum, item| sum.saturating_add(item.duration_ms));
+        let runner_up = distinct.get(1).map_or(0, |item| item.duration_ms);
+        if feature.duration_ms >= 60 * 60_000
+            && feature.duration_ms >= runner_up.saturating_mul(2)
+            // Allow authoring gaps in play-all compilations.
+            && feature.duration_ms > remaining.saturating_add(3 * 60_000)
+            && (feature.id == title.id
+                || (feature.duplicate_key.is_some()
+                    && feature.duplicate_key == title.duplicate_key))
+        {
+            return Some(MetadataKind::Film);
+        }
+    }
+    // Similar episode-length paths suggest television. A play-all title cannot
+    // satisfy this range merely by containing the complete episode collection.
+    if (15 * 60_000..=75 * 60_000).contains(&title.duration_ms) {
+        let comparable = distinct
+            .iter()
+            .filter(|item| {
+                (15 * 60_000..=75 * 60_000).contains(&item.duration_ms)
+                    && item.duration_ms.abs_diff(title.duration_ms) <= title.duration_ms / 5
+            })
+            .count();
+        if comparable >= 2 {
+            return Some(MetadataKind::Television);
+        }
+    }
+    None
 }
 
 impl MetadataKind {
@@ -53,6 +111,7 @@ impl MetadataKind {
             }
             match tag.value.trim().to_ascii_lowercase().as_str() {
                 "video" => Some(Self::Video),
+                "extra" | "extras" | "bonus" => Some(Self::Extras),
                 "film" | "movie" => Some(Self::Film),
                 "tv" | "television" => Some(Self::Television),
                 _ => None,
@@ -88,7 +147,7 @@ impl MetadataKind {
                 if catalog.video_episode_context.is_some() {
                     Self::Television
                 } else {
-                    Self::Video
+                    inferred_video_kind(&catalog.titles, title).unwrap_or(Self::Video)
                 }
             })
     }
@@ -102,7 +161,8 @@ impl MetadataKind {
         {
             Some("mainmovie" | "movie" | "film") => Some(Self::Film),
             Some("episode" | "probableepisode" | "series" | "tv") => Some(Self::Television),
-            Some("video" | "extra" | "extras" | "bonus") => Some(Self::Video),
+            Some("video") => Some(Self::Video),
+            Some("extra" | "extras" | "bonus") => Some(Self::Extras),
             _ if metadata.season.is_some() || metadata.episode.is_some() => Some(Self::Television),
             _ => None,
         }
@@ -111,6 +171,7 @@ impl MetadataKind {
     pub fn label(self) -> &'static str {
         match self {
             Self::Video => "Video metadata",
+            Self::Extras => "Extras metadata",
             Self::Film => "Film metadata",
             Self::Television => "Television metadata",
             Self::Music => "Music metadata",
@@ -120,7 +181,7 @@ impl MetadataKind {
 
     pub fn fields(self) -> &'static [(&'static str, &'static str)] {
         match self {
-            Self::Video | Self::Film => &[
+            Self::Video | Self::Extras | Self::Film => &[
                 ("title", "Title"),
                 ("date", "Release date"),
                 ("genre", "Genre"),

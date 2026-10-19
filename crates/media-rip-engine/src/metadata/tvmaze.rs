@@ -71,6 +71,14 @@ impl<'a> TvmazeClient<'a> {
         }
     }
 
+    pub(super) fn search_choices(&self, query: &str) -> Result<Vec<TvmazeMatch>, String> {
+        let results: Vec<SearchResult> = self.get_json("/search/shows", &[("q", query)])?;
+        Ok(results
+            .into_iter()
+            .map(|result| result.show.into_match())
+            .collect())
+    }
+
     pub(super) fn search_exact(&self, query: &str) -> Result<Option<TvmazeMatch>, String> {
         let results: Vec<SearchResult> = self.get_json("/search/shows", &[("q", query)])?;
         let query_year = year_in(query);

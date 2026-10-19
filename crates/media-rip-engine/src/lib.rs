@@ -15,7 +15,11 @@ mod storage;
 pub use storage::atomic_write;
 
 pub use engine::OpenMediaEngine;
-pub use metadata::{EpisodeSeasonOptions, refresh_episode_season, video_metadata_link_provider};
+pub use metadata::{
+    EpisodeSeasonOptions, VideoSearchCandidate, VideoSearchKind, identify_loaded_catalog,
+    load_video_search_artwork, refresh_episode_season, search_video_metadata,
+    video_metadata_link_provider,
+};
 pub use platform::discover_optical_drives;
 pub use probe::{ToolAvailability, tool_availability};
 

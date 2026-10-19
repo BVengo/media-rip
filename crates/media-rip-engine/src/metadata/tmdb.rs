@@ -11,7 +11,7 @@ const CACHE_NAMESPACE: &str = "tmdb-raw-v1";
 const IMAGE_ROOT: &str = "https://image.tmdb.org/t/p/w500";
 const MAX_ARTWORK_BYTES: u64 = 10 * 1024 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MediaType {
     Movie,
     Tv,
@@ -59,6 +59,7 @@ struct SearchResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SearchResult {
     id: u64,
+    #[serde(default)]
     media_type: String,
     title: Option<String>,
     name: Option<String>,
@@ -105,6 +106,39 @@ impl<'a> TmdbClient<'a> {
         let path = format!("/{}/{id}", media_type.as_str());
         let details: DetailsResponse = self.get_json(&path, &[])?;
         Ok(match_from_details(details, media_type))
+    }
+
+    pub(super) fn search_choices(
+        &self,
+        query: &str,
+        media_type: MediaType,
+    ) -> Result<Vec<TmdbMatch>, String> {
+        let response: SearchResponse = self.get_json(
+            &format!("/search/{}", media_type.as_str()),
+            &[
+                ("query", query),
+                ("include_adult", "false"),
+                ("language", "en-US"),
+            ],
+        )?;
+        Ok(response
+            .results
+            .into_iter()
+            .map(|result| {
+                let year = result.year();
+                TmdbMatch {
+                    id: result.id,
+                    media_type,
+                    title: result
+                        .title
+                        .or(result.name)
+                        .unwrap_or_else(|| "Unknown title".to_owned()),
+                    year,
+                    runtime_minutes: None,
+                    poster_path: result.poster_path,
+                }
+            })
+            .collect())
     }
 
     pub(super) fn search_exact(&self, query: &str) -> Result<Option<TmdbMatch>, String> {

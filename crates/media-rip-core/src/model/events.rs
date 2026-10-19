@@ -69,6 +69,8 @@ pub enum EngineEvent {
         source_title_id: String,
     },
     ScanFinished(Box<MediaCatalog>),
+    MetadataIdentified(Box<MediaCatalog>),
+    MetadataIdentificationFailed(String),
     ScanFailed(String),
     ScanCancelled,
     EpisodeSeasonRefreshed {
